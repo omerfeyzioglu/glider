@@ -29,6 +29,60 @@ f32 components. The persisted metric enum supports squared Euclidean and Manhatt
 distance, accumulated in f64. Exact search scans all live documents, sorts by
 ascending distance then ID, and returns at most k results.
 
+## Future / target architecture
+
+This section describes the direction of the project, not functionality that is
+already implemented. The target is a durable, object-storage-native vector
+search engine with a clear separation between authoritative state, derived
+indexes, and query execution.
+
+```text
+Client/API
+    -> query validation and planning
+    -> candidate generation (exact scan or ANN index)
+    -> filtering and exact reranking
+    -> deterministic top-k results
+
+Mutation path
+    -> single-writer commit protocol
+    -> immutable log/segment objects
+    -> versioned manifest publication
+    -> rebuildable in-memory and ANN indexes
+```
+
+The planned evolution is incremental:
+
+1. Keep the current exact search as the correctness baseline and benchmark it
+   with reproducible datasets, queries, seeds, metrics, and storage backends.
+2. Add immutable segments and compaction. Compaction may reorganize physical
+   objects, but must preserve logical results and must never make a partial
+   segment authoritative.
+3. Add filtering and an ANN candidate index. ANN is an optimization only: tests
+   and benchmarks compare it with exact search using recall@k, latency, and
+   resource/bytes-read measurements.
+4. Add an object-storage backend and query execution that accounts for remote
+   round trips and bytes transferred, not only CPU complexity.
+5. Consider concurrent writers, sharding, and replication only after the
+   single-writer durability and recovery model has measured limits and explicit
+   coordination semantics.
+
+### Target invariants
+
+- Authoritative state is versioned immutable data plus an explicitly published
+  manifest; indexes, caches, and ANN structures are derived and rebuildable.
+- Every publication has explicit acknowledgement, crash, recovery, and reader
+  visibility semantics. A reader never observes a partially published segment.
+- Exact search remains available as the correctness oracle for every ANN or
+  query-planning optimization.
+- Persisted formats, manifests, segments, and indexes have independent explicit
+  versions and compatibility rules.
+- Benchmark claims include the dataset, dimensions, metric, query count,
+  distribution, seed, backend, hardware, configuration, and measured output.
+
+The project should record durable architectural decisions here and record
+benchmark results separately as reproducible artifacts. This document is not a
+feature checklist or a promise to implement every referenced mechanism.
+
 ## Design principles
 
 - Database semantics remain independent of the storage provider; engine
