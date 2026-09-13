@@ -10,6 +10,7 @@ sha2 = "0.10"
 thiserror = "2"
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
 
 [[bench]]
