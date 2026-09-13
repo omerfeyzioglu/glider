@@ -87,6 +87,14 @@ code and tests.
 
 16. Keep the repository buildable and testable as the system evolves.
 
+17. Use a separate branch for each logical change and open a pull request
+   before merging into `main`. Use descriptive prefixes such as `feature/`,
+   `fix/`, `ci/`, `docs/`, `chore/`, or `refactor/`. Keep unrelated changes
+   out of the same branch. Do not create branches for read-only analysis,
+   explanations, or commands that make no repository changes. Group small
+   related documentation or maintenance edits into one branch instead of
+   creating a branch for every individual line.
+
 ## Reference systems
 
 Turbopuffer, SlateDB, OpenData, research papers, and other databases are
