@@ -79,3 +79,41 @@ fn process_exit_and_restart() {
     let db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
     assert_eq!(db.get(3), Some([7., 8.].as_slice()));
 }
+
+#[test]
+fn missing_or_short_seal_hides_only_an_undetectable_tail() {
+    // External damage, not a supported crash outcome for acknowledged data.
+    // All short seals are treated as unpublished, including arbitrary garbage.
+    for length in std::iter::once(None).chain((0..8).map(Some)) {
+        for internal in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("db");
+            let mut db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+            db.put(1, vec![1., 2.]).unwrap();
+            db.delete(1).unwrap();
+            if internal {
+                db.put(2, vec![3., 4.]).unwrap();
+            }
+            drop(db);
+            let seal = root.join("mutation-00000000000000000002-seal");
+            match length {
+                None => fs::remove_file(seal).unwrap(),
+                Some(n) => fs::write(seal, vec![b'X'; n]).unwrap(),
+            }
+            let recovered = Database::open(LocalStore::open(&root).unwrap(), config());
+            if internal {
+                assert!(matches!(recovered, Err(glider::Error::Corrupt(_))));
+            } else {
+                let mut db = recovered.unwrap();
+                // The lost tail delete resurrects the old value. Sequence 2 is
+                // reusable because no later object witnesses the missing delete.
+                assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+                db.put(2, vec![3., 4.]).unwrap();
+                drop(db);
+                let db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+                assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+                assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+            }
+        }
+    }
+}

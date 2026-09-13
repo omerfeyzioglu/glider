@@ -32,7 +32,7 @@ pub enum Error {
     Corrupt(String),
     #[error("object already exists: {0}")]
     Exists(String),
-    #[error("write outcome uncertain; reopen the database before writing again")]
+    #[error("write outcome uncertain; reopen storage and the database before writing again")]
     RecoveryRequired,
 }
 

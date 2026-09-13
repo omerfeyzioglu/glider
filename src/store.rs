@@ -9,7 +9,9 @@ use std::{
 
 /// Strongly consistent object operations within an exclusively owned namespace.
 /// Successful create means durable, complete bytes; errors may have committed.
-/// `get` and `list` expose only complete objects. Existing objects cannot change.
+/// `get` and `list` expose only complete, durable objects. After an uncertain
+/// create, a backend must stabilize visible objects or reject access until reopened.
+/// Existing objects cannot change.
 /// Listing must be complete, but need not be sorted. Missing/corrupt durable data
 /// is an error, never an excuse to serve a partially recovered database.
 pub trait ObjectStore {
@@ -20,8 +22,13 @@ pub trait ObjectStore {
 
 /// Development backend; callers must ensure exclusive ownership of this path,
 /// including across processes. Requires a filesystem honoring file/directory sync.
+/// After a publication error or panic, discard this handle and call `open` again;
+/// all object operations reject access until a fresh handle stabilizes recovery.
 pub struct LocalStore {
     root: PathBuf,
+    poisoned: bool,
+    #[cfg(test)]
+    fault: std::rc::Rc<std::cell::RefCell<tests::Fault>>,
 }
 const MAGIC: &[u8; 8] = b"VTOBJ001";
 const SEAL: &[u8; 8] = b"VTSEALED";
@@ -29,27 +36,76 @@ const SEAL: &[u8; 8] = b"VTSEALED";
 impl LocalStore {
     /// Parent must already exist. Creates and synchronizes one namespace directory.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let root = path.as_ref().to_path_buf();
-        match fs::create_dir(&root) {
+        Self::open_inner(
+            path.as_ref(),
+            #[cfg(test)]
+            Default::default(),
+        )
+    }
+    fn open_inner(
+        path: &Path,
+        #[cfg(test)] fault: std::rc::Rc<std::cell::RefCell<tests::Fault>>,
+    ) -> Result<Self> {
+        let root = path.to_path_buf();
+        let store = Self {
+            root,
+            poisoned: false,
+            #[cfg(test)]
+            fault,
+        };
+        let root = &store.root;
+        match fs::create_dir(root) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e.into()),
         }
-        File::open(&root)?.sync_all()?;
+        store.io("open-directory-sync", || File::open(root)?.sync_all())?;
         let parent = root
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        File::open(parent)?.sync_all()?;
-        let store = Self { root };
+        store.io("open-parent-sync", || File::open(parent)?.sync_all())?;
         // A previous process may have published a full seal but failed before
         // syncing it. Stabilize that recovered prefix before accepting new writes.
         for key in store.list()? {
-            File::open(store.path(&format!("{key}-body"))?)?.sync_all()?;
-            File::open(store.path(&format!("{key}-seal"))?)?.sync_all()?;
+            let body = store.path(&format!("{key}-body"))?;
+            let seal = store.path(&format!("{key}-seal"))?;
+            store.io("recover-body-sync", || File::open(body)?.sync_all())?;
+            store.io("recover-seal-sync", || File::open(seal)?.sync_all())?;
         }
-        File::open(&store.root)?.sync_all()?;
+        store.io("recover-directory-sync", || {
+            File::open(&store.root)?.sync_all()
+        })?;
         Ok(store)
+    }
+    fn ready(&self) -> Result<()> {
+        if self.poisoned {
+            Err(Error::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
+    // All injected errors surround real filesystem operations. Hooks are per-store
+    // and test-only; they do not change the production storage interface.
+    fn io<T>(&self, _name: &str, operation: impl FnOnce() -> std::io::Result<T>) -> Result<T> {
+        #[cfg(test)]
+        self.fault.borrow_mut().hit(&format!("{_name}-before"))?;
+        let value = operation()?;
+        #[cfg(test)]
+        self.fault.borrow_mut().hit(&format!("{_name}-after"))?;
+        Ok(value)
+    }
+    fn write(&self, name: &str, file: &mut File, bytes: &[u8]) -> Result<()> {
+        self.io(name, || {
+            #[cfg(test)]
+            {
+                file.write_all(&bytes[..1])?;
+                self.fault.borrow_mut().hit(&format!("{name}-partial"))?;
+                file.write_all(&bytes[1..])
+            }
+            #[cfg(not(test))]
+            file.write_all(bytes)
+        })
     }
     fn path(&self, key: &str) -> Result<PathBuf> {
         if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
@@ -61,6 +117,7 @@ impl LocalStore {
 
 impl ObjectStore for LocalStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.ready()?;
         self.path(key)?;
         let marker = match fs::read(self.path(&format!("{key}-seal"))?) {
             Ok(v) => v,
@@ -89,6 +146,7 @@ impl ObjectStore for LocalStore {
         Ok(Some(bytes[16..body_end].to_vec()))
     }
     fn list(&self) -> Result<Vec<String>> {
+        self.ready()?;
         let mut candidates = std::collections::BTreeSet::new();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -120,23 +178,36 @@ impl ObjectStore for LocalStore {
         body.extend_from_slice(value);
         let digest = Sha256::digest(&body);
         body.extend_from_slice(&digest);
+        // Poison before any filesystem mutation, including a caught panic. Only a
+        // fresh open may validate and stabilize an uncertain publication.
+        self.poisoned = true;
         // Truncation only reclaims an unpublished attempt, never a logical object.
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(self.path(&format!("{key}-body"))?)?;
-        file.write_all(&body)?;
-        file.sync_all()?;
-        File::open(&self.root)?.sync_all()?;
-        let mut seal = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(self.path(&format!("{key}-seal"))?)?;
-        seal.write_all(SEAL)?;
-        seal.sync_all()?;
-        File::open(&self.root)?.sync_all()?;
+        let body_path = self.path(&format!("{key}-body"))?;
+        let mut file = self.io("body-create", || {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(body_path)
+        })?;
+        self.write("body-write", &mut file, &body)?;
+        self.io("body-sync", || file.sync_all())?;
+        self.io("body-directory-sync", || File::open(&self.root)?.sync_all())?;
+        let seal_path = self.path(&format!("{key}-seal"))?;
+        let mut seal = self.io("seal-create", || {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(seal_path)
+        })?;
+        self.write("seal-write", &mut seal, SEAL)?;
+        self.io("seal-sync", || seal.sync_all())?;
+        self.io("seal-directory-sync", || File::open(&self.root)?.sync_all())?;
+        self.poisoned = false;
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
