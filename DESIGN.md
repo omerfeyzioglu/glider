@@ -59,7 +59,9 @@ ascending distance then ID, and returns at most k results.
 ## Object storage and persisted formats
 
 Successful object creation means complete, immutable bytes are durable and visible
-to get/list. Complete keys cannot be replaced. Listings must be complete and
+to get/list. Reads and listings must expose only durable complete objects; after
+an uncertain create, a backend must stabilize them or reject access until reopened.
+Complete keys cannot be replaced. Listings must be complete and
 strongly consistent, though ordering is not required. A future S3-compatible
 backend must collect all listing pages and provide this same object contract
 using native complete-object publication.
@@ -109,9 +111,11 @@ The write protocol is:
 
 A missing or partial seal denotes an unpublished attempt, excluded from get/list
 and reclaimable by a subsequent create. A complete seal requires a valid body and
-checksum; invalid seals or sealed bodies fail recovery. Published objects are
-never modified. On reopen, complete objects are validated and synced before new
-writes, stabilizing any full seal left by failure before the final sync.
+checksum; invalid full-length seals or sealed bodies fail recovery. Published objects are
+never modified. A local handle rejects get/list/create after an interrupted or
+failed publication; passing that handle to database recovery also fails. On reopen,
+complete objects are validated and synced before new writes, stabilizing any full
+seal left by failure before the final sync.
 
 The namespace's parent directory must already exist. Initialization syncs both
 namespace and parent. Local durability requires exclusive access and a

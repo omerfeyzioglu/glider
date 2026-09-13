@@ -116,6 +116,7 @@ fn validation_and_metrics() {
 struct State {
     objects: BTreeMap<String, Vec<u8>>,
     fail: Option<bool>,
+    panic: Option<bool>,
 }
 #[derive(Default, Clone)]
 struct Memory(Rc<RefCell<State>>);
@@ -129,12 +130,15 @@ impl ObjectStore for Memory {
     fn create(&mut self, k: &str, v: &[u8]) -> Result<()> {
         let mut s = self.0.borrow_mut();
         let failure = s.fail.take();
+        let panic = s.panic.take();
+        assert_ne!(panic, Some(false), "injected panic before publication");
         if failure != Some(false) {
             if s.objects.contains_key(k) {
                 return Err(Error::Exists(k.into()));
             }
             s.objects.insert(k.into(), v.into());
         }
+        assert_ne!(panic, Some(true), "injected panic after publication");
         if failure.is_some() {
             return Err(std::io::Error::other("injected uncertain write").into());
         }
@@ -155,9 +159,13 @@ fn ambiguous_writes_require_recovery() {
             Err(Error::RecoveryRequired)
         ));
         drop(db);
-        let mut db = Database::open(store, config()).unwrap();
+        let mut db = Database::open(store.clone(), config()).unwrap();
         assert_eq!(db.get(1).is_none(), committed);
         db.put(2, vec![0., 0.]).unwrap();
+        drop(db);
+        let db = Database::open(store, config()).unwrap();
+        assert_eq!(db.get(1).is_none(), committed);
+        assert_eq!(db.get(2), Some([0., 0.].as_slice()));
     }
     for committed in [false, true] {
         let store = Memory::default();
@@ -277,5 +285,35 @@ fn uncertain_put_and_float_roundtrip() {
     let db = Database::open(store, config()).unwrap();
     for (id, &v) in values.iter().enumerate() {
         assert_eq!(db.get(id as u64).unwrap()[0].to_bits(), v.to_bits());
+    }
+}
+
+#[test]
+fn backend_panics_keep_handle_poisoned_before_and_after_publication() {
+    for committed in [false, true] {
+        let store = Memory::default();
+        let mut db = Database::open(store.clone(), config()).unwrap();
+        db.put(1, vec![1., 2.]).unwrap();
+        store.0.borrow_mut().panic = Some(committed);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.delete(1)));
+        assert!(result.is_err());
+        assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+        assert!(matches!(
+            db.put(2, vec![2., 3.]),
+            Err(Error::RecoveryRequired)
+        ));
+        assert!(matches!(db.delete(1), Err(Error::RecoveryRequired)));
+        drop(db);
+        let mut db = Database::open(store.clone(), config()).unwrap();
+        assert_eq!(db.get(1).is_none(), committed);
+        db.put(2, vec![2., 3.]).unwrap();
+        drop(db);
+        let db = Database::open(store.clone(), config()).unwrap();
+        assert_eq!(db.get(1).is_none(), committed);
+        assert_eq!(db.get(2), Some([2., 3.].as_slice()));
+        assert_eq!(
+            store.0.borrow().objects.len(),
+            if committed { 4 } else { 3 }
+        );
     }
 }
