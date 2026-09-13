@@ -17,11 +17,18 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "support/metrics.rs"]
+mod metrics;
+use metrics::{metadata, resources, timing, usage_delta, Usage};
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Serialize)]
 struct Options {
     scenario: String,
+    feature: String,
+    phase: String,
+    comparison_group: String,
     rows: usize,
     dimensions: usize,
     mutations: usize,
@@ -37,6 +44,9 @@ impl Options {
     fn parse() -> Result<Option<Self>> {
         let mut o = Self {
             scenario: "all".into(),
+            feature: "m1".into(),
+            phase: "baseline".into(),
+            comparison_group: "local-v2".into(),
             rows: 1000,
             dimensions: 32,
             mutations: 5000,
@@ -56,6 +66,8 @@ impl Options {
             if arg == "--help" {
                 eprintln!(
                     "glider baseline: cargo bench --locked --bench baseline -- [options]\n\
+                    --feature NAME (m1) --phase baseline|before|after (baseline)\n\
+                    --comparison-group NAME (local-v2)\n\
                     --scenario all|search|commit|recovery (all)\n\
                     --rows N (1000; search size / recovery live IDs)\n\
                     --dimensions D (32) --mutations N (5000; recovery total puts, >= rows)\n\
@@ -72,6 +84,9 @@ impl Options {
                 .ok_or_else(|| format!("missing value for {arg}"))?;
             match arg.as_str() {
                 "--scenario" => o.scenario = value,
+                "--feature" => o.feature = value,
+                "--phase" => o.phase = value,
+                "--comparison-group" => o.comparison_group = value,
                 "--rows" => o.rows = value.parse()?,
                 "--dimensions" => o.dimensions = value.parse()?,
                 "--mutations" => o.mutations = value.parse()?,
@@ -108,6 +123,7 @@ impl Options {
         if matches!(o.scenario.as_str(), "all" | "recovery") && o.mutations < o.rows {
             return Err("recovery mutations must be >= rows".into());
         }
+        metadata(&o.feature, &o.phase, &o.comparison_group)?;
         o.root = o.root.canonicalize()?;
         if !o.root.is_dir() {
             return Err("root must be an existing directory".into());
@@ -216,22 +232,6 @@ fn inventory(root: &Path) -> Result<Value> {
         json!({"logical_objects": objects, "physical_files": files, "file_length_bytes": file_bytes}),
     )
 }
-fn timing(samples: &[f64], operations_per_sample: usize) -> Value {
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let sum: f64 = samples.iter().sum();
-    let p50 = sorted[(sorted.len() - 1) / 2];
-    json!({
-        "raw_sample_ns": samples, "sample_count": samples.len(),
-        "operations_per_sample": operations_per_sample,
-        "min_sample_ns": sorted[0], "p50_sample_ns": p50,
-        "p95_sample_ns": sorted[(sorted.len() * 95).div_ceil(100) - 1],
-        "max_sample_ns": sorted[sorted.len() - 1],
-        "mean_ns_per_operation": sum / samples.len() as f64 / operations_per_sample as f64,
-        "p50_amortized_ns_per_operation": p50 / operations_per_sample as f64,
-        "operations_per_timed_second": samples.len() as f64 * operations_per_sample as f64 * 1e9 / sum,
-    })
-}
 fn ns(start: Instant) -> f64 {
     start.elapsed().as_nanos() as f64
 }
@@ -261,19 +261,33 @@ fn search(o: &Options) -> Result<Value> {
         .collect::<glider::Result<_>>()?;
     counts.set(Counts::default());
     let mut samples = Vec::with_capacity(o.samples);
+    let mut query_samples = Vec::with_capacity(
+        o.samples
+            .checked_mul(o.queries)
+            .ok_or("query count overflow")?,
+    );
+    let cpu_start = Usage::capture();
     for _ in 0..o.samples {
         let start = Instant::now();
         for query in &queries {
+            let query_start = Instant::now();
             black_box(db.search(black_box(query), o.k)?);
+            query_samples.push(ns(query_start));
         }
         samples.push(ns(start));
     }
+    let cpu = resources(
+        vec![usage_delta(cpu_start, Usage::capture())],
+        "query loops including timer and loop overhead",
+    );
     let measured = counts.get();
     drop(db);
     Ok(
         json!({"scenario": "search", "backend": "local", "cache": "warm in-memory query pass",
         "live_documents": o.rows, "mutation_history": o.rows, "warmup_queries": o.queries,
+        "dataset_seed": o.seed, "query_seed": o.seed ^ 0xd1b54a32d192ed03_u64,
         "dataset_sha256": data_hash, "query_sha256": query_hash, "exact_neighbor_ids": oracle,
+        "query_latency": timing(&query_samples, 1), "resources": cpu,
         "build_store_calls": build_counts,
         "timing": timing(&samples, o.queries), "measured_store_calls": measured,
         "inventory": inventory(&root)?}),
@@ -302,6 +316,7 @@ fn commit(o: &Options) -> Result<Value> {
         let mut values = data.into_iter();
         let mut samples = Vec::with_capacity(o.operations);
         counts.set(Counts::default());
+        let cpu_start = Usage::capture();
         for id in 0..o.operations {
             let vector = values.next(); // Ownership preparation is outside timing.
             let start = Instant::now();
@@ -311,9 +326,15 @@ fn commit(o: &Options) -> Result<Value> {
             }
             samples.push(ns(start));
         }
+        let cpu = resources(
+            vec![usage_delta(cpu_start, Usage::capture())],
+            "commit loop including timer and loop overhead",
+        );
         let measured = counts.get();
         assert_eq!(db.get(0).is_some(), *phase != "delete");
-        phases.push(json!({"phase": phase, "dataset_sha256": data_hash,
+        phases.push(json!({"phase": phase,
+            "dataset_seed": if *phase == "delete" { None } else { Some(o.seed.wrapping_add(phase_index as u64)) },
+            "query_seed": null, "query_sha256": null, "dataset_sha256": data_hash, "resources": cpu,
             "live_documents_after": if *phase == "delete" { 0 } else { o.operations },
             "mutation_history_after": (phase_index + 1) * o.operations,
             "timing": timing(&samples, 1), "measured_store_calls": measured}));
@@ -348,8 +369,10 @@ fn recovery(o: &Options) -> Result<Value> {
     let mut replay_samples = Vec::with_capacity(o.samples);
     let mut total_samples = Vec::with_capacity(o.samples);
     let mut calls = Vec::with_capacity(o.samples);
+    let mut cpu_samples = Vec::with_capacity(o.samples);
     for _ in 0..o.samples {
         counts.set(Counts::default());
+        let cpu_start = Usage::capture();
         let start = Instant::now();
         let store = LocalStore::open(&root)?;
         let store_ns = ns(start);
@@ -361,6 +384,7 @@ fn recovery(o: &Options) -> Result<Value> {
         let db = Database::open(counted, o.config())?;
         let replay_ns = ns(replay_start);
         let total_ns = ns(start);
+        cpu_samples.push(usage_delta(cpu_start, Usage::capture()));
         store_samples.push(store_ns);
         replay_samples.push(replay_ns);
         total_samples.push(total_ns);
@@ -373,6 +397,8 @@ fn recovery(o: &Options) -> Result<Value> {
     Ok(
         json!({"scenario": "recovery", "backend": "local", "cache": "warm OS cache; no eviction",
         "live_documents": o.rows, "mutation_history": o.mutations, "history": "round-robin puts",
+        "dataset_seed": o.seed, "query_seed": null, "query_sha256": null,
+        "resources": resources(cpu_samples, "sum of open windows excluding validation and destruction"),
         "dataset_sha256": data_hash, "warmup_reopens": 1, "build_store_calls": build_counts,
         "local_store_open": timing(&store_samples, 1), "database_replay": timing(&replay_samples, 1),
         "total_open": timing(&total_samples, 1), "measured_store_calls_per_sample": calls,
@@ -472,7 +498,10 @@ fn main() -> Result<()> {
             });
         }
     }
-    let report = json!({"schema_version": 1, "generator": "splitmix64-high24-uniform-f32-v1",
+    let report = json!({"schema_version": 2,
+        "feature": options.feature, "phase": options.phase, "comparison_group": options.comparison_group,
+        "git_revision": environment["git_revision"],
+        "measurement_protocol": "local-v2-individual-query-timers-rusage", "generator": "splitmix64-high24-uniform-f32-v1",
         "metric": "squared_euclidean",
         "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
         "footprint_scope": "Logical objects, physical files, and summed file lengths; not allocated blocks or device bytes written",

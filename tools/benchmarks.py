@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Immutable raw benchmark reports and deterministic, conservative comparisons.
+
+Standard library only. Run `python3 tools/benchmarks.py --help`.
+"""
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import tempfile
+from urllib.parse import quote
+
+METRICS = (
+    "p50_latency_ns", "p95_latency_ns", "p99_latency_ns", "max_latency_ns",
+    "throughput_ops_per_second", "user_cpu_ns", "system_cpu_ns",
+    "process_max_rss_bytes", "logical_bytes_read", "logical_bytes_written",
+    "get_count", "create_count", "logical_object_count", "physical_file_count",
+    "file_footprint_bytes",
+)
+COUNT_FIELDS = ("get_calls", "create_calls", "get_payload_bytes", "create_payload_bytes")
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def reject_constant(value):
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def decode(data):
+    return json.loads(data, parse_constant=reject_constant)
+
+
+def reports(document):
+    if not isinstance(document, dict):
+        raise ValueError("expected a report object")
+    if "archive_version" in document:
+        if document["archive_version"] != 1 or not isinstance(document.get("runs"), list):
+            raise ValueError("unsupported legacy archive")
+        runs = document["runs"]
+    else:
+        runs = [document]
+    if not runs:
+        raise ValueError("empty archive")
+    for run in runs:
+        if not isinstance(run, dict) or run.get("schema_version") not in (1, 2):
+            raise ValueError("unsupported report schema")
+        if not isinstance(run.get("config"), dict) or not isinstance(run.get("environment"), dict):
+            raise ValueError("report must contain config and environment")
+        if not isinstance(run.get("results"), list) or not run["results"]:
+            raise ValueError("report must contain results")
+        if run["schema_version"] == 2:
+            for key in ("feature", "comparison_group", "measurement_protocol"):
+                if not isinstance(run.get(key), str) or not run[key].strip():
+                    raise ValueError(f"missing {key}")
+            if run.get("phase") not in ("baseline", "before", "after"):
+                raise ValueError("invalid report phase")
+            if "git_revision" not in run:
+                raise ValueError("missing git_revision")
+        for result in run["results"]:
+            if not isinstance(result, dict) or result.get("scenario") not in ("search", "commit", "recovery"):
+                raise ValueError("unknown result scenario")
+            if result["scenario"] == "commit":
+                phases = result.get("phases")
+                if not isinstance(phases, list) or any(not isinstance(p, dict) for p in phases) or [p.get("phase") for p in phases] != ["insert", "overwrite", "delete"]:
+                    raise ValueError("commit report must have insert/overwrite/delete phases")
+    return runs
+
+
+def number(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 and math.isfinite(value):
+        return value
+    return None
+
+
+def obj(value):
+    return value if isinstance(value, dict) else {}
+
+
+def totals(samples):
+    """Sum complete measured counters, never substitute zero for missing samples."""
+    result = {}
+    for key in COUNT_FIELDS:
+        values = [number(obj(s).get(key)) for s in samples] if isinstance(samples, list) else []
+        result[key] = sum(values) if values and all(v is not None for v in values) else None
+    return result
+
+
+def metrics(timing=None, counts=None, resources=None, inventory=None, throughput=None):
+    timing, counts, resources, inventory = map(obj, (timing, counts, resources, inventory))
+    # Old reports retain the metrics they actually recorded. In particular, do
+    # not reconstruct missing p99/CPU/RSS or treat installed RAM as process RSS.
+    result = {key: None for key in METRICS}
+    for percentile in (50, 95, 99):
+        result[f"p{percentile}_latency_ns"] = number(timing.get(f"p{percentile}_sample_ns"))
+    result["max_latency_ns"] = number(timing.get("max_sample_ns"))
+    result["throughput_ops_per_second"] = number(obj(throughput if throughput is not None else timing).get("operations_per_timed_second"))
+    for key in ("user_cpu_ns", "system_cpu_ns", "process_max_rss_bytes"):
+        result[key] = number(resources.get(key))
+    for dest, source in (("logical_bytes_read", "get_payload_bytes"), ("logical_bytes_written", "create_payload_bytes"), ("get_count", "get_calls"), ("create_count", "create_calls")):
+        result[dest] = number(counts.get(source))
+    for dest, source in (("logical_object_count", "logical_objects"), ("physical_file_count", "physical_files"), ("file_footprint_bytes", "file_length_bytes")):
+        result[dest] = number(inventory.get(source))
+    return result
+
+
+def environment_identity(run):
+    env = run["environment"]
+    # df capacity/free-space changes every run. Compare the actual device and
+    # mount, not transient utilization or the command's header spacing.
+    mount = env.get("filesystem_mount")
+    columns = mount.splitlines()[-1].split() if isinstance(mount, str) else []
+    filesystem = [columns[0], columns[-1]] if len(columns) >= 6 else None
+    fields = ("architecture", "cpu", "memory", "os", "rustc", "cargo", "profile",
+              "profile_environment", "rustflags", "cargo_encoded_rustflags", "debug_assertions", "logical_parallelism")
+    identity = {key: env.get(key) for key in fields}
+    identity.update(filesystem=filesystem, root=run["config"].get("root"), label=run["config"].get("label"))
+    complete = all(env.get(key) is not None for key in ("architecture", "cpu", "memory", "os", "rustc", "cargo", "profile", "logical_parallelism"))
+    complete = complete and all(key in env for key in fields) and filesystem is not None and identity["root"] is not None and identity["label"] is not None
+    return identity, complete
+
+
+def normalize(run, raw_file, raw_hash, run_index):
+    rows = []
+    env_key, env_complete = environment_identity(run)
+    for result_index, result in enumerate(run["results"]):
+        scenario = result["scenario"]
+        if scenario == "search":
+            timing_key = "query_latency" if run["schema_version"] >= 2 else "timing"
+            scopes = [("search", result, metrics(result.get(timing_key), result.get("measured_store_calls"), result.get("resources"), result.get("inventory"), result.get("timing")), "individual query" if timing_key == "query_latency" else "query batch")]
+        elif scenario == "commit":
+            scopes = [(f"commit/{p['phase']}", p, metrics(p.get("timing"), p.get("measured_store_calls"), p.get("resources")), "individual commit") for p in result["phases"]]
+            # The original harness inventories only after the final phase. Do
+            # not invent per-phase footprints from object-format assumptions.
+            scopes.append(("commit/final-footprint", result, metrics(inventory=result.get("inventory")), "inventory only"))
+        else:
+            counts = totals(result.get("measured_store_calls_per_sample"))
+            scopes = [
+                ("recovery/total", result, metrics(result.get("total_open"), counts, result.get("resources"), result.get("inventory")), "full open"),
+                ("recovery/local-store", result, metrics(result.get("local_store_open")), "local store open"),
+                ("recovery/replay", result, metrics(result.get("database_replay"), counts), "database replay"),
+            ]
+        for scope, source, values, latency_scope in scopes:
+            config = {k: v for k, v in run["config"].items() if k not in ("feature", "phase", "comparison_group", "root", "label")}
+            inputs = {key: source.get(key) for key in ("dataset_seed", "query_seed", "dataset_sha256", "query_sha256")}
+            if scope == "commit/final-footprint":
+                inputs["phase_inputs"] = [{key: p.get(key) for key in ("phase", "dataset_seed", "dataset_sha256")} for p in result["phases"]]
+            workload = {"config": config, "inputs": inputs, "generator": run.get("generator"), "metric": run.get("metric"),
+                        "backend": result.get("backend"), "cache": result.get("cache"), "history": result.get("history"),
+                        "warmup_queries": result.get("warmup_queries"), "warmup_reopens": result.get("warmup_reopens"), "warmup_operations": result.get("warmup_operations")}
+            identity = {"scope": scope, "latency_scope": latency_scope, "workload": workload,
+                        "measurement_protocol": run.get("measurement_protocol"), "environment": env_key}
+            required_inputs = bool(inputs.get("dataset_sha256"))
+            if scope == "commit/final-footprint":
+                required_inputs = all(p.get("dataset_sha256") for p in inputs["phase_inputs"])
+            elif scope != "commit/delete":
+                required_inputs = required_inputs and inputs["dataset_seed"] is not None
+            if scenario == "search":
+                required_inputs = required_inputs and isinstance(inputs.get("query_sha256"), str) and inputs["dataset_seed"] is not None and inputs["query_seed"] is not None
+            required_config = {"scenario", "dimensions", "seed"}
+            required_config.update({"rows", "queries", "samples", "k"} if scenario == "search" else {"rows", "mutations", "samples"} if scenario == "recovery" else {"operations"})
+            complete = env_complete and required_inputs and required_config.issubset(config) and all(run.get(k) for k in ("feature", "comparison_group", "measurement_protocol", "generator", "metric")) and bool(result.get("backend"))
+            revision = run.get("git_revision", run["environment"].get("git_revision"))
+            complete = bool(complete and revision)
+            state = result["phases"][-1] if scope == "commit/final-footprint" else source
+            observed = {"live_documents": state.get("live_documents_after", state.get("live_documents")),
+                        "mutation_history": state.get("mutation_history_after", state.get("mutation_history"))}
+            rows.append({"id": f"{raw_hash[:12]}:{run_index}:{result_index}:{scope}", "raw_file": raw_file, "raw_sha256": raw_hash,
+                         "run_index": run_index, "feature": run.get("feature"), "phase": run.get("phase"),
+                         "comparison_group": run.get("comparison_group"), "git_revision": revision,
+                         "scope": scope, "latency_scope": latency_scope, "workload": workload, "observed_state": observed,
+                         "environment": run["environment"], "comparison_environment": env_key,
+                         "measurement_protocol": run.get("measurement_protocol"),
+                         "comparison_key": digest(canonical(identity).encode()) if complete else None,
+                         "metrics": values})
+    return rows
+
+
+def delta(before, after):
+    if before is None or after is None or before == 0:
+        return None
+    value = (after - before) / before * 100
+    return value if math.isfinite(value) else None
+
+
+def comparisons(rows):
+    groups = {}
+    for row in rows:
+        if row["comparison_key"] is not None and row["phase"] in ("before", "after"):
+            key = (row["feature"], row["comparison_group"], row["comparison_key"])
+            groups.setdefault(key, {"before": [], "after": []})[row["phase"]].append(row)
+    pairs = []
+    for key, sides in sorted(groups.items()):
+        # No silently chosen 'latest' run and no averaging of unrelated repeats.
+        if len(sides["before"]) == len(sides["after"]) == 1:
+            before, after = sides["before"][0], sides["after"][0]
+            pairs.append({"feature": key[0], "comparison_group": key[1], "comparison_key": key[2],
+                          "before": before["id"], "after": after["id"],
+                          "delta_percent": {m: delta(before["metrics"][m], after["metrics"][m]) for m in METRICS}})
+    return pairs
+
+
+def text(value):
+    if value is None:
+        return "null"
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;").replace("\r", " ").replace("\n", " ").replace("`", "&#96;")
+
+
+def display(value):
+    if value is None:
+        return "null"
+    return str(value) if isinstance(value, int) else f"{value:.3f}"
+
+
+def markdown(rows, pairs):
+    lines = ["# Benchmark archive", "", "Generated from raw JSON; do not edit. Missing measurements are `null`.", "",
+             "Latency is in ns; throughput in ops/s; CPU in ns; RSS/footprints/I/O in bytes.",
+             "CPU covers measured loops; RSS is process-lifetime peak (including setup). Recovery rows overlap; do not sum them.",
+             "Legacy search latency describes a batch, not an individual query. Sample maxima are not population tail guarantees.", "",
+             "## Runs", "", "| ID / raw JSON | Feature | Phase | Group | Git | Workload | Latency unit |", "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        config = r["workload"]["config"]
+        label = f"{r['scope']}; d={config.get('dimensions')}; seed={config.get('seed')}"
+        if r["scope"] == "search":
+            label += f"; rows={config.get('rows')}; queries={config.get('queries')}; batches={config.get('samples')}; k={config.get('k')}"
+        elif r["scope"].startswith("commit/"):
+            state = r["observed_state"]
+            label += f"; operations/phase={config.get('operations')}; live after={state['live_documents']}; history after={state['mutation_history']}"
+        else:
+            label += f"; live rows={config.get('rows')}; input mutations={config.get('mutations')}; reopens={config.get('samples')}"
+        lines.append(f"| [{r['id']}]({quote(r['raw_file'], safe='/')}) | {text(r['feature'])} | {text(r['phase'])} | {text(r['comparison_group'])} | {text(r['git_revision'])} | {text(label)} | {r['latency_scope']} |")
+    for title, names in (("Latency and process resources", METRICS[:8]), ("Logical I/O and storage footprint", METRICS[8:])):
+        lines += ["", f"## {title}", "", "| ID | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+        for r in rows:
+            lines.append("| " + r["id"] + " | " + " | ".join(display(r["metrics"][m]) for m in names) + " |")
+    lines += ["", "## Before / after comparisons", "",
+              "Only one before and one after with identical workload, inputs, timing protocol and stable environment are paired.",
+              "Revision and measured outputs may differ. Positive delta means an increase; only throughput generally prefers an increase.",
+              "Missing values or a zero denominator produce `null` deltas. No cross-workload or cross-environment percentages are reported."]
+    if not pairs:
+        lines += ["", "No unambiguous compatible before/after pair is available."]
+    by_id = {r["id"]: r for r in rows}
+    used = set()
+    for p in pairs:
+        before, after = by_id[p["before"]], by_id[p["after"]]
+        used.update((before["id"], after["id"]))
+        lines += ["", f"### {text(p['feature'])} / {text(p['comparison_group'])} / {before['scope']}", "",
+                  f"Before: `{before['id']}` ({text(before['git_revision'])}); after: `{after['id']}` ({text(after['git_revision'])}).",
+                  f"Workload/environment key: `{p['comparison_key']}`. Full inputs and environment are in [index.json](index.json)."]
+        if before["git_revision"] == after["git_revision"]:
+            source_hash = before["environment"].get("source_sha256")
+            if source_hash and source_hash == after["environment"].get("source_sha256"):
+                lines += ["", "Same Git revision and source fingerprint: this is a repeatability comparison, not evidence of a feature effect."]
+            else:
+                lines += ["", "Same Git revision with different or unavailable source fingerprints: inspect source/dirty state before attributing a feature effect."]
+        lines += ["", "| Metric | Before | After | Change % |", "|---|---:|---:|---:|"]
+        for m in METRICS:
+            lines.append(f"| {m} | {display(before['metrics'][m])} | {display(after['metrics'][m])} | {display(p['delta_percent'][m])} |")
+    unmatched = [r["id"] for r in rows if r["phase"] in ("before", "after") and r["id"] not in used]
+    if unmatched:
+        lines += ["", "Unpaired runs (missing metadata, incompatible workload/environment, missing counterpart, or duplicate phase):"]
+        lines += [f"- `{r}`" for r in unmatched]
+    return "\n".join(lines) + "\n"
+
+
+def load_archive(root):
+    rows, seen = [], set()
+    for path in sorted([*root.glob("baselines/*.json"), *root.glob("runs/*.json")]):
+        data = path.read_bytes()
+        raw_hash = digest(data)
+        if path.parent.name == "runs" and path.stem != raw_hash:
+            raise ValueError(f"raw archive digest mismatch: {path}")
+        if raw_hash in seen:
+            continue
+        seen.add(raw_hash)
+        for index, report in enumerate(reports(decode(data))):
+            rows.extend(normalize(report, path.relative_to(root).as_posix(), raw_hash, index))
+    return sorted(rows, key=lambda r: (r["feature"] or "", r["comparison_group"] or "", r["scope"], canonical(r["workload"]), r["phase"] or "", r["id"]))
+
+
+def publish(path, data):
+    """Replace a derived file atomically; raw paths are SHA-256 content addressed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
+            temporary = Path(file.name)
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        if os.name == "posix":
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def summarize(root, check=False):
+    rows = load_archive(root)
+    pairs = comparisons(rows)
+    outputs = {"index.json": (json.dumps({"schema_version": 1, "rows": rows, "comparisons": pairs}, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(),
+               "SUMMARY.md": markdown(rows, pairs).encode()}
+    for name, data in outputs.items():
+        path = root / name
+        if check:
+            if not path.exists() or path.read_bytes() != data:
+                raise ValueError(f"stale generated file: {path}")
+        else:
+            publish(path, data)
+    return rows
+
+
+def archive(source, root):
+    data = source.read_bytes()
+    reports(decode(data))  # Validate before creating anything.
+    raw_hash = digest(data)
+    # Importing an existing legacy archive is idempotent, without duplicating it.
+    existing = [p for p in root.glob("baselines/*.json") if p.read_bytes() == data]
+    target = existing[0] if existing else root / "runs" / f"{raw_hash}.json"
+    if target.exists():
+        if target.read_bytes() != data:
+            raise ValueError(f"refusing to overwrite archive content: {target}")
+    else:
+        publish(target, data)
+    summarize(root)
+    return target
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    add = sub.add_parser("archive", help="archive raw JSON unchanged and rebuild index/summary")
+    add.add_argument("report", type=Path)
+    add.add_argument("--archive", type=Path, default=Path("benchmarks"))
+    summary = sub.add_parser("summary", help="rebuild deterministic derived files")
+    summary.add_argument("--archive", type=Path, default=Path("benchmarks"))
+    summary.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.command == "archive":
+            print(archive(args.report, args.archive))
+        else:
+            summarize(args.archive, args.check)
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        parser.exit(1, f"benchmark archive: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

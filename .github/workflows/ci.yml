@@ -29,3 +29,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Test benchmark archive tooling
+        run: python3 -m unittest discover -s tests -p 'test_benchmarks.py'
+
+      - name: Check generated benchmark summary
+        run: python3 tools/benchmarks.py summary --check

@@ -15,3 +15,6 @@
 # Local logs and temporary files
 *.log
 *.tmp
+
+# Python benchmark tooling
+__pycache__/
