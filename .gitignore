@@ -1,0 +1,17 @@
+/target/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# macOS and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local logs and temporary files
+*.log
+*.tmp
