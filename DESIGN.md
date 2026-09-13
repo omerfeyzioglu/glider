@@ -44,32 +44,32 @@ Client/API
     -> deterministic top-k results
 
 Mutation path
-    -> single-writer commit protocol
-    -> immutable log/segment objects
-    -> versioned manifest publication
-    -> rebuildable in-memory and ANN indexes
+   -> single-writer commit protocol
+   -> immutable log/segment objects
+   -> explicit publication of authoritative persistent state
+   -> rebuildable in-memory and ANN indexes
 ```
 
 The planned evolution is incremental:
 
 1. Keep the current exact search as the correctness baseline and benchmark it
    with reproducible datasets, queries, seeds, metrics, and storage backends.
-2. Add immutable segments and compaction. Compaction may reorganize physical
+2. Add and validate an S3-compatible object-storage backend. The local backend
+   remains the reference implementation of the object contract.
+3. Add immutable segments and compaction. Compaction may reorganize physical
    objects, but must preserve logical results and must never make a partial
    segment authoritative.
-3. Add filtering and an ANN candidate index. ANN is an optimization only: tests
+4. Add filtering and an ANN candidate index. ANN is an optimization only: tests
    and benchmarks compare it with exact search using recall@k, latency, and
    resource/bytes-read measurements.
-4. Add an object-storage backend and query execution that accounts for remote
-   round trips and bytes transferred, not only CPU complexity.
 5. Consider concurrent writers, sharding, and replication only after the
    single-writer durability and recovery model has measured limits and explicit
    coordination semantics.
 
 ### Target invariants
 
-- Authoritative state is versioned immutable data plus an explicitly published
-  manifest; indexes, caches, and ANN structures are derived and rebuildable.
+- Authoritative state is versioned durable data with explicit publication
+ semantics; indexes, caches, and ANN structures are derived and rebuildable.
 - Every publication has explicit acknowledgement, crash, recovery, and reader
   visibility semantics. A reader never observes a partially published segment.
 - Exact search remains available as the correctness oracle for every ANN or
