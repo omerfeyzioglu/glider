@@ -1,8 +1,7 @@
 # Benchmarks
 
 Run from the repository root with Rust/Cargo installed. `benches/baseline.rs` is a
-custom `cargo bench` harness using `Instant`, the public database API, and the real
-`LocalStore`. A benchmark-only `libc` dependency supplies process resource counters
+custom `cargo bench` harness using `Instant`, the public database API, and `LocalStore` (default) or feature-gated `S3Store`. A benchmark-only `libc` dependency supplies process resource counters
 on Linux/macOS; there is no Criterion dependency. Archive tooling uses Python 3
 and its standard library. Database implementation and durability are unchanged.
 Normal correctness tests do not run performance workloads. CI compiles the
@@ -196,3 +195,88 @@ baselines live under `benchmarks/baselines/`; the initial machine run is
 [2026-09-13-local.json](benchmarks/baselines/2026-09-13-local.json). It contains the
 nine reports from the matrix, including raw samples and workload/source context.
 No implementation tuning was performed from these measurements.
+
+
+## S3 benchmarks
+
+Select `--backend local|s3`; omitting it preserves the existing LocalStore defaults,
+workloads, timing boundaries, version-2 JSON shape and measurement protocol.
+The workloads are statically specialized for each backend, with the same vector
+and query generation, search, commit phases, and replay validation.
+
+For S3, enable the existing `s3` feature and supply configuration through the
+environment before running. The harness has no endpoint or credential defaults.
+
+| Variable | Meaning |
+|---|---|
+| `GLIDER_S3_ENDPOINT` | Required HTTP(S) service endpoint; no userinfo, query, or fragment |
+| `GLIDER_S3_BUCKET` | Required pre-provisioned bucket |
+| `GLIDER_S3_REGION` | Required signing region |
+| `GLIDER_S3_NAMESPACE` | Required parent prefix reserved for benchmark runs |
+| `AWS_ACCESS_KEY_ID` | Required access key; never included in reports |
+| `AWS_SECRET_ACCESS_KEY` | Required secret key; never included in reports |
+| `AWS_SESSION_TOKEN` | Optional session token; never included in reports |
+| `GLIDER_S3_SERVICE_LABEL` | Optional server/version/topology description for reproducibility |
+
+```sh
+cargo bench --locked --features s3 --bench baseline -- --backend s3 --scenario all --rows 100 --mutations 300 --operations 30 --queries 100 --samples 5 --dimensions 32 --seed 42 --feature m2 --phase baseline --comparison-group s3-baseline > target/baselines/s3.json
+```
+
+Each scenario creates a fresh random child of the configured prefix and rejects a
+nonempty namespace before setup. The exact child prefix is recorded per result;
+the stable parent prefix is part of the comparison environment. The harness does
+not delete remote objects. Retain or remove only the recorded benchmark children
+as appropriate for the test bucket. Local temporary namespaces still clean up as
+before. `--root` remains local client context; it is not S3 storage.
+
+S3 reports use schema version 3 and protocol
+`s3-v1-individual-query-timers-rusage`. Without explicit overrides their feature
+is `m2`, phase is `baseline`, and comparison group is `s3-v1`. Existing version-1
+and version-2 raw archives are read unchanged; unavailable historical fields
+remain null. The generated index now uses schema version 2.
+
+S3 endpoint, bucket, region, parent prefix, service label, addressing mode, retry
+policy and default request timeout are recorded under `environment.s3`. Credentials
+are excluded. All ordinary workload, Git, compiler, machine, CPU, RSS, percentile,
+and throughput metadata remains available. CPU and RSS describe the benchmark
+client process, not the remote service.
+
+Transport metrics are separate from the existing successful engine-to-store
+logical counters:
+
+- `build_http_requests` covers setup for search/recovery.
+- `measured_http_requests` covers search or each commit phase.
+- `http_requests_per_sample` covers each timed recovery; archive totals sum all
+  samples. Recovery total/replay rows overlap and must not be added together.
+- HTTP counters include GET, each LIST page, PUT, other attempts, attempted request
+  body bytes including envelopes, HTTP error responses, and HTTP client call
+  errors. Later response-body consumption errors are excluded from that last
+  counter. Any workload error aborts the run; these are not failure-rate benchmarks.
+- `store_open` times S3 client construction; `database_replay` performs the remote
+  listing and reads; `total_open` includes both. One warmup reopen is performed,
+  but server caches are uncontrolled. Local recovery keeps `local_store_open`
+  and its warm OS-cache description.
+- Untimed native listing records actual object count and summed object lengths.
+  S3 physical-file counts and file footprint are null. Inventory/preflight requests
+  are excluded from workload counters. Exact queries use no object-store requests.
+
+LocalStore and S3Store are separate backend results. The archive requires matching
+backend and S3 environment, as well as workload and timing protocol, for automatic
+before/after feature comparisons. It never interprets a local-to-S3 switch as a
+feature improvement or regression. Original LocalStore raw reports are not rewritten.
+
+For isolated MinIO integration checks and small all-scenario smoke runs:
+
+```sh
+python3 tools/test_s3.py --benchmark-smoke target/backend-smoke
+python3 tools/benchmarks.py archive target/backend-smoke/local.json
+python3 tools/benchmarks.py archive target/backend-smoke/s3.json
+python3 tools/benchmarks.py summary --check
+```
+
+The output directory must be new. The runner generates credentials, starts MinIO
+on a fresh loopback port, runs integration and server-restart tests, validates
+both smoke JSON reports and removes the container/data. Smoke runs use 10 rows,
+4 dimensions, 30 mutations, 5 operations per commit phase, 5 queries, 2 samples,
+k=3 and seed 42. They validate reporting and correctness; their tiny samples and
+uncontrolled desktop load are not evidence of comparative backend performance.

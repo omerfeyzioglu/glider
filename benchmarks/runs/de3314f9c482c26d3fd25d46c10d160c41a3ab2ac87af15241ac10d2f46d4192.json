@@ -1,0 +1,460 @@
+{
+  "comparison_group": "backend-smoke",
+  "config": {
+    "comparison_group": "backend-smoke",
+    "dimensions": 4,
+    "feature": "s3-benchmarks",
+    "k": 3,
+    "label": "smoke validation; desktop session; power and competing load uncontrolled",
+    "mutations": 30,
+    "operations": 5,
+    "phase": "baseline",
+    "queries": 5,
+    "root": "/Users/omer/Desktop/vecturbo/target",
+    "rows": 10,
+    "samples": 2,
+    "scenario": "all",
+    "seed": 42
+  },
+  "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
+  "environment": {
+    "architecture": "aarch64",
+    "argv": [
+      "/Users/omer/Desktop/vecturbo/target/release/deps/baseline-77e45983b80229b5",
+      "--backend",
+      "local",
+      "--rows",
+      "10",
+      "--dimensions",
+      "4",
+      "--mutations",
+      "30",
+      "--operations",
+      "5",
+      "--queries",
+      "5",
+      "--samples",
+      "2",
+      "--k",
+      "3",
+      "--seed",
+      "42",
+      "--feature",
+      "s3-benchmarks",
+      "--phase",
+      "baseline",
+      "--comparison-group",
+      "backend-smoke",
+      "--root",
+      "target",
+      "--label",
+      "smoke validation; desktop session; power and competing load uncontrolled",
+      "--bench"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_encoded_rustflags": null,
+    "cpu": "Apple M4",
+    "debug_assertions": false,
+    "filesystem_mount": "Filesystem   1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5   482797652 160058640 292798288    36%    /System/Volumes/Data",
+    "git_revision": "d71a5ebc1ac6c1c629ed330361dc7a8ca6f9e25d",
+    "git_status": "M .github/workflows/ci.yml\n M BENCHMARKS.md\n M benches/baseline.rs\n M tests/test_benchmarks.py\n M tools/benchmarks.py\n M tools/test_s3.py\n?? benches/support/backend.rs\n?? benches/support/options.rs\n?? tests/benchmark_backend.rs\n?? tools/benchmark_smoke.py",
+    "logical_parallelism": 10,
+    "memory": "17179869184",
+    "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+    "profile": "bench",
+    "profile_environment": {},
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "rustflags": null,
+    "source_sha256": "e83a676dfb4254620ce1e974e170f1e6457ceea5b5ff73f999e7abc6b4970a1d",
+    "unix_seconds": 1789404172
+  },
+  "feature": "s3-benchmarks",
+  "footprint_scope": "Logical objects, physical files, and summed file lengths; not allocated blocks or device bytes written",
+  "generator": "splitmix64-high24-uniform-f32-v1",
+  "git_revision": "d71a5ebc1ac6c1c629ed330361dc7a8ca6f9e25d",
+  "measurement_protocol": "local-v2-individual-query-timers-rusage",
+  "metric": "squared_euclidean",
+  "phase": "baseline",
+  "results": [
+    {
+      "backend": "local",
+      "build_store_calls": {
+        "create_calls": 11,
+        "create_payload_bytes": 1216,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 1
+      },
+      "cache": "warm in-memory query pass",
+      "dataset_seed": 42,
+      "dataset_sha256": "d530d731180f2d9dc5a91c32ae6af93fe6099b510747d8a046c71a0fd261ad6e",
+      "exact_neighbor_ids": [
+        [
+          0,
+          3,
+          5
+        ],
+        [
+          0,
+          3,
+          5
+        ],
+        [
+          6,
+          2,
+          9
+        ],
+        [
+          0,
+          8,
+          2
+        ],
+        [
+          3,
+          8,
+          9
+        ]
+      ],
+      "inventory": {
+        "file_length_bytes": 1832,
+        "logical_objects": 11,
+        "physical_files": 22
+      },
+      "live_documents": 10,
+      "measured_store_calls": {
+        "create_calls": 0,
+        "create_payload_bytes": 0,
+        "get_calls": 0,
+        "get_payload_bytes": 0,
+        "list_calls": 0
+      },
+      "mutation_history": 10,
+      "query_latency": {
+        "max_sample_ns": 10333.0,
+        "mean_ns_per_operation": 1295.8,
+        "min_sample_ns": 208.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 771724.0314863404,
+        "p50_amortized_ns_per_operation": 291.0,
+        "p50_sample_ns": 291.0,
+        "p95_sample_ns": 10333.0,
+        "p99_sample_ns": 10333.0,
+        "raw_sample_ns": [
+          417.0,
+          291.0,
+          291.0,
+          208.0,
+          209.0,
+          292.0,
+          10333.0,
+          375.0,
+          292.0,
+          250.0
+        ],
+        "sample_count": 10
+      },
+      "query_seed": 15111065706836454697,
+      "query_sha256": "de2c85ce5f9bcc36017102f9ce74b390116e2be2684647cd5614990fcb875401",
+      "resources": {
+        "cpu_scope": "query loops including timer and loop overhead",
+        "process_max_rss_bytes": 2277376,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 2277376,
+            "system_cpu_ns": 12000,
+            "user_cpu_ns": 10000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 12000,
+        "user_cpu_ns": 10000
+      },
+      "scenario": "search",
+      "timing": {
+        "max_sample_ns": 12042.0,
+        "mean_ns_per_operation": 1408.3,
+        "min_sample_ns": 2041.0,
+        "operations_per_sample": 5,
+        "operations_per_timed_second": 710075.9781296599,
+        "p50_amortized_ns_per_operation": 408.2,
+        "p50_sample_ns": 2041.0,
+        "p95_sample_ns": 12042.0,
+        "p99_sample_ns": 12042.0,
+        "raw_sample_ns": [
+          2041.0,
+          12042.0
+        ],
+        "sample_count": 2
+      },
+      "warmup_queries": 5
+    },
+    {
+      "backend": "local",
+      "inventory": {
+        "file_length_bytes": 2429,
+        "logical_objects": 16,
+        "physical_files": 32
+      },
+      "phases": [
+        {
+          "dataset_seed": 42,
+          "dataset_sha256": "139eacfc2b90bb4a8127fe1e6d1ce6ce8ed8da7bfbd837d4f349b420b2db5ffc",
+          "live_documents_after": 5,
+          "measured_store_calls": {
+            "create_calls": 5,
+            "create_payload_bytes": 578,
+            "get_calls": 0,
+            "get_payload_bytes": 0,
+            "list_calls": 0
+          },
+          "mutation_history_after": 5,
+          "phase": "insert",
+          "query_seed": null,
+          "query_sha256": null,
+          "resources": {
+            "cpu_scope": "commit loop including timer and loop overhead",
+            "process_max_rss_bytes": 2408448,
+            "raw_samples": [
+              {
+                "process_max_rss_bytes": 2408448,
+                "system_cpu_ns": 5252000,
+                "user_cpu_ns": 259000
+              }
+            ],
+            "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+            "system_cpu_ns": 5252000,
+            "user_cpu_ns": 259000
+          },
+          "timing": {
+            "max_sample_ns": 44990959.0,
+            "mean_ns_per_operation": 35600125.0,
+            "min_sample_ns": 23093541.0,
+            "operations_per_sample": 1,
+            "operations_per_timed_second": 28.089789010572293,
+            "p50_amortized_ns_per_operation": 37900500.0,
+            "p50_sample_ns": 37900500.0,
+            "p95_sample_ns": 44990959.0,
+            "p99_sample_ns": 44990959.0,
+            "raw_sample_ns": [
+              44990959.0,
+              37900500.0,
+              23093541.0,
+              42990125.0,
+              29025500.0
+            ],
+            "sample_count": 5
+          }
+        },
+        {
+          "dataset_seed": 43,
+          "dataset_sha256": "b1aad4537486472ee0fcf8e7baf3719878e4c0b7c3dc0780468ff3e5db4f1764",
+          "live_documents_after": 5,
+          "measured_store_calls": {
+            "create_calls": 5,
+            "create_payload_bytes": 572,
+            "get_calls": 0,
+            "get_payload_bytes": 0,
+            "list_calls": 0
+          },
+          "mutation_history_after": 10,
+          "phase": "overwrite",
+          "query_seed": null,
+          "query_sha256": null,
+          "resources": {
+            "cpu_scope": "commit loop including timer and loop overhead",
+            "process_max_rss_bytes": 2473984,
+            "raw_samples": [
+              {
+                "process_max_rss_bytes": 2473984,
+                "system_cpu_ns": 4725000,
+                "user_cpu_ns": 236000
+              }
+            ],
+            "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+            "system_cpu_ns": 4725000,
+            "user_cpu_ns": 236000
+          },
+          "timing": {
+            "max_sample_ns": 41012417.0,
+            "mean_ns_per_operation": 32366025.2,
+            "min_sample_ns": 27914708.0,
+            "operations_per_sample": 1,
+            "operations_per_timed_second": 30.89659585385233,
+            "p50_amortized_ns_per_operation": 29967667.0,
+            "p50_sample_ns": 29967667.0,
+            "p95_sample_ns": 41012417.0,
+            "p99_sample_ns": 41012417.0,
+            "raw_sample_ns": [
+              27914708.0,
+              29967667.0,
+              33091834.0,
+              29843500.0,
+              41012417.0
+            ],
+            "sample_count": 5
+          }
+        },
+        {
+          "dataset_seed": null,
+          "dataset_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "live_documents_after": 0,
+          "measured_store_calls": {
+            "create_calls": 5,
+            "create_payload_bytes": 315,
+            "get_calls": 0,
+            "get_payload_bytes": 0,
+            "list_calls": 0
+          },
+          "mutation_history_after": 15,
+          "phase": "delete",
+          "query_seed": null,
+          "query_sha256": null,
+          "resources": {
+            "cpu_scope": "commit loop including timer and loop overhead",
+            "process_max_rss_bytes": 2473984,
+            "raw_samples": [
+              {
+                "process_max_rss_bytes": 2473984,
+                "system_cpu_ns": 5286000,
+                "user_cpu_ns": 254000
+              }
+            ],
+            "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+            "system_cpu_ns": 5286000,
+            "user_cpu_ns": 254000
+          },
+          "timing": {
+            "max_sample_ns": 41042375.0,
+            "mean_ns_per_operation": 36386608.2,
+            "min_sample_ns": 28944500.0,
+            "operations_per_sample": 1,
+            "operations_per_timed_second": 27.48263851644188,
+            "p50_amortized_ns_per_operation": 38950792.0,
+            "p50_sample_ns": 38950792.0,
+            "p95_sample_ns": 41042375.0,
+            "p99_sample_ns": 41042375.0,
+            "raw_sample_ns": [
+              38950792.0,
+              41042375.0,
+              39018916.0,
+              28944500.0,
+              33976458.0
+            ],
+            "sample_count": 5
+          }
+        }
+      ],
+      "scenario": "commit",
+      "warmup_operations": 0
+    },
+    {
+      "backend": "local",
+      "build_store_calls": {
+        "create_calls": 31,
+        "create_payload_bytes": 3525,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 1
+      },
+      "cache": "warm OS cache; no eviction",
+      "database_replay": {
+        "max_sample_ns": 4478792.0,
+        "mean_ns_per_operation": 4136000.0,
+        "min_sample_ns": 3793208.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 241.77949709864603,
+        "p50_amortized_ns_per_operation": 3793208.0,
+        "p50_sample_ns": 3793208.0,
+        "p95_sample_ns": 4478792.0,
+        "p99_sample_ns": 4478792.0,
+        "raw_sample_ns": [
+          4478792.0,
+          3793208.0
+        ],
+        "sample_count": 2
+      },
+      "dataset_seed": 42,
+      "dataset_sha256": "427dcb2f9e7936b2bdcf8830f1b1949e4c98500bd0ad395cf26d4059e5d725f7",
+      "history": "round-robin puts",
+      "inventory": {
+        "file_length_bytes": 5261,
+        "logical_objects": 31,
+        "physical_files": 62
+      },
+      "live_documents": 10,
+      "local_store_open": {
+        "max_sample_ns": 236420333.0,
+        "mean_ns_per_operation": 231633249.5,
+        "min_sample_ns": 226846166.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 4.3171695003139,
+        "p50_amortized_ns_per_operation": 226846166.0,
+        "p50_sample_ns": 226846166.0,
+        "p95_sample_ns": 236420333.0,
+        "p99_sample_ns": 236420333.0,
+        "raw_sample_ns": [
+          226846166.0,
+          236420333.0
+        ],
+        "sample_count": 2
+      },
+      "measured_store_calls_per_sample": [
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 31,
+          "get_payload_bytes": 3525,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 31,
+          "get_payload_bytes": 3525,
+          "list_calls": 1
+        }
+      ],
+      "mutation_history": 30,
+      "query_seed": null,
+      "query_sha256": null,
+      "resources": {
+        "cpu_scope": "sum of open windows excluding validation and destruction",
+        "process_max_rss_bytes": 2686976,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 2670592,
+            "system_cpu_ns": 10363000,
+            "user_cpu_ns": 910000
+          },
+          {
+            "process_max_rss_bytes": 2686976,
+            "system_cpu_ns": 10184000,
+            "user_cpu_ns": 889000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 20547000,
+        "user_cpu_ns": 1799000
+      },
+      "scenario": "recovery",
+      "total_open": {
+        "max_sample_ns": 240214833.0,
+        "mean_ns_per_operation": 235770479.0,
+        "min_sample_ns": 231326125.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 4.241413107533281,
+        "p50_amortized_ns_per_operation": 231326125.0,
+        "p50_sample_ns": 231326125.0,
+        "p95_sample_ns": 240214833.0,
+        "p99_sample_ns": 240214833.0,
+        "raw_sample_ns": [
+          231326125.0,
+          240214833.0
+        ],
+        "sample_count": 2
+      },
+      "warmup_reopens": 1
+    }
+  ],
+  "schema_version": 2
+}

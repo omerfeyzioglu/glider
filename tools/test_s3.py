@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Run S3 integration tests in an isolated, disposable MinIO container."""
+import argparse
+import json
 import os
+from pathlib import Path
 import secrets
 import subprocess
 import time
@@ -30,11 +33,20 @@ def ready(endpoint):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--benchmark-smoke", type=Path, help="also validate and save local/S3 all-scenario smoke JSON in a new directory")
+    args = parser.parse_args()
+    output = args.benchmark_smoke
+    if output:
+        output.mkdir(parents=True, exist_ok=False)
     name = "glider-m2-" + secrets.token_hex(6)
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
-    env.update(MINIO_ROOT_USER="glider-test", MINIO_ROOT_PASSWORD=secrets.token_hex(24))
+    env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
+    if output:
+        run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
+        run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
     try:
         run("docker", "run", "-d", "--name", name, "-p", "127.0.0.1::9000",
             "-e", "MINIO_ROOT_USER", "-e", "MINIO_ROOT_PASSWORD", IMAGE,
@@ -58,6 +70,25 @@ def main():
         env["GLIDER_S3_ENDPOINT"] = "http://127.0.0.1:" + port
         ready(env["GLIDER_S3_ENDPOINT"])
         run(*args, "store::s3::tests::server_restart_verify", "--", "--ignored", env=env)
+        if output:
+            from benchmark_smoke import validate
+            env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="benchmark-smoke",
+                       GLIDER_S3_SERVICE_LABEL=IMAGE + "; Docker " + run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip())
+            for backend in ("local", "s3"):
+                command = ["cargo", "bench", "--locked"]
+                if backend == "s3":
+                    command += ["--features", "s3"]
+                command += ["--bench", "baseline", "--", "--backend", backend,
+                            "--rows", "10", "--dimensions", "4", "--mutations", "30",
+                            "--operations", "5", "--queries", "5", "--samples", "2", "--k", "3",
+                            "--seed", "42", "--feature", "s3-benchmarks", "--phase", "baseline",
+                            "--comparison-group", "backend-smoke", "--root", "target",
+                            "--label", "smoke validation; desktop session; power and competing load uncontrolled"]
+                raw = run(*command, env=env, capture=True)
+                validate(json.loads(raw), backend, [env["AWS_ACCESS_KEY_ID"], env["AWS_SECRET_ACCESS_KEY"]])
+                with (output / (backend + ".json")).open("x") as file:
+                    file.write(raw)
+            print("Local and S3 benchmark smoke JSON validated.", flush=True)
         print("S3 integration and abrupt MinIO restart checks passed.", flush=True)
     finally:
         subprocess.run(["docker", "rm", "-fv", name], check=False, stdout=subprocess.DEVNULL)
