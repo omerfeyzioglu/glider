@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -42,4 +46,4 @@ jobs:
           cargo test --all-features --locked
 
       - name: Run isolated MinIO integration tests
-        run: python3 tools/test_s3.py --benchmark-smoke target/backend-smoke --segment-benchmarks target/segment-smoke
+        run: python3 tools/test_s3.py --benchmark-smoke target/backend-smoke

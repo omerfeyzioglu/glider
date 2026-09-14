@@ -315,10 +315,11 @@ correctness invariants. They encode the current metadata/snapshot/tail layout an
 may change with M4 compaction. State preservation, sequence correctness and safe
 recovery remain the correctness requirements regardless of request counts.
 
-In PR CI, `--segment-benchmarks` runs smoke/regression checks for checkpoint
-setup, recovered results, reporting and request counts. These are not performance
-acceptance tests: no latency or throughput threshold gates a PR. The recorded
-timings do not establish performance on CI hardware.
+`--segment-benchmarks` is an explicit M3 recovery experiment, suitable for
+manual or scheduled validation rather than every PR. It runs smoke/regression
+checks for checkpoint setup, recovered results, reporting and request counts.
+These are not performance acceptance tests: no latency or throughput threshold
+gates a PR. The recorded timings do not establish performance on CI hardware.
 
 LocalStore still reads/validates and syncs all retained files before engine
 recovery. Its engine GET savings are not physical-I/O savings. S3 avoids GETs for
