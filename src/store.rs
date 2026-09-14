@@ -131,19 +131,7 @@ impl ObjectStore for LocalStore {
             return Err(Error::Corrupt(format!("invalid seal: {key}")));
         }
         let bytes = fs::read(self.path(&format!("{key}-body"))?)?;
-        if bytes.len() < 48 || &bytes[..8] != MAGIC {
-            return Err(Error::Corrupt(format!("invalid envelope: {key}")));
-        }
-        let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-        if len != (bytes.len() - 48) as u64 {
-            return Err(Error::Corrupt(format!("invalid length: {key}")));
-        }
-        let body_end = bytes.len() - 32;
-        let digest = Sha256::digest(&bytes[..body_end]);
-        if digest[..] != bytes[body_end..body_end + 32] {
-            return Err(Error::Corrupt(format!("checksum mismatch: {key}")));
-        }
-        Ok(Some(bytes[16..body_end].to_vec()))
+        decode_envelope(&bytes, key).map(Some)
     }
     fn list(&self) -> Result<Vec<String>> {
         self.ready()?;
@@ -172,12 +160,7 @@ impl ObjectStore for LocalStore {
         if self.get(key)?.is_some() {
             return Err(Error::Exists(key.into()));
         }
-        let mut body = Vec::with_capacity(value.len() + 48);
-        body.extend_from_slice(MAGIC);
-        body.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        body.extend_from_slice(value);
-        let digest = Sha256::digest(&body);
-        body.extend_from_slice(&digest);
+        let body = encode_envelope(value);
         // Poison before any filesystem mutation, including a caught panic. Only a
         // fresh open may validate and stabilize an uncertain publication.
         self.poisoned = true;
@@ -211,3 +194,32 @@ impl ObjectStore for LocalStore {
 
 #[cfg(test)]
 mod tests;
+
+fn encode_envelope(value: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(value.len() + 48);
+    body.extend_from_slice(MAGIC);
+    body.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    body.extend_from_slice(value);
+    let digest = Sha256::digest(&body);
+    body.extend_from_slice(&digest);
+    body
+}
+
+fn decode_envelope(bytes: &[u8], key: &str) -> Result<Vec<u8>> {
+    if bytes.len() < 48 || &bytes[..8] != MAGIC {
+        return Err(Error::Corrupt(format!("invalid envelope: {key}")));
+    }
+    let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    if len != (bytes.len() - 48) as u64 {
+        return Err(Error::Corrupt(format!("invalid length: {key}")));
+    }
+    let body_end = bytes.len() - 32;
+    let digest = Sha256::digest(&bytes[..body_end]);
+    if digest[..] != bytes[body_end..body_end + 32] {
+        return Err(Error::Corrupt(format!("checksum mismatch: {key}")));
+    }
+    Ok(bytes[16..body_end].to_vec())
+}
+
+#[cfg(feature = "s3")]
+pub mod s3;
