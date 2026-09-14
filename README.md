@@ -124,4 +124,14 @@ attempts, including every list page, request-body bytes (with envelope overhead)
 HTTP error responses and HTTP client call errors (later response-body consumption
 errors are excluded from that counter). Credential requests using that client
 are included. These counters do not measure physical I/O; exact queries generate
-no object requests. No S3 latency baseline has been established yet.
+no object requests. MinIO recovery measurements are archived in
+[benchmarks/SUMMARY.md](benchmarks/SUMMARY.md); a cloud-provider latency baseline
+has not been established.
+
+## Recovery checkpoints (M3)
+
+Call `db.checkpoint()?` to persist the current live state as one immutable segment.
+Reopen loads the latest checkpoint plus newer mutations. Checkpoint errors require
+reopening before further writes, just like uncertain mutations. Logs and older
+checkpoints are retained; this is not compaction. See [DESIGN.md](DESIGN.md) for
+publication semantics and [BENCHMARKS.md](BENCHMARKS.md) for recovery measurements.

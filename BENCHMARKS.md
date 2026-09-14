@@ -280,3 +280,33 @@ both smoke JSON reports and removes the container/data. Smoke runs use 10 rows,
 4 dimensions, 30 mutations, 5 operations per commit phase, 5 queries, 2 samples,
 k=3 and seed 42. They validate reporting and correctness; their tiny samples and
 uncontrolled desktop load are not evidence of comparative backend performance.
+
+
+## Checkpoint recovery (M3)
+
+Recovery still defaults to full log replay. `--checkpoint-at N` publishes one
+complete snapshot after put N during setup, then appends the remaining puts.
+N must be positive and no greater than `--mutations` (0 disables checkpointing).
+The same generated history, expected vectors, warmup and timers serve both modes.
+Raw recovery JSON records checkpoint sequence, publication latency, logical bytes
+written and create/HTTP counters separately; recovery timing excludes checkpoint
+creation. Default output and historical reports are unchanged.
+
+```sh
+cargo bench --locked --bench baseline -- --scenario recovery --rows 100 --mutations 1000 --checkpoint-at 900 --feature segments --phase after --comparison-group m3-recovery-1000 --root target
+python3 tools/test_s3.py --segment-benchmarks target/m3-recovery
+```
+
+The isolated MinIO runner measures both backends with 300 mutations, 30 live
+vectors of dimension 32 and five warm reopens, both without a checkpoint and with
+one at mutation 270. It verifies 301 versus 32 engine GETs per reopen (metadata,
+snapshot and 30 tail mutations), and the matching S3 HTTP counts. This is a storage
+layout experiment: `checkpoint_at` remains part of workload identity, so the
+archive does not automatically pair different checkpoint settings as a feature
+improvement. Inspect both raw runs; no cross-backend speedup is implied.
+
+LocalStore still reads/validates and syncs all retained files before engine
+recovery. Its engine GET savings are not physical-I/O savings. S3 avoids GETs for
+covered payloads but still lists the complete retained namespace. Checkpoint
+creation adds one object, and M3 removes none. Desktop/MinIO measurements do not
+establish cloud-provider latency or production durability.

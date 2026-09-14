@@ -1,0 +1,300 @@
+{
+  "comparison_group": "m3-recovery-300",
+  "config": {
+    "backend": "s3",
+    "comparison_group": "m3-recovery-300",
+    "dimensions": 32,
+    "feature": "segments",
+    "k": 10,
+    "label": "M3 recovery experiment; desktop load and power uncontrolled",
+    "mutations": 300,
+    "operations": 200,
+    "phase": "before",
+    "queries": 100,
+    "root": "/Users/omer/Desktop/vecturbo/target",
+    "rows": 30,
+    "samples": 5,
+    "scenario": "recovery",
+    "seed": 42
+  },
+  "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
+  "environment": {
+    "architecture": "aarch64",
+    "argv": [
+      "/Users/omer/Desktop/vecturbo/target/release/deps/baseline-eeaf3323d0724dc1",
+      "--scenario",
+      "recovery",
+      "--backend",
+      "s3",
+      "--rows",
+      "30",
+      "--dimensions",
+      "32",
+      "--mutations",
+      "300",
+      "--samples",
+      "5",
+      "--checkpoint-at",
+      "0",
+      "--feature",
+      "segments",
+      "--phase",
+      "before",
+      "--comparison-group",
+      "m3-recovery-300",
+      "--root",
+      "target",
+      "--label",
+      "M3 recovery experiment; desktop load and power uncontrolled",
+      "--bench"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_encoded_rustflags": null,
+    "cpu": "Apple M4",
+    "debug_assertions": false,
+    "filesystem_mount": "Filesystem   1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5   482797652 159619704 294285796    36%    /System/Volumes/Data",
+    "git_revision": "47a29007ee9178d11a81c72a11d97300593a0ab0",
+    "git_status": "M BENCHMARKS.md\n M DESIGN.md\n M README.md\n M benches/baseline.rs\n M benches/support/options.rs\n M src/lib.rs\n M src/store/s3/tests.rs\n M src/store/tests.rs\n M tests/behavior.rs\n M tests/benchmark_backend.rs\n M tests/local.rs\n M tests/test_benchmarks.py\n M tools/benchmarks.py\n M tools/test_s3.py\n?? tests/segments.rs",
+    "logical_parallelism": 10,
+    "memory": "17179869184",
+    "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+    "profile": "bench",
+    "profile_environment": {},
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "rustflags": null,
+    "s3": {
+      "addressing": "path",
+      "automatic_retries": 0,
+      "bucket": "glider-test",
+      "endpoint": "http://127.0.0.1:58848",
+      "namespace_prefix": "segment-benchmark",
+      "region": "us-east-1",
+      "request_timeout_seconds": 30,
+      "service_label": "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e; Docker 29.1.3"
+    },
+    "source_sha256": "a56c9c0185bc2e7ad0b416591a354ef33fa748c2e78dbd0a1136333b1d3a2c5b",
+    "unix_seconds": 1789421329
+  },
+  "feature": "segments",
+  "footprint_scope": "Native object count and summed object lengths from an untimed listing; client/server physical file footprint unavailable",
+  "generator": "splitmix64-high24-uniform-f32-v1",
+  "git_revision": "47a29007ee9178d11a81c72a11d97300593a0ab0",
+  "http_counter_scope": "HTTP client attempts during the measured workload; includes every LIST page and request-body envelope bytes; excludes inventory and setup. Transport errors exclude later response-body consumption errors.",
+  "measurement_protocol": "s3-v1-individual-query-timers-rusage",
+  "metric": "squared_euclidean",
+  "phase": "before",
+  "results": [
+    {
+      "backend": "s3",
+      "build_http_requests": {
+        "get": 1,
+        "http_errors": 1,
+        "list": 1,
+        "other": 0,
+        "put": 301,
+        "request_body_bytes": 143072,
+        "transport_errors": 0
+      },
+      "build_store_calls": {
+        "create_calls": 301,
+        "create_payload_bytes": 128624,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 1
+      },
+      "cache": "remote reopen after one warmup; server cache uncontrolled",
+      "database_replay": {
+        "max_sample_ns": 137788125.0,
+        "mean_ns_per_operation": 129023091.8,
+        "min_sample_ns": 120958000.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 7.750550587875464,
+        "p50_amortized_ns_per_operation": 130478417.0,
+        "p50_sample_ns": 130478417.0,
+        "p95_sample_ns": 137788125.0,
+        "p99_sample_ns": 137788125.0,
+        "raw_sample_ns": [
+          130478417.0,
+          132833000.0,
+          137788125.0,
+          123057917.0,
+          120958000.0
+        ],
+        "sample_count": 5
+      },
+      "dataset_seed": 42,
+      "dataset_sha256": "7c7d1dbe432f061e3b68ae039928e082be6437a9cf772b66644f43d6a501e921",
+      "history": "round-robin puts",
+      "http_requests_per_sample": [
+        {
+          "get": 301,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "get": 301,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "get": 301,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "get": 301,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "get": 301,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        }
+      ],
+      "inventory": {
+        "file_length_bytes": null,
+        "logical_objects": 301,
+        "object_length_bytes": 143072,
+        "physical_files": null
+      },
+      "live_documents": 30,
+      "measured_store_calls_per_sample": [
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 301,
+          "get_payload_bytes": 128624,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 301,
+          "get_payload_bytes": 128624,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 301,
+          "get_payload_bytes": 128624,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 301,
+          "get_payload_bytes": 128624,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 301,
+          "get_payload_bytes": 128624,
+          "list_calls": 1
+        }
+      ],
+      "mutation_history": 300,
+      "namespace": "segment-benchmark/glider-recovery-DB7mjc",
+      "query_seed": null,
+      "query_sha256": null,
+      "resources": {
+        "cpu_scope": "sum of open windows excluding validation and destruction",
+        "process_max_rss_bytes": 11272192,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 11173888,
+            "system_cpu_ns": 5901000,
+            "user_cpu_ns": 12523000
+          },
+          {
+            "process_max_rss_bytes": 11206656,
+            "system_cpu_ns": 6821000,
+            "user_cpu_ns": 16291000
+          },
+          {
+            "process_max_rss_bytes": 11239424,
+            "system_cpu_ns": 5887000,
+            "user_cpu_ns": 12549000
+          },
+          {
+            "process_max_rss_bytes": 11239424,
+            "system_cpu_ns": 5664000,
+            "user_cpu_ns": 11655000
+          },
+          {
+            "process_max_rss_bytes": 11272192,
+            "system_cpu_ns": 5937000,
+            "user_cpu_ns": 12963000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 30210000,
+        "user_cpu_ns": 65981000
+      },
+      "scenario": "recovery",
+      "store_open": {
+        "max_sample_ns": 39750.0,
+        "mean_ns_per_operation": 32217.0,
+        "min_sample_ns": 26084.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 31039.51330043145,
+        "p50_amortized_ns_per_operation": 31959.0,
+        "p50_sample_ns": 31959.0,
+        "p95_sample_ns": 39750.0,
+        "p99_sample_ns": 39750.0,
+        "raw_sample_ns": [
+          39750.0,
+          30292.0,
+          26084.0,
+          31959.0,
+          33000.0
+        ],
+        "sample_count": 5
+      },
+      "total_open": {
+        "max_sample_ns": 137814292.0,
+        "mean_ns_per_operation": 129055475.2,
+        "min_sample_ns": 120991167.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 7.748605771667408,
+        "p50_amortized_ns_per_operation": 130518250.0,
+        "p50_sample_ns": 130518250.0,
+        "p95_sample_ns": 137814292.0,
+        "p99_sample_ns": 137814292.0,
+        "raw_sample_ns": [
+          130518250.0,
+          132863542.0,
+          137814292.0,
+          123090125.0,
+          120991167.0
+        ],
+        "sample_count": 5
+      },
+      "warmup_reopens": 1
+    }
+  ],
+  "schema_version": 3
+}

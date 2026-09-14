@@ -117,3 +117,35 @@ fn missing_or_short_seal_hides_only_an_undetectable_tail() {
         }
     }
 }
+
+#[test]
+fn segment_crash_child() {
+    let Some(path) = std::env::var_os("GLIDER_SEGMENT_CRASH_PATH") else {
+        return;
+    };
+    let mut db = Database::open(LocalStore::open(path).unwrap(), config()).unwrap();
+    db.put(1, vec![1., 2.]).unwrap();
+    db.checkpoint().unwrap();
+    db.delete(1).unwrap();
+    db.put(2, vec![3., 4.]).unwrap();
+    std::process::exit(73);
+}
+#[test]
+fn segment_and_tail_survive_process_exit_without_destructors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("db");
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "segment_crash_child"])
+        .env("GLIDER_SEGMENT_CRASH_PATH", &root)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(73));
+    let mut db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+    db.put(3, vec![5., 6.]).unwrap();
+    drop(db);
+    let db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(3), Some([5., 6.].as_slice()));
+}

@@ -35,7 +35,11 @@ def ready(endpoint):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark-smoke", type=Path, help="also validate and save local/S3 all-scenario smoke JSON in a new directory")
+    parser.add_argument("--segment-benchmarks", type=Path, help="save local/S3 recovery measurements with and without a checkpoint in a new directory")
     args = parser.parse_args()
+    segment_output = args.segment_benchmarks
+    if segment_output:
+        segment_output.mkdir(parents=True, exist_ok=False)
     output = args.benchmark_smoke
     if output:
         output.mkdir(parents=True, exist_ok=False)
@@ -44,7 +48,7 @@ def main():
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
-    if output:
+    if output or segment_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
         run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
     try:
@@ -89,6 +93,43 @@ def main():
                 with (output / (backend + ".json")).open("x") as file:
                     file.write(raw)
             print("Local and S3 benchmark smoke JSON validated.", flush=True)
+        if segment_output:
+            env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="segment-benchmark",
+                       GLIDER_S3_SERVICE_LABEL=IMAGE + "; Docker " + run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip())
+            for backend in ("local", "s3"):
+                for checkpoint in (0, 270):
+                    command = ["cargo", "bench", "--locked"]
+                    if backend == "s3":
+                        command += ["--features", "s3"]
+                    phase = "before" if checkpoint == 0 else "after"
+                    command += ["--bench", "baseline", "--", "--scenario", "recovery", "--backend", backend,
+                                "--rows", "30", "--dimensions", "32", "--mutations", "300", "--samples", "5",
+                                "--checkpoint-at", str(checkpoint), "--feature", "segments", "--phase", phase,
+                                "--comparison-group", "m3-recovery-300", "--root", "target",
+                                "--label", "M3 recovery experiment; desktop load and power uncontrolled"]
+                    raw = run(*command, env=env, capture=True)
+                    document = json.loads(raw)
+                    result = document["results"][0]
+                    expected_gets = 301 if checkpoint == 0 else 32
+                    for counts in result["measured_store_calls_per_sample"]:
+                        assert counts["get_calls"] == expected_gets
+                        assert counts["list_calls"] == 1
+                        assert counts["create_calls"] == 0
+                    if checkpoint:
+                        assert result["checkpoint"]["sequence"] == checkpoint
+                        assert result["checkpoint"]["creates"] == 1
+                        assert result["checkpoint"]["logical_bytes_written"] > 0
+                    if backend == "s3":
+                        for counts in result["http_requests_per_sample"]:
+                            assert counts["get"] == expected_gets and counts["list"] == 1
+                            assert counts["put"] == counts["http_errors"] == counts["transport_errors"] == 0
+                        if checkpoint:
+                            assert result["checkpoint"]["http_requests"]["put"] == 1
+                    for secret in (env["AWS_ACCESS_KEY_ID"], env["AWS_SECRET_ACCESS_KEY"]):
+                        assert secret not in raw
+                    with (segment_output / f"{backend}-{phase}.json").open("x") as file:
+                        file.write(raw)
+            print("Segment and full-replay recovery measurements validated.", flush=True)
         print("S3 integration and abrupt MinIO restart checks passed.", flush=True)
     finally:
         subprocess.run(["docker", "rm", "-fv", name], check=False, stdout=subprocess.DEVNULL)

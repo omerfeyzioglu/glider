@@ -41,6 +41,9 @@ Not in scope:
 
 ## M3 — Persistent immutable segments
 
+Status: complete (explicit checkpoint segments, safe tail replay, LocalStore/MinIO
+failure tests and archived recovery measurements)
+
 Problem:
 One object per mutation causes object count and full-replay recovery cost to grow
 with mutation history.

@@ -383,25 +383,34 @@ fn minio_process_exit() {
 #[test]
 #[ignore = "runner phase before restarting MinIO"]
 fn server_restart_prepare() {
-    let mut db = Database::open(minio("server-restart"), config()).unwrap();
-    db.put(1, vec![1., 2.]).unwrap();
-    db.put(2, vec![3., 4.]).unwrap();
-    db.delete(1).unwrap();
+    for checkpoint in [false, true] {
+        let namespace = if checkpoint {
+            "server-segment-restart"
+        } else {
+            "server-restart"
+        };
+        let mut db = Database::open(minio(namespace), config()).unwrap();
+        db.put(1, vec![1., 2.]).unwrap();
+        db.put(2, vec![3., 4.]).unwrap();
+        if checkpoint {
+            db.checkpoint().unwrap();
+        }
+        db.delete(1).unwrap();
+    }
 }
 #[test]
 #[ignore = "runner phase after restarting MinIO"]
 fn server_restart_verify() {
-    let mut db = Database::open(minio("server-restart"), config()).unwrap();
-    assert_eq!(db.get(1), None);
-    assert_eq!(db.get(2), Some([3., 4.].as_slice()));
-    db.put(3, vec![5., 6.]).unwrap();
-    drop(db);
-    assert_eq!(
-        Database::open(minio("server-restart"), config())
-            .unwrap()
-            .get(3),
-        Some([5., 6.].as_slice())
-    );
+    for namespace in ["server-restart", "server-segment-restart"] {
+        let mut db = Database::open(minio(namespace), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+        db.put(3, vec![5., 6.]).unwrap();
+        drop(db);
+        let db = Database::open(minio(namespace), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(3), Some([5., 6.].as_slice()));
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -477,4 +486,78 @@ fn minio_late_conditional_request_cannot_overwrite_reused_sequence() {
         assert_eq!(db.get(3).is_some(), !old_first);
         assert_eq!(db.sequence, 3);
     }
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_segment_recovery_and_uncertain_publication() {
+    for (suffix, cut, published) in [("before", Cut::Before, false), ("after", Cut::After, true)] {
+        let namespace = format!("segment-{suffix}");
+        let fault = Fault::default();
+        let store = S3Store::with_connector(minio_builder(), &namespace, fault.clone()).unwrap();
+        let mut db = Database::open(store, config()).unwrap();
+        for i in 0..20 {
+            db.put(i % 3, vec![i as f32, 0.]).unwrap();
+        }
+        db.checkpoint().unwrap();
+        db.delete(1).unwrap();
+        *fault.0.lock().unwrap() = Some(cut);
+        assert!(db.checkpoint().is_err());
+        assert!(matches!(
+            db.put(4, vec![4., 0.]),
+            Err(Error::RecoveryRequired)
+        ));
+        assert!(matches!(db.checkpoint(), Err(Error::RecoveryRequired)));
+        drop(db);
+        let store = minio(&namespace);
+        let observer = store.metrics();
+        let mut db = Database::open(store, config()).unwrap();
+        assert_eq!(observer.snapshot().get, if published { 2 } else { 3 });
+        assert_eq!(db.get(1), None);
+        db.checkpoint().unwrap();
+        db.put(4, vec![4., 0.]).unwrap();
+        drop(db);
+        let db = Database::open(minio(&namespace), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(4), Some([4., 0.].as_slice()));
+        assert_eq!(db.sequence, 22);
+    }
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_late_segment_is_a_valid_prefix_after_newer_acknowledged_writes() {
+    let namespace = "late-segment";
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.put(1, vec![1., 2.]).unwrap();
+    drop(db);
+    let deferred = DeferredPut::default();
+    let store = S3Store::with_connector(minio_builder(), namespace, deferred.clone()).unwrap();
+    let mut db = Database::open(store, config()).unwrap();
+    assert!(db.checkpoint().is_err());
+    drop(db);
+    let request = deferred.0.lock().unwrap().take().unwrap();
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.delete(1).unwrap();
+    db.put(2, vec![3., 4.]).unwrap();
+    let client = ReqwestConnector::default()
+        .connect(&ClientOptions::new().with_allow_http(true))
+        .unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    assert!(rt
+        .block_on(client.execute(request))
+        .unwrap()
+        .status()
+        .is_success());
+    drop(db);
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+    assert_eq!(db.sequence, 3);
+    db.checkpoint().unwrap();
+    db.put(3, vec![5., 6.]).unwrap();
+    drop(db);
+    let db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(3), Some([5., 6.].as_slice()));
 }
