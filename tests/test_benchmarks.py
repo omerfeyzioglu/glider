@@ -127,7 +127,7 @@ class Comparisons(unittest.TestCase):
         self.assertIsNone(pair["delta_percent"]["get_count"])
         summary = bench.markdown(rows(before) + rows(after), [pair])
         self.assertIn("segments / segments-fixed-workload / search", summary)
-        self.assertIn("| p50_latency_ns | 100 | 80 | -20.000 |", summary)
+        self.assertIn("| p50 (ns) | 100 | 80 | -20 |", summary)
         self.assertIn("old", summary)
         self.assertIn("new", summary)
 
@@ -311,6 +311,94 @@ class BackendReports(unittest.TestCase):
         for field in ["http_get_count", "http_list_count", "http_put_count", "request_body_bytes", "http_error_count", "transport_error_count", "object_footprint_bytes"]:
             self.assertIsNone(row["metrics"][field])
         self.assertEqual(row["metrics"]["file_footprint_bytes"], 1234)
+
+
+class SummaryPresentation(unittest.TestCase):
+    def test_grouped_metrics_samples_and_missing_values(self):
+        local = rows(report())
+        remote = rows(BackendReports.s3_report())
+        legacy = rows(bench.reports(bench.decode(
+            (REPO / "benchmarks/baselines/2026-09-13-local.json").read_bytes()))[0])
+        summary = bench.markdown(local + remote + legacy, [])
+        self.assertIn("### local / search", summary)
+        self.assertIn("### s3 / search", summary)
+        self.assertIn("| search | 6 | individual query |", summary)
+        self.assertIn("| search | 5 | query batch |", summary)
+        self.assertIn("N/A", summary)
+        self.assertNotIn("null", summary)
+        self.assertIn("HTTP errors", summary)
+        self.assertIn("Transport errors", summary)
+        self.assertIn("Object bytes", summary)
+        self.assertIn("File bytes", summary)
+        self.assertIn("](runs/test.json)", summary)
+        self.assertNotIn("comparison_key", summary)
+
+    def test_every_measured_metric_is_rendered_without_mutating_inputs(self):
+        row = rows(report())[0]
+        row["metrics"] = {m: 10001 + i for i, m in enumerate(bench.METRICS)}
+        original = json.dumps(row, sort_keys=True)
+        summary = bench.markdown([row], [])
+        for metric, value in row["metrics"].items():
+            self.assertIn(bench.METRIC_LABELS[metric], summary)
+            self.assertIn(f"| {value} |", summary)
+        self.assertEqual(json.dumps(row, sort_keys=True), original)
+
+    def test_run_and_environment_metadata_appear_once(self):
+        item = report()
+        item["results"] *= 2
+        summary = bench.markdown(rows(item), [])
+        self.assertEqual(summary.count("test CPU"), 1)
+        self.assertEqual(summary.count("idle, AC"), 1)
+        self.assertEqual(summary.count("segments-fixed-workload"), 1)
+        self.assertEqual(summary.count("](runs/test.json)"), 1)
+        self.assertIn("| 1 | 1 | 2 | 0 | 0 | 0 |", summary)
+
+    def test_repeatability_and_smoke_are_not_feature_improvements(self):
+        before, after = report("before"), report("after", latency=50)
+        for item in (before, after):
+            item["environment"]["source_sha256"] = "same-source"
+        items = rows(before) + rows(after) + rows(BackendReports.s3_report())
+        pairs = bench.comparisons(items)
+        summary = bench.markdown(items, pairs)
+        self.assertEqual(len(pairs), 1)
+        self.assertIn("Repeatability; no feature effect", summary)
+        self.assertIn("local-vs-S3 smoke results are not feature improvements", summary)
+        self.assertIn("| 50 |", summary)
+        self.assertIn("| -50 |", summary)
+        after["environment"]["source_sha256"] = "different-source"
+        items = rows(before) + rows(after)
+        self.assertIn("Same revision; source changes unverified",
+                      bench.markdown(items, bench.comparisons(items)))
+
+    def test_sample_units_inventory_and_missing_configuration(self):
+        row = rows(report())[0]
+        self.assertEqual(bench.sample_count(row), 6)
+        row["latency_scope"] = "query batch"
+        self.assertEqual(bench.sample_count(row), 3)
+        row["scope"] = "recovery/total"
+        row["latency_scope"] = "full open"
+        self.assertEqual(bench.sample_count(row), 3)
+        row["scope"] = "commit/insert"
+        row["workload"]["config"]["operations"] = 7
+        self.assertEqual(bench.sample_count(row), 7)
+        row["latency_scope"] = "inventory only"
+        self.assertIsNone(bench.sample_count(row))
+        row["scope"] = "search"
+        row["latency_scope"] = "individual query"
+        del row["workload"]["config"]["queries"]
+        self.assertIsNone(bench.sample_count(row))
+
+    def test_rendering_order_escaping_and_empty_archive(self):
+        a, b = report("before", "old"), report("after", "new")
+        a["feature"] = b["feature"] = "feature | <unsafe>"
+        items = rows(a) + rows(b)
+        pairs = bench.comparisons(items)
+        summary = bench.markdown(items, pairs)
+        self.assertEqual(summary, bench.markdown(list(reversed(items)), list(reversed(pairs))))
+        self.assertIn("feature &#124; &lt;unsafe&gt;", summary)
+        empty = bench.markdown([], [])
+        self.assertIn("| 0 | 0 | 0 | 0 | 0 | 0 |", empty)
+        self.assertIn("No unambiguous compatible", empty)
 
 
 if __name__ == "__main__":

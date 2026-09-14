@@ -230,71 +230,149 @@ def comparisons(rows):
 
 def text(value):
     if value is None:
-        return "null"
+        return "N/A"
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;").replace("\r", " ").replace("\n", " ").replace("`", "&#96;")
 
 
 def display(value):
     if value is None:
-        return "null"
-    return str(value) if isinstance(value, int) else f"{value:.3f}"
+        return "N/A"
+    return str(value) if isinstance(value, int) else f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+# Presentation only: normalization, archive bytes and comparison eligibility stay unchanged.
+METRIC_LABELS = dict(zip(METRICS, (
+    "p50 (ns)", "p95 (ns)", "p99 (ns)", "Max (ns)", "Ops/s",
+    "User CPU (ns)", "System CPU (ns)", "Peak RSS (B)",
+    "Read (B)", "Written (B)", "GET", "CREATE", "Objects", "Files",
+    "File bytes", "LIST", "Object bytes", "HTTP GET", "HTTP LIST", "HTTP PUT",
+    "HTTP other", "Request body (B)", "HTTP errors", "Transport errors",
+)))
+
+
+def sample_count(row):
+    config = row["workload"]["config"]
+    if row["latency_scope"] == "inventory only":
+        return None
+    if row["scope"].startswith("commit/"):
+        return config.get("operations")
+    samples = config.get("samples")
+    if row["latency_scope"] == "individual query":
+        queries = config.get("queries")
+        return samples * queries if samples is not None and queries is not None else None
+    return samples
 
 
 def markdown(rows, pairs):
-    lines = ["# Benchmark archive", "", "Generated from raw JSON; do not edit. Missing measurements are `null`.", "",
-             "Latency is in ns; throughput in ops/s; CPU in ns; RSS/footprints/I/O in bytes.",
-             "CPU covers measured loops; RSS is process-lifetime peak (including setup). Recovery rows overlap; do not sum them.",
-             "Legacy search latency describes a batch, not an individual query. Sample maxima are not population tail guarantees.", "",
-             "## Runs", "", "| ID / raw JSON | Backend | Feature | Phase | Group | Git | Workload | Environment | Latency unit |", "|---|---|---|---|---|---|---|---|---|"]
-    for r in rows:
-        config = r["workload"]["config"]
-        label = f"{r['scope']}; d={config.get('dimensions')}; seed={config.get('seed')}"
-        if r["scope"] == "search":
-            label += f"; rows={config.get('rows')}; queries={config.get('queries')}; batches={config.get('samples')}; k={config.get('k')}"
-        elif r["scope"].startswith("commit/"):
-            state = r["observed_state"]
-            label += f"; operations/phase={config.get('operations')}; live after={state['live_documents']}; history after={state['mutation_history']}"
-        else:
-            label += f"; live rows={config.get('rows')}; input mutations={config.get('mutations')}; reopens={config.get('samples')}"
-        environment = r["environment"]
-        env_label = f"{environment.get('cpu')} / {environment.get('architecture')} / {environment.get('os')}"
-        env_label += f"; label={r['comparison_environment'].get('label')}"
-        if r["backend"] == "s3":
-            remote = obj(environment.get("s3"))
-            env_label += f"; {remote.get('endpoint')}; region={remote.get('region')}; bucket={remote.get('bucket')}; service={remote.get('service_label')}"
-        lines.append(f"| [{r['id']}]({quote(r['raw_file'], safe='/')}) | {text(r['backend'])} | {text(r['feature'])} | {text(r['phase'])} | {text(r['comparison_group'])} | {text(r['git_revision'])} | {text(label)} | {text(env_label)} | {r['latency_scope']} |")
-    for title, names in (("Latency and process resources", METRICS[:8]), ("Logical I/O and storage footprint", METRICS[8:17]), ("HTTP client requests (S3 only)", METRICS[17:])):
-        lines += ["", f"## {title}", "", "| ID | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
-        for r in rows:
-            lines.append("| " + r["id"] + " | " + " | ".join(display(r["metrics"][m]) for m in names) + " |")
-    lines += ["", "## Before / after comparisons", "",
-              "Only one before and one after with identical backend, workload, inputs, timing protocol and stable environment are paired. LocalStore and S3Store are separate backend results, never a before/after feature pair.",
-              "Revision and measured outputs may differ. Positive delta means an increase; only throughput generally prefers an increase.",
-              "Missing values or a zero denominator produce `null` deltas. No cross-workload or cross-environment percentages are reported."]
+    rows = sorted(rows, key=lambda r: r["id"])
+    run_key = lambda r: (r["raw_file"], r["raw_sha256"], r["run_index"])
+    runs = {}
+    for row in rows:
+        runs.setdefault(run_key(row), row)
+    run_ids = {key: f"R{i}" for i, key in enumerate(sorted(runs), 1)}
+    environments = sorted({canonical(r["comparison_environment"]) for r in rows})
+    env_ids = {key: f"E{i}" for i, key in enumerate(environments, 1)}
+    by_id = {r["id"]: r for r in rows}
+    used = {p[side] for p in pairs for side in ("before", "after")}
+    unmatched = [r for r in rows if r["phase"] in ("before", "after") and r["id"] not in used]
+
+    def ref(row):
+        return run_ids[run_key(row)]
+
+    def table(headers, values):
+        return ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)] + [
+            "| " + " | ".join(text(v) for v in cells) + " |" for cells in values]
+
+    def pair_kind(before, after):
+        fingerprint = before["environment"].get("source_sha256")
+        if fingerprint and fingerprint == after["environment"].get("source_sha256"):
+            return "Repeatability; no feature effect"
+        if before["git_revision"] == after["git_revision"]:
+            return "Same revision; source changes unverified"
+        return "Before/after; attribution requires source review"
+
+    repeatability = sum(pair_kind(by_id[p["before"]], by_id[p["after"]]).startswith("Repeatability") for p in pairs)
+    lines = ["# Benchmark archive", "", "Generated from raw JSON; do not edit. Full metadata and exact metric keys: [index.json](index.json).", ""]
+    lines += table(["Raw reports", "Runs", "Result rows", "Valid pairs", "Repeatability pairs", "Unpaired before/after rows"],
+                   [[len({r["raw_sha256"] for r in rows}), len(runs), len(rows), len(pairs), repeatability, len(unmatched)]])
+    lines += ["", "## Before / after", "",
+              "Pairs require one before and one after with identical backend, workload, inputs, protocol and stable environment. Delta is (after − before) / before; positive means an increase, not necessarily an improvement.",
+              "Repeatability and local-vs-S3 smoke results are not feature improvements."]
     if not pairs:
         lines += ["", "No unambiguous compatible before/after pair is available."]
-    by_id = {r["id"]: r for r in rows}
-    used = set()
-    for p in pairs:
-        before, after = by_id[p["before"]], by_id[p["after"]]
-        used.update((before["id"], after["id"]))
-        lines += ["", f"### {text(p['feature'])} / {text(p['comparison_group'])} / {before['scope']}", "",
-                  f"Before: `{before['id']}` ({text(before['git_revision'])}); after: `{after['id']}` ({text(after['git_revision'])}).",
-                  f"Workload/environment key: `{p['comparison_key']}`. Full inputs and environment are in [index.json](index.json)."]
-        if before["git_revision"] == after["git_revision"]:
-            source_hash = before["environment"].get("source_sha256")
-            if source_hash and source_hash == after["environment"].get("source_sha256"):
-                lines += ["", "Same Git revision and source fingerprint: this is a repeatability comparison, not evidence of a feature effect."]
-            else:
-                lines += ["", "Same Git revision with different or unavailable source fingerprints: inspect source/dirty state before attributing a feature effect."]
-        lines += ["", "| Metric | Before | After | Change % |", "|---|---:|---:|---:|"]
-        for m in METRICS:
-            lines.append(f"| {m} | {display(before['metrics'][m])} | {display(after['metrics'][m])} | {display(p['delta_percent'][m])} |")
-    unmatched = [r["id"] for r in rows if r["phase"] in ("before", "after") and r["id"] not in used]
+    for pair in sorted(pairs, key=lambda p: (p["feature"], p["comparison_group"], p["before"], p["after"])):
+        before, after = by_id[pair["before"]], by_id[pair["after"]]
+        lines += ["", f"### {text(pair['feature'])} / {text(pair['comparison_group'])} / {text(before['scope'])}", ""]
+        lines += table(["Backend", "Before → after", "Samples each", "Latency scope", "Interpretation"],
+                       [[before["backend"], f"{ref(before)} → {ref(after)}", sample_count(before), before["latency_scope"], pair_kind(before, after)]])
+        names = [m for m in METRICS if before["metrics"][m] is not None or after["metrics"][m] is not None]
+        lines += [""] + table(["Metric", "Before", "After", "Change %"],
+                              [[METRIC_LABELS[m], display(before["metrics"][m]), display(after["metrics"][m]), display(pair["delta_percent"][m])] for m in names])
     if unmatched:
-        lines += ["", "Unpaired runs (missing metadata, incompatible workload/environment, missing counterpart, or duplicate phase):"]
-        lines += [f"- `{r}`" for r in unmatched]
-    return "\n".join(lines) + "\n"
+        lines += ["", "Unpaired runs: " + ", ".join(sorted({ref(r) for r in unmatched})) + ". Missing counterpart/metadata, incompatible inputs/environment, or duplicate phase; no percentage is inferred."]
+
+    lines += ["", "## Run catalog", "", "Run references apply to every table below. All archived runs are retained; no latest-run selection or averaging.", ""]
+    catalog = []
+    for key in sorted(runs):
+        row = runs[key]
+        config = row["workload"]["config"]
+        scenario = config.get("scenario")
+        fields = {"search": ("rows", "queries", "samples", "k"),
+                  "commit": ("operations",), "recovery": ("rows", "mutations", "samples")}
+        keys = ("scenario", "dimensions", "seed") + fields.get(scenario, ("rows", "mutations", "operations", "queries", "samples", "k"))
+        workload = "; ".join(f"{k}={config[k]}" for k in keys if k in config)
+        catalog.append([f"[{ref(row)}]({quote(row['raw_file'], safe='/')})", row["backend"], row["feature"], row["phase"], row["comparison_group"], row["git_revision"][:12] if row["git_revision"] else None, env_ids[canonical(row["comparison_environment"]) ], workload])
+    # Links are generated from escaped paths; table cells still escape untrusted metadata.
+    lines += table(["Run / raw JSON", "Backend", "Feature", "Phase", "Group", "Git (short)", "Env", "Workload"], catalog)
+    lines += ["", "### Environments", ""]
+    env_rows = []
+    for key in environments:
+        env = json.loads(key)
+        remote = obj(env.get("s3"))
+        service = "; ".join(str(remote[k]) for k in ("endpoint", "region", "bucket", "service_label") if remote.get(k)) or None
+        env_rows.append([env_ids[key], env.get("cpu"), env.get("architecture"), env.get("label"), service])
+    lines += table(["Env", "CPU", "Arch", "Conditions", "S3 service"], env_rows)
+
+    lines += ["", "## Results by backend and scenario", "",
+              "Latency and CPU: ns; throughput: operations/s; memory, I/O and footprints: bytes. N/A means unavailable or not applicable, never zero. Entirely unmeasured metric columns/rows are omitted.",
+              "Samples count timed queries (queries × batches), legacy query batches, individual commits, or reopens according to the latency scope."]
+    groups = sorted({(r["backend"] or "unknown", r["scope"].split("/")[0]) for r in rows})
+    sections = (
+        ("Latency", METRICS[:5]),
+        ("Client process resources", METRICS[5:8]),
+        ("Logical I/O", ("get_count", "list_count", "create_count", "logical_bytes_read", "logical_bytes_written")),
+        ("Footprint", ("logical_object_count", "physical_file_count", "file_footprint_bytes", "object_footprint_bytes")),
+        ("HTTP requests", METRICS[17:]),
+    )
+    for backend, scenario in groups:
+        group = sorted((r for r in rows if (r["backend"] or "unknown") == backend and r["scope"].split("/")[0] == scenario),
+                       key=lambda r: (run_key(r), {"insert": 0, "overwrite": 1, "delete": 2, "final-footprint": 3, "total": 0, "local-store": 1, "s3-store": 1, "replay": 2}.get(r["scope"].split("/")[-1], 0), r["id"]))
+        lines += ["", f"### {text(backend)} / {text(scenario)}"]
+        for title, metrics in sections:
+            names = [m for m in metrics if any(r["metrics"][m] is not None for r in group)]
+            if not names:
+                continue
+            values = []
+            for row in group:
+                if not any(row["metrics"][m] is not None for m in names):
+                    continue
+                cells = [ref(row), row["scope"].split("/", 1)[-1]]
+                if title == "Latency":
+                    cells += [sample_count(row), row["latency_scope"]]
+                if title == "Footprint":
+                    cells += [row["observed_state"].get("live_documents"), row["observed_state"].get("mutation_history")]
+                values.append(cells + [display(row["metrics"][m]) for m in names])
+            headers = ["Run", "Scope"]
+            if title == "Latency":
+                headers += ["Samples", "Latency scope"]
+            if title == "Footprint":
+                headers += ["Live docs", "Mutation history"]
+            lines += ["", f"**{title}**", ""] + table(headers + [METRIC_LABELS[m] for m in names], values)
+
+    lines += ["", "## Measurement notes", "",
+              "- CPU covers measured loops; RSS is the client process lifetime peak including setup. Counters are totals across measured operations/reopens. HTTP bytes count request bodies, not wire traffic; logical bytes exclude envelopes. Untimed inventory and search setup requests are excluded from measured I/O.",
+              "- Legacy batch latency is not per-query latency. Small samples do not establish population tails; uncontrolled load/cache and MinIO smoke runs do not establish production or cross-backend speedups. Missing measurements and zero-denominator deltas remain N/A.", ""]
+    return "\n".join(lines)
 
 
 def load_archive(root):
