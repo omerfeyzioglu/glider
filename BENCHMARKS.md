@@ -303,7 +303,22 @@ one at mutation 270. It verifies 301 versus 32 engine GETs per reopen (metadata,
 snapshot and 30 tail mutations), and the matching S3 HTTP counts. This is a storage
 layout experiment: `checkpoint_at` remains part of workload identity, so the
 archive does not automatically pair different checkpoint settings as a feature
-improvement. Inspect both raw runs; no cross-backend speedup is implied.
+improvement. M3 demonstrates reduced GET and payload-replay work, with lower
+warm-reopen latency observed in these runs; five warm samples under uncontrolled
+load do not prove a definitive performance improvement. The 300-mutation runs
+compare checkpoint settings in the same executable. Checkpoint creation cost is
+measured separately and excluded from reopen latency, so these measurements do
+not establish an amortized total-cost improvement or a cross-backend speedup.
+
+Exact GET-count assertions are M3 layout regression checks, not permanent
+correctness invariants. They encode the current metadata/snapshot/tail layout and
+may change with M4 compaction. State preservation, sequence correctness and safe
+recovery remain the correctness requirements regardless of request counts.
+
+In PR CI, `--segment-benchmarks` runs smoke/regression checks for checkpoint
+setup, recovered results, reporting and request counts. These are not performance
+acceptance tests: no latency or throughput threshold gates a PR. The recorded
+timings do not establish performance on CI hardware.
 
 LocalStore still reads/validates and syncs all retained files before engine
 recovery. Its engine GET savings are not physical-I/O savings. S3 avoids GETs for

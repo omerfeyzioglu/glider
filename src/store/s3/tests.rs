@@ -561,3 +561,77 @@ fn minio_late_segment_is_a_valid_prefix_after_newer_acknowledged_writes() {
     assert_eq!(db.get(1), None);
     assert_eq!(db.get(3), Some([5., 6.].as_slice()));
 }
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_delayed_checkpoint_races_retry_at_same_key() {
+    // Both schedules are deterministic: recovery first observes the checkpoint
+    // absent, then either the original request or the retry wins publication.
+    for original_first in [true, false] {
+        let namespace = format!("checkpoint-retry-{original_first}");
+        let mut db = Database::open(minio(&namespace), config()).unwrap();
+        db.put(1, vec![1., 2.]).unwrap();
+        drop(db);
+        let deferred = DeferredPut::default();
+        let store = S3Store::with_connector(minio_builder(), &namespace, deferred.clone()).unwrap();
+        let mut db = Database::open(store, config()).unwrap();
+        assert!(db.checkpoint().is_err());
+        assert!(matches!(db.checkpoint(), Err(Error::RecoveryRequired)));
+        drop(db);
+        let request = deferred.0.lock().unwrap().take().unwrap();
+        assert!(request
+            .uri()
+            .path()
+            .ends_with("/segment-00000000000000000001"));
+        assert_eq!(request.headers()["if-none-match"], "*");
+        let client = ReqwestConnector::default()
+            .connect(&ClientOptions::new().with_allow_http(true))
+            .unwrap();
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let mut db = Database::open(minio(&namespace), config()).unwrap();
+        assert_eq!(db.checkpoint_sequence, None);
+        assert_eq!(db.sequence, 1);
+        if original_first {
+            assert_eq!(
+                rt.block_on(client.execute(request))
+                    .unwrap()
+                    .status()
+                    .as_u16(),
+                200
+            );
+            assert!(matches!(db.checkpoint(), Err(Error::Exists(_))));
+            assert!(matches!(db.checkpoint(), Err(Error::RecoveryRequired)));
+            assert!(matches!(
+                db.put(2, vec![3., 4.]),
+                Err(Error::RecoveryRequired)
+            ));
+            assert!(matches!(db.delete(1), Err(Error::RecoveryRequired)));
+        } else {
+            db.checkpoint().unwrap();
+            let bytes = db.store.get("segment-00000000000000000001").unwrap();
+            assert_eq!(
+                rt.block_on(client.execute(request))
+                    .unwrap()
+                    .status()
+                    .as_u16(),
+                412
+            );
+            assert_eq!(db.store.get("segment-00000000000000000001").unwrap(), bytes);
+            db.checkpoint().unwrap(); // the retry's successful handle stays usable
+        }
+        assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+        drop(db);
+        let mut db = Database::open(minio(&namespace), config()).unwrap();
+        assert_eq!(db.checkpoint_sequence, Some(1));
+        assert_eq!(db.sequence, 1); // neither checkpoint allocated a mutation
+        assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+        db.checkpoint().unwrap(); // recovered publication is an idempotent no-op
+        db.delete(1).unwrap();
+        db.put(2, vec![3., 4.]).unwrap();
+        drop(db);
+        let db = Database::open(minio(&namespace), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+        assert_eq!(db.sequence, 3);
+    }
+}
