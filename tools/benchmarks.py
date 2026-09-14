@@ -17,9 +17,12 @@ METRICS = (
     "throughput_ops_per_second", "user_cpu_ns", "system_cpu_ns",
     "process_max_rss_bytes", "logical_bytes_read", "logical_bytes_written",
     "get_count", "create_count", "logical_object_count", "physical_file_count",
-    "file_footprint_bytes",
+    "file_footprint_bytes", "list_count", "object_footprint_bytes",
+    "http_get_count", "http_list_count", "http_put_count", "http_other_count",
+    "request_body_bytes", "http_error_count", "transport_error_count",
 )
-COUNT_FIELDS = ("get_calls", "create_calls", "get_payload_bytes", "create_payload_bytes")
+HTTP_FIELDS = ("get", "list", "put", "other", "request_body_bytes", "http_errors", "transport_errors")
+COUNT_FIELDS = ("list_calls", "get_calls", "create_calls", "get_payload_bytes", "create_payload_bytes")
 
 
 def canonical(value):
@@ -50,13 +53,13 @@ def reports(document):
     if not runs:
         raise ValueError("empty archive")
     for run in runs:
-        if not isinstance(run, dict) or run.get("schema_version") not in (1, 2):
+        if not isinstance(run, dict) or run.get("schema_version") not in (1, 2, 3):
             raise ValueError("unsupported report schema")
         if not isinstance(run.get("config"), dict) or not isinstance(run.get("environment"), dict):
             raise ValueError("report must contain config and environment")
         if not isinstance(run.get("results"), list) or not run["results"]:
             raise ValueError("report must contain results")
-        if run["schema_version"] == 2:
+        if run["schema_version"] >= 2:
             for key in ("feature", "comparison_group", "measurement_protocol"):
                 if not isinstance(run.get(key), str) or not run[key].strip():
                     raise ValueError(f"missing {key}")
@@ -64,7 +67,17 @@ def reports(document):
                 raise ValueError("invalid report phase")
             if "git_revision" not in run:
                 raise ValueError("missing git_revision")
+        if run["schema_version"] == 3:
+            s3 = obj(run["environment"].get("s3"))
+            if run["config"].get("backend") != "s3" or not all(isinstance(s3.get(k), str) and s3[k].strip() for k in ("endpoint", "bucket", "region", "namespace_prefix")):
+                raise ValueError("S3 report requires backend and S3 environment metadata")
         for result in run["results"]:
+            if not isinstance(result, dict):
+                raise ValueError("expected a result object")
+            if result.get("backend") not in (None, "local", "s3"):
+                raise ValueError("invalid result backend")
+            if run["schema_version"] == 3 and result.get("backend") != "s3":
+                raise ValueError("S3 report contains mismatched result backend")
             if not isinstance(result, dict) or result.get("scenario") not in ("search", "commit", "recovery"):
                 raise ValueError("unknown result scenario")
             if result["scenario"] == "commit":
@@ -84,16 +97,16 @@ def obj(value):
     return value if isinstance(value, dict) else {}
 
 
-def totals(samples):
+def totals(samples, fields=COUNT_FIELDS):
     """Sum complete measured counters, never substitute zero for missing samples."""
     result = {}
-    for key in COUNT_FIELDS:
+    for key in fields:
         values = [number(obj(s).get(key)) for s in samples] if isinstance(samples, list) else []
         result[key] = sum(values) if values and all(v is not None for v in values) else None
     return result
 
 
-def metrics(timing=None, counts=None, resources=None, inventory=None, throughput=None):
+def metrics(timing=None, counts=None, resources=None, inventory=None, throughput=None, http=None):
     timing, counts, resources, inventory = map(obj, (timing, counts, resources, inventory))
     # Old reports retain the metrics they actually recorded. In particular, do
     # not reconstruct missing p99/CPU/RSS or treat installed RAM as process RSS.
@@ -104,10 +117,14 @@ def metrics(timing=None, counts=None, resources=None, inventory=None, throughput
     result["throughput_ops_per_second"] = number(obj(throughput if throughput is not None else timing).get("operations_per_timed_second"))
     for key in ("user_cpu_ns", "system_cpu_ns", "process_max_rss_bytes"):
         result[key] = number(resources.get(key))
-    for dest, source in (("logical_bytes_read", "get_payload_bytes"), ("logical_bytes_written", "create_payload_bytes"), ("get_count", "get_calls"), ("create_count", "create_calls")):
+    for dest, source in (("logical_bytes_read", "get_payload_bytes"), ("logical_bytes_written", "create_payload_bytes"), ("get_count", "get_calls"), ("list_count", "list_calls"), ("create_count", "create_calls")):
         result[dest] = number(counts.get(source))
-    for dest, source in (("logical_object_count", "logical_objects"), ("physical_file_count", "physical_files"), ("file_footprint_bytes", "file_length_bytes")):
+    for dest, source in (("object_footprint_bytes", "object_length_bytes"), ("logical_object_count", "logical_objects"), ("physical_file_count", "physical_files"), ("file_footprint_bytes", "file_length_bytes")):
         result[dest] = number(inventory.get(source))
+    for dest, source in (("http_get_count", "get"), ("http_list_count", "list"), ("http_put_count", "put"),
+                         ("http_other_count", "other"), ("request_body_bytes", "request_body_bytes"),
+                         ("http_error_count", "http_errors"), ("transport_error_count", "transport_errors")):
+        result[dest] = number(obj(http).get(source))
     return result
 
 
@@ -124,6 +141,9 @@ def environment_identity(run):
     identity.update(filesystem=filesystem, root=run["config"].get("root"), label=run["config"].get("label"))
     complete = all(env.get(key) is not None for key in ("architecture", "cpu", "memory", "os", "rustc", "cargo", "profile", "logical_parallelism"))
     complete = complete and all(key in env for key in fields) and filesystem is not None and identity["root"] is not None and identity["label"] is not None
+    if run["config"].get("backend") == "s3":
+        identity["s3"] = env.get("s3")
+        complete = complete and all(obj(identity["s3"]).get(k) for k in ("endpoint", "bucket", "region", "namespace_prefix"))
     return identity, complete
 
 
@@ -134,18 +154,19 @@ def normalize(run, raw_file, raw_hash, run_index):
         scenario = result["scenario"]
         if scenario == "search":
             timing_key = "query_latency" if run["schema_version"] >= 2 else "timing"
-            scopes = [("search", result, metrics(result.get(timing_key), result.get("measured_store_calls"), result.get("resources"), result.get("inventory"), result.get("timing")), "individual query" if timing_key == "query_latency" else "query batch")]
+            scopes = [("search", result, metrics(result.get(timing_key), result.get("measured_store_calls"), result.get("resources"), result.get("inventory"), result.get("timing"), http=result.get("measured_http_requests")), "individual query" if timing_key == "query_latency" else "query batch")]
         elif scenario == "commit":
-            scopes = [(f"commit/{p['phase']}", p, metrics(p.get("timing"), p.get("measured_store_calls"), p.get("resources")), "individual commit") for p in result["phases"]]
+            scopes = [(f"commit/{p['phase']}", p, metrics(p.get("timing"), p.get("measured_store_calls"), p.get("resources"), http=p.get("measured_http_requests")), "individual commit") for p in result["phases"]]
             # The original harness inventories only after the final phase. Do
             # not invent per-phase footprints from object-format assumptions.
             scopes.append(("commit/final-footprint", result, metrics(inventory=result.get("inventory")), "inventory only"))
         else:
             counts = totals(result.get("measured_store_calls_per_sample"))
+            http = totals(result.get("http_requests_per_sample"), HTTP_FIELDS)
             scopes = [
-                ("recovery/total", result, metrics(result.get("total_open"), counts, result.get("resources"), result.get("inventory")), "full open"),
-                ("recovery/local-store", result, metrics(result.get("local_store_open")), "local store open"),
-                ("recovery/replay", result, metrics(result.get("database_replay"), counts), "database replay"),
+                ("recovery/total", result, metrics(result.get("total_open"), counts, result.get("resources"), result.get("inventory"), http=http), "full open"),
+                ("recovery/s3-store" if result.get("backend") == "s3" else "recovery/local-store", result, metrics(result.get("store_open" if result.get("backend") == "s3" else "local_store_open")), "S3 client construction" if result.get("backend") == "s3" else "local store open"),
+                ("recovery/replay", result, metrics(result.get("database_replay"), counts, http=http), "database replay"),
             ]
         for scope, source, values, latency_scope in scopes:
             config = {k: v for k, v in run["config"].items() if k not in ("feature", "phase", "comparison_group", "root", "label")}
@@ -175,7 +196,7 @@ def normalize(run, raw_file, raw_hash, run_index):
             rows.append({"id": f"{raw_hash[:12]}:{run_index}:{result_index}:{scope}", "raw_file": raw_file, "raw_sha256": raw_hash,
                          "run_index": run_index, "feature": run.get("feature"), "phase": run.get("phase"),
                          "comparison_group": run.get("comparison_group"), "git_revision": revision,
-                         "scope": scope, "latency_scope": latency_scope, "workload": workload, "observed_state": observed,
+                         "backend": result.get("backend"), "scope": scope, "latency_scope": latency_scope, "workload": workload, "observed_state": observed,
                          "environment": run["environment"], "comparison_environment": env_key,
                          "measurement_protocol": run.get("measurement_protocol"),
                          "comparison_key": digest(canonical(identity).encode()) if complete else None,
@@ -224,7 +245,7 @@ def markdown(rows, pairs):
              "Latency is in ns; throughput in ops/s; CPU in ns; RSS/footprints/I/O in bytes.",
              "CPU covers measured loops; RSS is process-lifetime peak (including setup). Recovery rows overlap; do not sum them.",
              "Legacy search latency describes a batch, not an individual query. Sample maxima are not population tail guarantees.", "",
-             "## Runs", "", "| ID / raw JSON | Feature | Phase | Group | Git | Workload | Latency unit |", "|---|---|---|---|---|---|---|"]
+             "## Runs", "", "| ID / raw JSON | Backend | Feature | Phase | Group | Git | Workload | Environment | Latency unit |", "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         config = r["workload"]["config"]
         label = f"{r['scope']}; d={config.get('dimensions')}; seed={config.get('seed')}"
@@ -235,13 +256,19 @@ def markdown(rows, pairs):
             label += f"; operations/phase={config.get('operations')}; live after={state['live_documents']}; history after={state['mutation_history']}"
         else:
             label += f"; live rows={config.get('rows')}; input mutations={config.get('mutations')}; reopens={config.get('samples')}"
-        lines.append(f"| [{r['id']}]({quote(r['raw_file'], safe='/')}) | {text(r['feature'])} | {text(r['phase'])} | {text(r['comparison_group'])} | {text(r['git_revision'])} | {text(label)} | {r['latency_scope']} |")
-    for title, names in (("Latency and process resources", METRICS[:8]), ("Logical I/O and storage footprint", METRICS[8:])):
+        environment = r["environment"]
+        env_label = f"{environment.get('cpu')} / {environment.get('architecture')} / {environment.get('os')}"
+        env_label += f"; label={r['comparison_environment'].get('label')}"
+        if r["backend"] == "s3":
+            remote = obj(environment.get("s3"))
+            env_label += f"; {remote.get('endpoint')}; region={remote.get('region')}; bucket={remote.get('bucket')}; service={remote.get('service_label')}"
+        lines.append(f"| [{r['id']}]({quote(r['raw_file'], safe='/')}) | {text(r['backend'])} | {text(r['feature'])} | {text(r['phase'])} | {text(r['comparison_group'])} | {text(r['git_revision'])} | {text(label)} | {text(env_label)} | {r['latency_scope']} |")
+    for title, names in (("Latency and process resources", METRICS[:8]), ("Logical I/O and storage footprint", METRICS[8:17]), ("HTTP client requests (S3 only)", METRICS[17:])):
         lines += ["", f"## {title}", "", "| ID | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
         for r in rows:
             lines.append("| " + r["id"] + " | " + " | ".join(display(r["metrics"][m]) for m in names) + " |")
     lines += ["", "## Before / after comparisons", "",
-              "Only one before and one after with identical workload, inputs, timing protocol and stable environment are paired.",
+              "Only one before and one after with identical backend, workload, inputs, timing protocol and stable environment are paired. LocalStore and S3Store are separate backend results, never a before/after feature pair.",
               "Revision and measured outputs may differ. Positive delta means an increase; only throughput generally prefers an increase.",
               "Missing values or a zero denominator produce `null` deltas. No cross-workload or cross-environment percentages are reported."]
     if not pairs:
@@ -310,7 +337,7 @@ def publish(path, data):
 def summarize(root, check=False):
     rows = load_archive(root)
     pairs = comparisons(rows)
-    outputs = {"index.json": (json.dumps({"schema_version": 1, "rows": rows, "comparisons": pairs}, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(),
+    outputs = {"index.json": (json.dumps({"schema_version": 2, "rows": rows, "comparisons": pairs}, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(),
                "SUMMARY.md": markdown(rows, pairs).encode()}
     for name, data in outputs.items():
         path = root / name

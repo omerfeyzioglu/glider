@@ -239,5 +239,79 @@ class Archival(unittest.TestCase):
             bench.summarize(root, check=True)
 
 
+class BackendReports(unittest.TestCase):
+    @staticmethod
+    def s3_report(phase="baseline"):
+        item = report(phase)
+        item["schema_version"] = 3
+        item["config"]["backend"] = "s3"
+        item["measurement_protocol"] = "s3-v1-individual-query-timers-rusage"
+        item["environment"]["s3"] = {
+            "endpoint": "https://storage.invalid", "region": "region", "bucket": "bucket",
+            "namespace_prefix": "bench", "service_label": "test fixture"}
+        result = item["results"][0]
+        result["backend"] = "s3"
+        result["measured_http_requests"] = dict(get=2, list=3, put=4, other=0,
+            request_body_bytes=100, http_errors=1, transport_errors=2)
+        result["inventory"] = dict(logical_objects=11, object_length_bytes=1200,
+                                    physical_files=None, file_length_bytes=None)
+        return item
+
+    def test_s3_metrics_environment_and_json_roundtrip(self):
+        item = self.s3_report()
+        bench.reports(bench.decode(json.dumps(item)))
+        row = rows(item)[0]
+        self.assertEqual(row["backend"], "s3")
+        self.assertEqual(row["metrics"]["http_list_count"], 3)
+        self.assertEqual(row["metrics"]["http_put_count"], 4)
+        self.assertEqual(row["metrics"]["request_body_bytes"], 100)
+        self.assertEqual(row["metrics"]["http_error_count"], 1)
+        self.assertEqual(row["metrics"]["transport_error_count"], 2)
+        self.assertEqual(row["metrics"]["object_footprint_bytes"], 1200)
+        self.assertIsNone(row["metrics"]["file_footprint_bytes"])
+        self.assertIsNone(row["metrics"]["physical_file_count"])
+        self.assertEqual(row["comparison_environment"]["s3"], item["environment"]["s3"])
+        summary = bench.markdown([row], [])
+        for value in ["s3", "https://storage.invalid", "test fixture", "segments", "abc"]:
+            self.assertIn(value, summary)
+
+    def test_backends_and_remote_environments_cannot_be_feature_pairs(self):
+        before = report("before")
+        after = self.s3_report("after")
+        # Even if someone deliberately gives both the same feature/group/protocol.
+        after["measurement_protocol"] = before["measurement_protocol"]
+        self.assertEqual(bench.comparisons(rows(before) + rows(after)), [])
+        before = self.s3_report("before")
+        after = self.s3_report("after")
+        self.assertEqual(len(bench.comparisons(rows(before) + rows(after))), 1)
+        for field in ["endpoint", "bucket", "region", "namespace_prefix", "service_label"]:
+            changed = self.s3_report("after")
+            changed["environment"]["s3"][field] = "different"
+            self.assertEqual(bench.comparisons(rows(before) + rows(changed)), [])
+
+    def test_recovery_s3_totals_and_missing_metadata(self):
+        item = self.s3_report()
+        result = item["results"][0]
+        result["scenario"] = "recovery"
+        result["store_open"] = result["query_latency"]
+        result["http_requests_per_sample"] = [result["measured_http_requests"]] * 2
+        total, store, replay = rows(item)
+        self.assertEqual(store["scope"], "recovery/s3-store")
+        self.assertEqual(total["metrics"]["http_list_count"], 6)
+        self.assertEqual(replay["metrics"]["http_get_count"], 4)
+        self.assertIsNone(store["metrics"]["http_list_count"])
+        result["http_requests_per_sample"].append({})
+        self.assertIsNone(rows(item)[0]["metrics"]["http_get_count"])
+        del item["environment"]["s3"]["endpoint"]
+        with self.assertRaises(ValueError):
+            bench.reports(item)
+
+    def test_legacy_local_transport_is_unknown_not_zero(self):
+        row = rows(report())[0]
+        for field in ["http_get_count", "http_list_count", "http_put_count", "request_body_bytes", "http_error_count", "transport_error_count", "object_footprint_bytes"]:
+            self.assertIsNone(row["metrics"][field])
+        self.assertEqual(row["metrics"]["file_footprint_bytes"], 1234)
+
+
 if __name__ == "__main__":
     unittest.main()

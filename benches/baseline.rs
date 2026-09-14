@@ -1,8 +1,5 @@
 //! Explicit wall-clock scenarios; setup, validation, reporting and cleanup are untimed.
-use glider::{
-    store::{LocalStore, ObjectStore},
-    Config, Database, Metric,
-};
+use glider::{store::ObjectStore, Config, Database};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -19,125 +16,16 @@ use std::{
 
 #[path = "support/metrics.rs"]
 mod metrics;
-use metrics::{metadata, resources, timing, usage_delta, Usage};
+use metrics::{resources, timing, usage_delta, Usage};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[derive(Serialize)]
-struct Options {
-    scenario: String,
-    feature: String,
-    phase: String,
-    comparison_group: String,
-    rows: usize,
-    dimensions: usize,
-    mutations: usize,
-    operations: usize,
-    queries: usize,
-    samples: usize,
-    k: usize,
-    seed: u64,
-    root: PathBuf,
-    label: String,
-}
-impl Options {
-    fn parse() -> Result<Option<Self>> {
-        let mut o = Self {
-            scenario: "all".into(),
-            feature: "m1".into(),
-            phase: "baseline".into(),
-            comparison_group: "local-v2".into(),
-            rows: 1000,
-            dimensions: 32,
-            mutations: 5000,
-            operations: 200,
-            queries: 100,
-            samples: 5,
-            k: 10,
-            seed: 42,
-            root: env::temp_dir(),
-            label: "unspecified".into(),
-        };
-        let mut args = env::args().skip(1);
-        while let Some(arg) = args.next() {
-            if arg == "--bench" {
-                continue;
-            } // Cargo supplies this to custom harnesses.
-            if arg == "--help" {
-                eprintln!(
-                    "glider baseline: cargo bench --locked --bench baseline -- [options]\n\
-                    --feature NAME (m1) --phase baseline|before|after (baseline)\n\
-                    --comparison-group NAME (local-v2)\n\
-                    --scenario all|search|commit|recovery (all)\n\
-                    --rows N (1000; search size / recovery live IDs)\n\
-                    --dimensions D (32) --mutations N (5000; recovery total puts, >= rows)\n\
-                    --operations N (200; commits per insert/overwrite/delete phase)\n\
-                    --queries N (100) --samples N (5; search batches / warm reopens)\n\
-                    --k N (10) --seed N (42) --root EXISTING_DIRECTORY (OS temp directory)\n\
-                    --label TEXT (filesystem/device/power/load notes; unspecified)\n\
-                    Output: one JSON document on stdout. Run without --help to measure."
-                );
-                return Ok(None);
-            }
-            let value = args
-                .next()
-                .ok_or_else(|| format!("missing value for {arg}"))?;
-            match arg.as_str() {
-                "--scenario" => o.scenario = value,
-                "--feature" => o.feature = value,
-                "--phase" => o.phase = value,
-                "--comparison-group" => o.comparison_group = value,
-                "--rows" => o.rows = value.parse()?,
-                "--dimensions" => o.dimensions = value.parse()?,
-                "--mutations" => o.mutations = value.parse()?,
-                "--operations" => o.operations = value.parse()?,
-                "--queries" => o.queries = value.parse()?,
-                "--samples" => o.samples = value.parse()?,
-                "--k" => o.k = value.parse()?,
-                "--seed" => o.seed = value.parse()?,
-                "--root" => o.root = PathBuf::from(value),
-                "--label" => o.label = value,
-                _ => return Err(format!("unknown option: {arg}").into()),
-            }
-        }
-        if !matches!(
-            o.scenario.as_str(),
-            "all" | "search" | "commit" | "recovery"
-        ) {
-            return Err("invalid scenario".into());
-        }
-        if [
-            o.rows,
-            o.dimensions,
-            o.operations,
-            o.queries,
-            o.samples,
-            o.k,
-        ]
-        .contains(&0)
-        {
-            return Err(
-                "rows, dimensions, operations, queries, samples and k must be positive".into(),
-            );
-        }
-        if matches!(o.scenario.as_str(), "all" | "recovery") && o.mutations < o.rows {
-            return Err("recovery mutations must be >= rows".into());
-        }
-        metadata(&o.feature, &o.phase, &o.comparison_group)?;
-        o.root = o.root.canonicalize()?;
-        if !o.root.is_dir() {
-            return Err("root must be an existing directory".into());
-        }
-        Ok(Some(o))
-    }
-    fn config(&self) -> Config {
-        Config {
-            dimensions: self.dimensions,
-            metric: Metric::SquaredEuclidean,
-        }
-    }
-}
-
+#[path = "support/options.rs"]
+mod options;
+use options::{Backend, Options};
+#[path = "support/backend.rs"]
+mod backend;
+use backend::{LocalNamespace, Namespace};
 // SplitMix64-v1, high 24 bits mapped exactly to f32 in [-1, 1). Separate
 // streams keep queries unchanged when dataset cardinality changes.
 fn vectors(seed: u64, count: usize, dimensions: usize) -> Vec<Vec<f32>> {
@@ -204,45 +92,32 @@ impl<S: ObjectStore> ObjectStore for Counted<S> {
         Ok(())
     }
 }
-type Db = Database<Counted<LocalStore>>;
-fn open(root: &Path, config: Config, counts: &Rc<Cell<Counts>>) -> Result<Db> {
-    Ok(Database::open(
-        Counted {
-            inner: LocalStore::open(root)?,
-            counts: counts.clone(),
-        },
-        config,
-    )?)
-}
-fn inventory(root: &Path) -> Result<Value> {
-    // Separate from timers and counted calls. File lengths are not device I/O or
-    // allocated disk blocks. Query the store rather than inferring logical objects.
-    let objects = LocalStore::open(root)?.list()?.len();
-    let mut files = 0_u64;
-    let mut file_bytes = 0_u64;
-    for entry in fs::read_dir(root)? {
-        let metadata = entry?.metadata()?;
-        if !metadata.is_file() {
-            return Err("unexpected non-file in benchmark namespace".into());
-        }
-        files += 1;
-        file_bytes += metadata.len();
-    }
-    Ok(
-        json!({"logical_objects": objects, "physical_files": files, "file_length_bytes": file_bytes}),
-    )
+type Db<N> = Database<Counted<<N as Namespace>::Store>>;
+fn open<N: Namespace>(
+    namespace: &N,
+    config: Config,
+    counts: &Rc<Cell<Counts>>,
+) -> Result<(Db<N>, backend::Observer)> {
+    let store = namespace.open()?;
+    let observer = N::observe(&store);
+    Ok((
+        Database::open(
+            Counted {
+                inner: store,
+                counts: counts.clone(),
+            },
+            config,
+        )?,
+        observer,
+    ))
 }
 fn ns(start: Instant) -> f64 {
     start.elapsed().as_nanos() as f64
 }
 
-fn search(o: &Options) -> Result<Value> {
-    let temp = tempfile::Builder::new()
-        .prefix("glider-search-")
-        .tempdir_in(&o.root)?;
-    let root = temp.path().join("db");
+fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let counts = Rc::new(Cell::new(Counts::default()));
-    let mut db = open(&root, o.config(), &counts)?;
+    let (mut db, observer) = open(namespace, o.config(), &counts)?;
     let data = vectors(o.seed, o.rows, o.dimensions);
     let queries = vectors(o.seed ^ 0xd1b54a32d192ed03, o.queries, o.dimensions);
     let data_hash = fingerprint(&data);
@@ -251,6 +126,7 @@ fn search(o: &Options) -> Result<Value> {
         db.put(id as u64, vector)?;
     }
     let build_counts = counts.get();
+    let build_http = observer.snapshot();
     // One full query pass warms the engine and saves a reusable exact oracle.
     let oracle: Vec<Vec<u64>> = queries
         .iter()
@@ -260,6 +136,7 @@ fn search(o: &Options) -> Result<Value> {
         })
         .collect::<glider::Result<_>>()?;
     counts.set(Counts::default());
+    let http_before = observer.snapshot();
     let mut samples = Vec::with_capacity(o.samples);
     let mut query_samples = Vec::with_capacity(
         o.samples
@@ -281,26 +158,25 @@ fn search(o: &Options) -> Result<Value> {
         "query loops including timer and loop overhead",
     );
     let measured = counts.get();
+    let measured_http = observer.delta(http_before);
     drop(db);
-    Ok(
-        json!({"scenario": "search", "backend": "local", "cache": "warm in-memory query pass",
+    let mut result = json!({"scenario": "search", "backend": N::NAME, "cache": "warm in-memory query pass",
         "live_documents": o.rows, "mutation_history": o.rows, "warmup_queries": o.queries,
         "dataset_seed": o.seed, "query_seed": o.seed ^ 0xd1b54a32d192ed03_u64,
         "dataset_sha256": data_hash, "query_sha256": query_hash, "exact_neighbor_ids": oracle,
         "query_latency": timing(&query_samples, 1), "resources": cpu,
         "build_store_calls": build_counts,
         "timing": timing(&samples, o.queries), "measured_store_calls": measured,
-        "inventory": inventory(&root)?}),
-    )
+        "inventory": namespace.inventory()?});
+    backend::attach_http(&mut result, "build_http_requests", build_http);
+    backend::attach_http(&mut result, "measured_http_requests", measured_http);
+    namespace.annotate(&mut result);
+    Ok(result)
 }
 
-fn commit(o: &Options) -> Result<Value> {
-    let temp = tempfile::Builder::new()
-        .prefix("glider-commit-")
-        .tempdir_in(&o.root)?;
-    let root = temp.path().join("db");
+fn commit<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let counts = Rc::new(Cell::new(Counts::default()));
-    let mut db = open(&root, o.config(), &counts)?;
+    let (mut db, observer) = open(namespace, o.config(), &counts)?;
     let mut phases = Vec::new();
     for (phase_index, phase) in ["insert", "overwrite", "delete"].iter().enumerate() {
         let data = if *phase == "delete" {
@@ -316,6 +192,7 @@ fn commit(o: &Options) -> Result<Value> {
         let mut values = data.into_iter();
         let mut samples = Vec::with_capacity(o.operations);
         counts.set(Counts::default());
+        let http_before = observer.snapshot();
         let cpu_start = Usage::capture();
         for id in 0..o.operations {
             let vector = values.next(); // Ownership preparation is outside timing.
@@ -332,27 +209,26 @@ fn commit(o: &Options) -> Result<Value> {
         );
         let measured = counts.get();
         assert_eq!(db.get(0).is_some(), *phase != "delete");
-        phases.push(json!({"phase": phase,
+        let measured_http = observer.delta(http_before);
+        let mut result = json!({"phase": phase,
             "dataset_seed": if *phase == "delete" { None } else { Some(o.seed.wrapping_add(phase_index as u64)) },
             "query_seed": null, "query_sha256": null, "dataset_sha256": data_hash, "resources": cpu,
             "live_documents_after": if *phase == "delete" { 0 } else { o.operations },
             "mutation_history_after": (phase_index + 1) * o.operations,
-            "timing": timing(&samples, 1), "measured_store_calls": measured}));
+            "timing": timing(&samples, 1), "measured_store_calls": measured});
+        backend::attach_http(&mut result, "measured_http_requests", measured_http);
+        phases.push(result);
     }
     drop(db);
-    Ok(
-        json!({"scenario": "commit", "backend": "local", "warmup_operations": 0,
-        "phases": phases, "inventory": inventory(&root)?}),
-    )
+    let mut result = json!({"scenario": "commit", "backend": N::NAME, "warmup_operations": 0,
+        "phases": phases, "inventory": namespace.inventory()?});
+    namespace.annotate(&mut result);
+    Ok(result)
 }
 
-fn recovery(o: &Options) -> Result<Value> {
-    let temp = tempfile::Builder::new()
-        .prefix("glider-recovery-")
-        .tempdir_in(&o.root)?;
-    let root = temp.path().join("db");
+fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let counts = Rc::new(Cell::new(Counts::default()));
-    let mut db = open(&root, o.config(), &counts)?;
+    let (mut db, observer) = open(namespace, o.config(), &counts)?;
     let data = vectors(o.seed, o.mutations, o.dimensions);
     let data_hash = fingerprint(&data);
     // Round-robin overwrite history: live size is fixed independently of history.
@@ -362,20 +238,23 @@ fn recovery(o: &Options) -> Result<Value> {
         db.put((i % o.rows) as u64, vector)?;
     }
     let build_counts = counts.get();
+    let build_http = observer.snapshot();
     drop(db);
-    let footprint = inventory(&root)?;
-    drop(open(&root, o.config(), &counts)?); // Explicit untimed warm recovery.
+    let footprint = namespace.inventory()?;
+    drop(open(namespace, o.config(), &counts)?); // Explicit untimed warm recovery.
     let mut store_samples = Vec::with_capacity(o.samples);
     let mut replay_samples = Vec::with_capacity(o.samples);
     let mut total_samples = Vec::with_capacity(o.samples);
     let mut calls = Vec::with_capacity(o.samples);
     let mut cpu_samples = Vec::with_capacity(o.samples);
+    let mut http_samples = Vec::new();
     for _ in 0..o.samples {
         counts.set(Counts::default());
         let cpu_start = Usage::capture();
         let start = Instant::now();
-        let store = LocalStore::open(&root)?;
+        let store = namespace.open()?;
         let store_ns = ns(start);
+        let observer = N::observe(&store);
         let counted = Counted {
             inner: store,
             counts: counts.clone(),
@@ -389,21 +268,34 @@ fn recovery(o: &Options) -> Result<Value> {
         replay_samples.push(replay_ns);
         total_samples.push(total_ns);
         calls.push(counts.get());
+        if let Some(http) = observer.snapshot() {
+            http_samples.push(http);
+        }
         for (id, value) in expected.iter().enumerate() {
             assert_eq!(db.get(id as u64), Some(value.as_slice()));
         }
         drop(db); // Destruction excluded from recovery time.
     }
-    Ok(
-        json!({"scenario": "recovery", "backend": "local", "cache": "warm OS cache; no eviction",
+    let mut result = json!({"scenario": "recovery", "backend": N::NAME, "cache": N::RECOVERY_CACHE,
         "live_documents": o.rows, "mutation_history": o.mutations, "history": "round-robin puts",
         "dataset_seed": o.seed, "query_seed": null, "query_sha256": null,
         "resources": resources(cpu_samples, "sum of open windows excluding validation and destruction"),
         "dataset_sha256": data_hash, "warmup_reopens": 1, "build_store_calls": build_counts,
         "local_store_open": timing(&store_samples, 1), "database_replay": timing(&replay_samples, 1),
         "total_open": timing(&total_samples, 1), "measured_store_calls_per_sample": calls,
-        "inventory": footprint}),
-    )
+        "inventory": footprint});
+    if N::NAME == "s3" {
+        let open = result
+            .as_object_mut()
+            .unwrap()
+            .remove("local_store_open")
+            .unwrap();
+        result["store_open"] = open;
+        result["http_requests_per_sample"] = json!(http_samples);
+    }
+    backend::attach_http(&mut result, "build_http_requests", build_http);
+    namespace.annotate(&mut result);
+    Ok(result)
 }
 
 fn command(program: &str, args: &[&str]) -> Option<String> {
@@ -476,6 +368,13 @@ fn context(o: &Options) -> Result<Value> {
         "debug_assertions": cfg!(debug_assertions), "argv": env::args().collect::<Vec<_>>()
     }))
 }
+fn run_scenario<N: Namespace>(o: &Options, scenario: &str, namespace: &N) -> Result<Value> {
+    match scenario {
+        "search" => search(o, namespace),
+        "commit" => commit(o, namespace),
+        _ => recovery(o, namespace),
+    }
+}
 fn main() -> Result<()> {
     let Some(options) = Options::parse()? else {
         return Ok(());
@@ -483,7 +382,18 @@ fn main() -> Result<()> {
     if cfg!(debug_assertions) {
         return Err("run with cargo bench (optimized bench profile)".into());
     }
-    let environment = context(&options)?;
+    #[cfg(feature = "s3")]
+    let s3_config = if options.backend == Backend::S3 {
+        Some(backend::S3Config::from_env()?)
+    } else {
+        None
+    };
+    #[allow(unused_mut)]
+    let mut environment = context(&options)?;
+    #[cfg(feature = "s3")]
+    if let Some(config) = &s3_config {
+        environment["s3"] = config.metadata();
+    }
     let mut results = Vec::new();
     for scenario in ["search", "commit", "recovery"] {
         if options.scenario == "all" || options.scenario == scenario {
@@ -491,21 +401,44 @@ fn main() -> Result<()> {
                 "Measuring {scenario}: seed={}, dimensions={}",
                 options.seed, options.dimensions
             );
-            results.push(match scenario {
-                "search" => search(&options)?,
-                "commit" => commit(&options)?,
-                _ => recovery(&options)?,
+            results.push(match options.backend {
+                Backend::Local => run_scenario(
+                    &options,
+                    scenario,
+                    &LocalNamespace::new(&options.root, scenario)?,
+                )?,
+                Backend::S3 => {
+                    #[cfg(feature = "s3")]
+                    {
+                        run_scenario(
+                            &options,
+                            scenario,
+                            &backend::S3Namespace::new(
+                                s3_config.as_ref().unwrap().clone(),
+                                scenario,
+                            )?,
+                        )?
+                    }
+                    #[cfg(not(feature = "s3"))]
+                    {
+                        return Err("S3 benchmarks require --features s3".into());
+                    }
+                }
             });
         }
     }
-    let report = json!({"schema_version": 2,
+    let mut report = json!({"schema_version": if options.backend == Backend::Local { 2 } else { 3 },
         "feature": options.feature, "phase": options.phase, "comparison_group": options.comparison_group,
         "git_revision": environment["git_revision"],
-        "measurement_protocol": "local-v2-individual-query-timers-rusage", "generator": "splitmix64-high24-uniform-f32-v1",
+        "measurement_protocol": if options.backend == Backend::Local { "local-v2-individual-query-timers-rusage" } else { "s3-v1-individual-query-timers-rusage" }, "generator": "splitmix64-high24-uniform-f32-v1",
         "metric": "squared_euclidean",
         "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
         "footprint_scope": "Logical objects, physical files, and summed file lengths; not allocated blocks or device bytes written",
         "config": options, "environment": environment, "results": results});
+    if options.backend == Backend::S3 {
+        report["http_counter_scope"] = json!("HTTP client attempts during the measured workload; includes every LIST page and request-body envelope bytes; excludes inventory and setup. Transport errors exclude later response-body consumption errors.");
+        report["footprint_scope"] = json!("Native object count and summed object lengths from an untimed listing; client/server physical file footprint unavailable");
+    }
     serde_json::to_writer_pretty(io::stdout().lock(), &report)?;
     writeln!(io::stdout())?;
     Ok(())
