@@ -319,7 +319,7 @@ def markdown(rows, pairs):
         scenario = config.get("scenario")
         fields = {"search": ("rows", "queries", "samples", "k"),
                   "commit": ("operations",), "recovery": ("rows", "mutations", "samples")}
-        keys = ("scenario", "dimensions", "seed") + fields.get(scenario, ("rows", "mutations", "operations", "queries", "samples", "k"))
+        keys = ("scenario", "dimensions", "seed", "checkpoint_at") + fields.get(scenario, ("rows", "mutations", "operations", "queries", "samples", "k"))
         workload = "; ".join(f"{k}={config[k]}" for k in keys if k in config)
         catalog.append([f"[{ref(row)}]({quote(row['raw_file'], safe='/')})", row["backend"], row["feature"], row["phase"], row["comparison_group"], row["git_revision"][:12] if row["git_revision"] else None, env_ids[canonical(row["comparison_environment"]) ], workload])
     # Links are generated from escaped paths; table cells still escape untrusted metadata.
@@ -370,6 +370,7 @@ def markdown(rows, pairs):
             lines += ["", f"**{title}**", ""] + table(headers + [METRIC_LABELS[m] for m in names], values)
 
     lines += ["", "## Measurement notes", "",
+              "- Recovery loads a checkpoint plus its tail, or the full log when disabled. LocalStore still validates and synchronizes all retained files. Recovery total/store/replay rows overlap; do not sum them.",
               "- CPU covers measured loops; RSS is the client process lifetime peak including setup. Counters are totals across measured operations/reopens. HTTP bytes count request bodies, not wire traffic; logical bytes exclude envelopes. Untimed inventory and search setup requests are excluded from measured I/O.",
               "- Legacy batch latency is not per-query latency. Small samples do not establish population tails; uncontrolled load/cache and MinIO smoke runs do not establish production or cross-backend speedups. Missing measurements and zero-denominator deltas remain N/A.", ""]
     return "\n".join(lines)

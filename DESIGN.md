@@ -12,7 +12,7 @@ The Rust library implements this path:
 
 ```text
 Database API (put / get / delete / exact search)
-    -> in-memory document map + durable mutation log / recovery
+    -> in-memory document map + immutable checkpoints + mutation log / recovery
     -> ObjectStore abstraction
     -> local development backend or S3-compatible backend
 ```
@@ -20,9 +20,10 @@ Database API (put / get / delete / exact search)
 One mutable `Database` handle exclusively owns a storage namespace. The caller
 must prevent concurrent owners, including across processes; no locking or
 multi-writer protocol is provided. An owned object-store handle isolates the
-engine from filesystem operations. The complete durable log is authoritative;
-the in-memory map is derived. Reads observe that map, and successful writes
-become visible after durable storage.
+engine from filesystem operations. The newest complete checkpoint and newer
+mutations are authoritative; without a checkpoint, recovery uses the complete
+durable log. The in-memory map is derived. Reads observe that map, and successful
+writes become visible after durable storage.
 
 Document IDs are u64. Vectors have one positive, persisted dimension and finite
 f32 components. The persisted metric enum supports squared Euclidean and Manhattan
@@ -107,7 +108,7 @@ feature checklist or a promise to implement every referenced mechanism.
    repeated replay is idempotent.
 4. Exact kNN returns the correct top-k for the configured metric with deterministic
    ties. It remains the correctness oracle for future ANN quality evaluation.
-5. Future compaction or physical reorganization must preserve logical results.
+5. Checkpoints and future compaction must preserve logical results.
 6. Changing storage backends must preserve database-level correctness semantics.
 
 ## Object storage and persisted formats
@@ -129,8 +130,8 @@ Schema changes require explicit format-version handling.
 Immutable numbered objects avoid append operations unavailable in object stores.
 Immutable segments with a conditional mutable head could coordinate writers but
 add a publication protocol unnecessary for exclusive ownership. The chosen layout
-costs one object per mutation and full replay at startup. JSON favors straightforward
-validation over a custom binary format.
+costs one object per mutation; checkpoints reduce payload replay without deleting
+history. JSON favors straightforward validation over a custom binary format.
 
 ## Acknowledgement and recovery
 
@@ -140,10 +141,49 @@ acknowledged state. Initialization has the same uncertain outcome: reopen after
 an error to discover whether metadata was published. Acknowledgement never depends
 on destructors.
 
-Recovery replays every complete log object in sequence, including completed writes
-that were not acknowledged. Requested configuration must exactly match metadata.
+Recovery loads the newest complete checkpoint, if present, and replays newer
+complete log objects in sequence, including completed writes that were not
+acknowledged. Requested configuration must exactly match metadata.
 Unknown fields, invalid records or vectors, unsupported versions, unexpected keys,
 internal sequence gaps, and mutation objects without metadata fail recovery.
+
+## Immutable checkpoint segments (M3)
+
+`Database::checkpoint()` publishes the complete live state at the current mutation
+sequence as one immutable `segment-` object with a 20-digit sequence suffix.
+Its version-1 JSON contains version, sequence, configuration and a strictly
+ID-sorted array of `(id, vector)` entries. The existing backend envelope protects
+its bytes. Deletes are represented by absence; the sequence boundary prevents
+older puts from resurrecting deleted IDs. An empty sequence-zero checkpoint is valid.
+
+A complete single-object snapshot uses native object publication. A separate
+manifest or mutable head would add another uncertain publication boundary without
+benefit while snapshots fit in one object and ownership is exclusive. Recovery
+selects the highest complete segment key from the strongly consistent listing;
+there is no rename, in-place update or filesystem-specific engine operation.
+
+Success acknowledges a durable snapshot, without advancing the mutation sequence.
+Errors or panics during publication poison mutations and checkpoints until reopen;
+reads retain the acknowledged state. An incomplete snapshot is invisible under the
+backend contract. A complete snapshot with a lost acknowledgement can be selected
+on reopen. A delayed S3 publication remains a valid snapshot of its fixed prefix,
+including after newer mutations commit. Repeating a checkpoint at the recovered
+checkpoint sequence is a no-op; no object is overwritten.
+
+Recovery validates the selected segment's version, configuration, sequence,
+strict ID ordering, dimensions and finite vectors, then decodes only newer mutation
+payloads. An invalid or missing selected segment fails recovery, never silently
+falls back. All retained mutation keys must still be contiguous from 1, and no
+segment may extend beyond that history. Covered mutation payloads and older
+segments are not decoded by the engine; LocalStore still validates all envelopes
+and stabilizes all files on open. Older binaries reject segment keys rather than
+misread the namespace. Existing log-only databases remain readable.
+
+Checkpointing is explicit and synchronous; it serializes the full live map in
+memory. M3 retains all logs and snapshots, requires listing all keys, and does not
+bound storage, listing, memory or LocalStore reopen costs. Deletion/garbage
+collection and merging segments belong to M4. Checkpoints do not change mutation
+acknowledgement or solve external deletion of an unwitnessed log tail.
 
 ## Local backend
 

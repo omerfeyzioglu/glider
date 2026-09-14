@@ -154,3 +154,24 @@ fn s3_environment_is_explicit_validated_and_never_serializes_credentials() {
         .is_err());
     }
 }
+
+#[test]
+fn checkpoint_benchmark_option_is_explicit_and_validated() {
+    let default = Options::parse_from(Vec::<String>::new()).unwrap().unwrap();
+    assert!(serde_json::to_value(default)
+        .unwrap()
+        .get("checkpoint_at")
+        .is_none());
+    let options =
+        Options::parse_from(["--scenario", "recovery", "--checkpoint-at", "900"].map(String::from))
+            .unwrap()
+            .unwrap();
+    assert_eq!(serde_json::to_value(options).unwrap()["checkpoint_at"], 900);
+    for args in [
+        vec!["--scenario", "search", "--checkpoint-at", "1"],
+        vec!["--checkpoint-at", "5001"],
+        vec!["--checkpoint-at", "-1"],
+    ] {
+        assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
+    }
+}

@@ -42,4 +42,4 @@ jobs:
           cargo test --all-features --locked
 
       - name: Run isolated MinIO integration tests
-        run: python3 tools/test_s3.py --benchmark-smoke target/backend-smoke
+        run: python3 tools/test_s3.py --benchmark-smoke target/backend-smoke --segment-benchmarks target/segment-smoke

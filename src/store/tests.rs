@@ -298,3 +298,37 @@ fn local_publication_panic_also_blocks_recovery_on_the_same_handle() {
         assert_eq!(db.get(1), Some([1.].as_slice()));
     }
 }
+
+#[test]
+fn segment_publication_failures_preserve_state_and_allow_recovery_then_writes() {
+    for point in publication_points() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("db");
+        let fault = Rc::new(RefCell::new(Fault::default()));
+        let mut db = Database::open(open(&root, &fault).unwrap(), config()).unwrap();
+        db.put(1, vec![1.]).unwrap();
+        db.checkpoint().unwrap();
+        db.delete(1).unwrap();
+        db.put(2, vec![2.]).unwrap();
+        fault.borrow_mut().arm(&point, 0);
+        assert!(db.checkpoint().is_err(), "{point}");
+        fault.borrow().fired();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(2), Some([2.].as_slice()));
+        assert!(matches!(db.put(3, vec![3.]), Err(Error::RecoveryRequired)));
+        assert!(matches!(db.checkpoint(), Err(Error::RecoveryRequired)));
+        drop(db);
+        let mut db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+        assert_eq!(db.get(1), None, "{point}");
+        assert_eq!(db.get(2), Some([2.].as_slice()), "{point}");
+        assert_eq!(db.sequence, 3);
+        db.checkpoint().unwrap();
+        db.put(3, vec![3.]).unwrap();
+        drop(db);
+        let db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(2), Some([2.].as_slice()));
+        assert_eq!(db.get(3), Some([3.].as_slice()));
+        assert_eq!(db.sequence, 4);
+    }
+}

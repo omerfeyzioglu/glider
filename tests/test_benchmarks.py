@@ -401,5 +401,16 @@ class SummaryPresentation(unittest.TestCase):
         self.assertIn("No unambiguous compatible", empty)
 
 
+class SegmentBenchmarkMetadata(unittest.TestCase):
+    def test_checkpoint_setup_is_visible_and_not_silently_paired(self):
+        before, after = report("before"), report("after")
+        after["config"]["checkpoint_at"] = 9
+        values = rows(before) + rows(after)
+        self.assertEqual(bench.comparisons(values), [])
+        summary = bench.markdown(values, [])
+        self.assertIn("checkpoint_at=9", summary)
+        self.assertIn("Unpaired runs", summary)
+
+
 if __name__ == "__main__":
     unittest.main()

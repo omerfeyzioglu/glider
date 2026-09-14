@@ -233,9 +233,22 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let data_hash = fingerprint(&data);
     // Round-robin overwrite history: live size is fixed independently of history.
     let mut expected = vec![Vec::new(); o.rows];
+    let mut checkpoint = None;
     for (i, vector) in data.into_iter().enumerate() {
         expected[i % o.rows] = vector.clone();
         db.put((i % o.rows) as u64, vector)?;
+        if o.checkpoint_at == i + 1 {
+            let before = counts.get();
+            let before_http = observer.snapshot();
+            let start = Instant::now();
+            db.checkpoint()?;
+            let elapsed = ns(start);
+            let mut result = json!({"sequence": i + 1, "latency_ns": elapsed,
+                "logical_bytes_written": counts.get().create_payload_bytes - before.create_payload_bytes,
+                "creates": counts.get().create_calls - before.create_calls});
+            backend::attach_http(&mut result, "http_requests", observer.delta(before_http));
+            checkpoint = Some(result);
+        }
     }
     let build_counts = counts.get();
     let build_http = observer.snapshot();
@@ -284,6 +297,9 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         "local_store_open": timing(&store_samples, 1), "database_replay": timing(&replay_samples, 1),
         "total_open": timing(&total_samples, 1), "measured_store_calls_per_sample": calls,
         "inventory": footprint});
+    if let Some(checkpoint) = checkpoint {
+        result["checkpoint"] = checkpoint;
+    }
     if N::NAME == "s3" {
         let open = result
             .as_object_mut()

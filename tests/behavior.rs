@@ -154,6 +154,7 @@ fn ambiguous_writes_require_recovery() {
         store.0.borrow_mut().fail = Some(committed);
         assert!(db.delete(1).is_err());
         assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+        assert!(matches!(db.checkpoint(), Err(Error::RecoveryRequired)));
         assert!(matches!(
             db.put(2, vec![0., 0.]),
             Err(Error::RecoveryRequired)
@@ -298,6 +299,7 @@ fn backend_panics_keep_handle_poisoned_before_and_after_publication() {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.delete(1)));
         assert!(result.is_err());
         assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+        assert!(matches!(db.checkpoint(), Err(Error::RecoveryRequired)));
         assert!(matches!(
             db.put(2, vec![2., 3.]),
             Err(Error::RecoveryRequired)
