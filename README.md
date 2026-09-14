@@ -71,3 +71,57 @@ revision over time.
 
 See [DESIGN.md](DESIGN.md) for the architecture and durability model, and
 [ROADMAP.md](ROADMAP.md) for the project development path.
+
+
+## S3-compatible backend (M2)
+
+Enable the `s3` Cargo feature. Provision a bucket and give one database exclusive
+ownership of a namespace prefix. Use nonoverlapping prefixes. Configure credentials through the client builder
+or standard AWS environment variables; do not place credentials in source files.
+The backend requires strongly consistent GET/LIST and conditional PUT support.
+
+```rust,no_run
+use glider::{Config, Database, Metric, store::s3::{AmazonS3Builder, S3Store}};
+
+let builder = AmazonS3Builder::from_env()
+    .with_bucket_name("my-glider-bucket")
+    .with_region("us-east-1");
+// For MinIO, additionally set .with_endpoint("http://127.0.0.1:9000")
+// and .with_allow_http(true). Use HTTPS for remote deployments.
+let store = S3Store::open(builder, "vectors/example")?;
+let metrics = store.metrics();
+let mut db = Database::open(store, Config {
+    dimensions: 2, metric: Metric::SquaredEuclidean,
+})?;
+db.put(42, vec![1.0, 2.0])?;
+println!("{:?}", metrics.snapshot());
+# Ok::<(), glider::Error>(())
+```
+
+This API blocks. In a Tokio application, construct and use the database inside
+`tokio::task::spawn_blocking`; do not call it directly from an async task.
+After a mutation error, discard the database and open a fresh store/database to
+resolve the uncertain outcome. Creates use conditional native publication with
+no automatic retries. The local body/seal protocol is not used on S3.
+
+Run offline unit tests and real integration tests:
+
+```sh
+cargo test --locked --features s3
+python3 tools/test_s3.py
+```
+
+The integration runner requires Docker and Python 3. It starts a pinned MinIO
+image on an ephemeral loopback port, creates a disposable bucket with generated
+test credentials, tests pagination and failure recovery, kills/restarts MinIO,
+and removes its container/data afterward. No existing buckets or credentials are
+used. Service-dependent Rust tests are explicitly ignored in ordinary test runs;
+the runner executes them, and CI invokes the runner.
+
+`S3Store::metrics()` returns a cloneable observer that remains available after the
+store is moved into `Database`. Snapshot differences count actual HTTP client
+attempts, including every list page, request-body bytes (with envelope overhead),
+HTTP error responses and HTTP client call errors (later response-body consumption
+errors are excluded from that counter). Credential requests using that client
+are included. These counters do not measure physical I/O; exact queries generate
+no object requests. No S3 latency baseline has been established yet.

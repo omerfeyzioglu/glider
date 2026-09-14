@@ -21,6 +21,8 @@ Done when:
 
 ## M2 — Real object-store backend
 
+Status: complete (S3-compatible backend and MinIO integration tests)
+
 Goal:
 Validate that the engine's storage contract works against S3-compatible object
 storage rather than only the local filesystem implementation.

@@ -35,3 +35,11 @@ jobs:
 
       - name: Check generated benchmark summary
         run: python3 tools/benchmarks.py summary --check
+
+      - name: Check S3 feature
+        run: |
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-features --locked
+
+      - name: Run isolated MinIO integration tests
+        run: python3 tools/test_s3.py

@@ -14,7 +14,7 @@ The Rust library implements this path:
 Database API (put / get / delete / exact search)
     -> in-memory document map + durable mutation log / recovery
     -> ObjectStore abstraction
-    -> local development backend
+    -> local development backend or S3-compatible backend
 ```
 
 One mutable `Database` handle exclusively owns a storage namespace. The caller
@@ -116,9 +116,9 @@ Successful object creation means complete, immutable bytes are durable and visib
 to get/list. Reads and listings must expose only durable complete objects; after
 an uncertain create, a backend must stabilize them or reject access until reopened.
 Complete keys cannot be replaced. Listings must be complete and
-strongly consistent, though ordering is not required. A future S3-compatible
-backend must collect all listing pages and provide this same object contract
-using native complete-object publication.
+strongly consistent, though ordering is not required. The S3-compatible
+backend collects all listing pages and provides this object contract using native
+complete-object publication.
 
 `metadata` is the first durable object: UTF-8 JSON containing format version 1
 and the configuration. Each mutation is one immutable UTF-8 JSON object containing
@@ -176,6 +176,41 @@ namespace and parent. Local durability requires exclusive access and a
 filesystem/device honoring file and directory synchronization. These operations
 implement the object contract locally; they are not engine-level storage APIs.
 
+## S3-compatible backend
+
+The optional `s3` feature implements the same synchronous ObjectStore contract.
+The `object_store` client handles signing, HTTP and pagination; glider retains
+ownership of the log, validation, recovery and search. Using this client avoids
+handwritten signing/HTTP machinery. A private Tokio runtime bridges its async I/O
+without changing the engine API; callers use blocking threads.
+
+One bucket plus a nonempty, nonoverlapping namespace prefix identifies a database. The caller
+provisions the bucket, credentials and exclusive namespace ownership. The service
+must provide strongly consistent get/list and atomic conditional PUT. Each create
+sends one `If-None-Match: *` PUT with no preflight existence check, multipart upload,
+unconditional fallback or automatic retry. Success acknowledges durable native
+publication. Any create error or panic poisons the store until a fresh handle is
+opened; the database retains its existing acknowledged-state read semantics.
+A timed-out request may still complete remotely. Conditional creation prevents a
+late request from replacing a newly committed object at the same sequence key.
+
+Each S3 object contains the existing `VTOBJ001` length/payload/SHA-256 envelope;
+there are no seal objects. Native publication replaces local sealing. GET consumes
+and validates the entire envelope before returning payload bytes. Recovery gets
+all listing pages before replay; page errors fail open rather than returning a
+partial prefix. Namespace keys and persisted records remain strictly validated.
+Complete visible objects are already durable under the required service contract,
+so recovery needs no local synchronization barrier. External tail-object deletion
+remains undetectable, as with the local backend.
+
+Cloneable request metrics count transport-level GET, listing-page, PUT and other
+attempts, request body bytes, HTTP error responses and transport errors. These
+are not device I/O or latency measurements. MinIO integration tests exercise
+conditional creation, pagination, namespace isolation, response-loss uncertainty,
+late conditional requests, corruption, client process exit and abrupt server restart. They do not prove
+provider hardware durability or substitute for validation against a deployment's
+chosen S3-compatible service.
+
 ## Limits and current non-goals
 
 The durability contract covers process termination and interrupted writes, not
@@ -185,7 +220,7 @@ operation that never published. Detecting such external loss requires an
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-ANN, filtering, compaction, an S3 backend, sharding, replication, distributed
+ANN, filtering, compaction, sharding, replication, distributed
 consensus, multi-node execution, quantization, networking, SQL compatibility,
 authentication/authorization, production hardening, and GPU execution are outside
 the current implementation. These are not permanent restrictions; additions
