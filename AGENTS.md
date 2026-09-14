@@ -13,8 +13,27 @@ Treat this as a real systems project. Do not simplify designs merely for
 educational purposes, but do not introduce complexity without a concrete
 technical reason.
 
-Before substantial work, read `DESIGN.md` and inspect the relevant existing
-code and tests.
+Before substantial work, ensure the current `AGENTS.md` and `DESIGN.md` are
+available in context as described below, and inspect relevant code and tests.
+
+## Documentation reading
+
+- Read `AGENTS.md` and `DESIGN.md` once when their current contents are not
+  already available in context. Do not reread unchanged documents still in context.
+- Track the version read using file hashes or a known Git revision plus working
+  tree changes. Before substantial work resumes, verify freshness without loading
+  full text. Read changes relative to that version; a clean working tree alone
+  does not prove the files are unchanged since the last read.
+- If prior contents or the version read are unavailable, reload the required
+  documents. After context compaction, a recollection of having read them is not
+  enough; reload any requirements no longer available in context.
+- Do not load all Markdown files by default. Read `ROADMAP.md` for milestone
+  planning, `README.md` for setup or public usage, and relevant `BENCHMARKS.md`
+  sections for benchmark work. Search `benchmarks/SUMMARY.md` by backend, scenario,
+  or run; consult matching raw results and measurement definitions as needed.
+- Locate sections with `rg -n '^#{1,6} ' FILE` and read relevant ranges. Read full
+  documents when the task requires it. Never omit architecture, durability,
+  recovery, or persisted-format requirements needed for correctness.
 
 ## Engineering rules
 
