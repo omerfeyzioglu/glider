@@ -147,6 +147,17 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
                 .map(|hits| hits.into_iter().map(|hit| hit.id).collect())
         })
         .collect::<glider::Result<_>>()?;
+    if o.profile_seconds > 0 {
+        // Profilers attach only after durable setup and the oracle warmup.
+        // Diagnostic reports must not be used as unprofiled latency baselines.
+        eprintln!("PROFILE_READY {}", std::process::id());
+        let start = Instant::now();
+        while start.elapsed().as_secs_f64() < o.profile_seconds as f64 {
+            for query in &queries {
+                black_box(db.search(black_box(query), o.k)?);
+            }
+        }
+    }
     counts.set(Counts::default());
     let http_before = observer.snapshot();
     let mut samples = Vec::with_capacity(o.samples);

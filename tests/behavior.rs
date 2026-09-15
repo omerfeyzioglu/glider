@@ -323,3 +323,45 @@ fn backend_panics_keep_handle_poisoned_before_and_after_publication() {
         );
     }
 }
+
+#[test]
+fn top_k_matches_full_sort_with_ties_extremes_and_boundary_sizes() {
+    for metric in [Metric::SquaredEuclidean, Metric::Manhattan] {
+        let mut db = Database::open(Memory::default(), Config { metric, ..config() }).unwrap();
+        let mut points = Vec::new();
+        for id in (0..257_u64).rev() {
+            let vector = match id % 5 {
+                0 => vec![0., -0.],
+                1 => vec![f32::MAX, -f32::MAX],
+                2 => vec![f32::from_bits(1), 0.],
+                _ => vec![(id % 17) as f32, -((id % 13) as f32)],
+            };
+            db.put(id, vector.clone()).unwrap();
+            points.push((id, vector));
+        }
+        for query in [[0., 0.], [f32::MAX, f32::MAX], [3., -4.]] {
+            let mut expected: Vec<glider::Neighbor> = points
+                .iter()
+                .map(|(id, vector)| {
+                    let mut distance = 0.0;
+                    for (&a, &b) in query.iter().zip(vector) {
+                        let delta = f64::from(a) - f64::from(b);
+                        distance += match metric {
+                            Metric::SquaredEuclidean => delta * delta,
+                            Metric::Manhattan => delta.abs(),
+                        };
+                    }
+                    glider::Neighbor { id: *id, distance }
+                })
+                .collect();
+            expected.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+            for k in [0, 1, 2, 7, 31, 64, 127, 128, 129, 256, 257, 258, usize::MAX] {
+                assert_eq!(
+                    db.search(&query, k).unwrap(),
+                    expected[..k.min(expected.len())],
+                    "metric={metric:?}, k={k}, query={query:?}"
+                );
+            }
+        }
+    }
+}

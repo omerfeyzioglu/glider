@@ -40,6 +40,8 @@ pub struct Options {
     pub checkpoint_at: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub compact_at: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub profile_seconds: usize,
     pub operations: usize,
     pub queries: usize,
     pub samples: usize,
@@ -68,6 +70,7 @@ impl Options {
             mutations: 5000,
             checkpoint_at: 0,
             compact_at: 0,
+            profile_seconds: 0,
             operations: 200,
             queries: 100,
             samples: 5,
@@ -94,6 +97,7 @@ impl Options {
                     --dimensions D (32) --mutations N (5000; recovery total puts, >= rows)\n\
                     --checkpoint-at N (0; disabled, otherwise checkpoint after N recovery puts)\n\
                     --compact-at N (0; disabled, otherwise compact after N recovery puts)\n\
+                    --profile-seconds N (0; separate diagnostic search loop before measurement)\n\
                     --operations N (200; commits per insert/overwrite/delete phase)\n\
                     --queries N (100) --samples N (5; search batches / warm reopens)\n\
                     --k N (10) --seed N (42) --root EXISTING_DIRECTORY (OS temp directory)\n\
@@ -122,6 +126,7 @@ impl Options {
                 "--mutations" => o.mutations = value.parse()?,
                 "--checkpoint-at" => o.checkpoint_at = value.parse()?,
                 "--compact-at" => o.compact_at = value.parse()?,
+                "--profile-seconds" => o.profile_seconds = value.parse()?,
                 "--operations" => o.operations = value.parse()?,
                 "--queries" => o.queries = value.parse()?,
                 "--samples" => o.samples = value.parse()?,
@@ -164,6 +169,9 @@ impl Options {
             && (!matches!(o.scenario.as_str(), "all" | "recovery") || o.compact_at > o.mutations)
         {
             return Err("compact-at requires recovery and must not exceed mutations".into());
+        }
+        if o.profile_seconds > 0 && o.scenario != "search" {
+            return Err("profile-seconds requires --scenario search".into());
         }
         if o.backend == Backend::S3 && !cfg!(feature = "s3") {
             return Err("S3 benchmarks require cargo bench --features s3".into());

@@ -196,3 +196,24 @@ fn compaction_benchmark_option_is_explicit_and_validated() {
         assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
     }
 }
+
+#[test]
+fn diagnostic_profiling_is_opt_in_and_search_only() {
+    let default = Options::parse_from(Vec::<String>::new()).unwrap().unwrap();
+    assert!(serde_json::to_value(default)
+        .unwrap()
+        .get("profile_seconds")
+        .is_none());
+    let options =
+        Options::parse_from(["--scenario", "search", "--profile-seconds", "8"].map(String::from))
+            .unwrap()
+            .unwrap();
+    assert_eq!(serde_json::to_value(options).unwrap()["profile_seconds"], 8);
+    for args in [
+        vec!["--profile-seconds", "8"],
+        vec!["--scenario", "recovery", "--profile-seconds", "8"],
+        vec!["--profile-seconds", "-1"],
+    ] {
+        assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
+    }
+}

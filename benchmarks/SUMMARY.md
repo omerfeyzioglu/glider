@@ -1,6 +1,6 @@
 # Benchmark summary
 
-27 raw reports; 1 compatible before/after result pairs. History is preserved in `runs/` and `baselines/`.
+39 raw reports; 7 compatible before/after result pairs. History is preserved in `runs/` and `baselines/`.
 
 Start here or with [latest.json](latest.json). Full tables/index: `python3 tools/benchmarks.py summary --full` (generates ignored `HISTORY.md` and `index.json`).
 
@@ -22,7 +22,7 @@ Latest means greatest recorded timestamp per backend/scope; ties use content has
 | observation | local / commit/insert | [de3314f9c482:0](runs/de3314f9c482c26d3fd25d46c10d160c41a3ab2ac87af15241ac10d2f46d4192.json) | d71a5ebc1ac6 | rows=10; dimensions=4; mutations=30; operations=5; queries=5; samples=2; seed=42 | 37900500 | N/A |
 | observation | local / commit/overwrite | [de3314f9c482:0](runs/de3314f9c482c26d3fd25d46c10d160c41a3ab2ac87af15241ac10d2f46d4192.json) | d71a5ebc1ac6 | rows=10; dimensions=4; mutations=30; operations=5; queries=5; samples=2; seed=42 | 29967667 | N/A |
 | observation | local / recovery/total | [8e922662f8e0:0](runs/8e922662f8e08c4a87fc61937389763456c862b684c416ba6bc743e56f908a58.json) | 2d2064a10749 | rows=100; dimensions=32; mutations=300; operations=200; queries=100; samples=3; seed=42; checkpoint_at=300; compact_at=300 | 37140458 | 2 |
-| observation | local / search | [9ba388d3a60c:0](runs/9ba388d3a60cb66dc96226c06518739f9ad7e495cc7e1eb3fb6963fbd533f7b6.json) | 690347283f2f | rows=1000; dimensions=128; mutations=5000; operations=200; queries=100; samples=5; seed=42 | 87875 | 1001 |
+| observation | local / search | [c093967192c8:0](runs/c093967192c86e87b53f422bd335b67ecb368d535cf2fcbe1b5e871fa43f81ec.json) | 98fecaba1f75 | rows=1000; dimensions=128; mutations=5000; operations=200; queries=100; samples=5; seed=42 | 75167 | 1001 |
 | observation | s3 / commit/delete | [af655c5cf5f7:0](runs/af655c5cf5f7cd9f15edf544ea46100853fde9ee2fadae9e098fc466cfa6c388.json) | d71a5ebc1ac6 | rows=10; dimensions=4; mutations=30; operations=5; queries=5; samples=2; seed=42 | 14542708 | N/A |
 | observation | s3 / commit/insert | [af655c5cf5f7:0](runs/af655c5cf5f7cd9f15edf544ea46100853fde9ee2fadae9e098fc466cfa6c388.json) | d71a5ebc1ac6 | rows=10; dimensions=4; mutations=30; operations=5; queries=5; samples=2; seed=42 | 12202833 | N/A |
 | observation | s3 / commit/overwrite | [af655c5cf5f7:0](runs/af655c5cf5f7cd9f15edf544ea46100853fde9ee2fadae9e098fc466cfa6c388.json) | d71a5ebc1ac6 | rows=10; dimensions=4; mutations=30; operations=5; queries=5; samples=2; seed=42 | 8328334 | N/A |
