@@ -121,14 +121,17 @@ struct Segment {
 fn segment_key(sequence: u64) -> String {
     format!("segment-{sequence:020}")
 }
-fn segment_sequence(key: &str) -> Result<u64> {
-    let sequence = key
-        .strip_prefix("segment-")
+fn numbered_sequence(object: &str, prefix: &str) -> Result<u64> {
+    let sequence = object
+        .strip_prefix(prefix)
         .and_then(|s| s.parse::<u64>().ok());
     match sequence {
-        Some(sequence) if key == segment_key(sequence) => Ok(sequence),
-        _ => Err(Error::Corrupt(format!("invalid segment key: {key}"))),
+        Some(sequence) if object == format!("{prefix}{sequence:020}") => Ok(sequence),
+        _ => Err(Error::Corrupt(format!("invalid object key: {object}"))),
     }
+}
+fn compacted_key(sequence: u64) -> String {
+    format!("compacted-{sequence:020}")
 }
 fn key(sequence: u64) -> String {
     format!("mutation-{sequence:020}")
@@ -143,6 +146,7 @@ pub struct Database<S> {
     sequence: u64,
     poisoned: bool,
     checkpoint_sequence: Option<u64>,
+    compacted_sequence: Option<u64>,
 }
 impl<S: ObjectStore> Database<S> {
     /// Open/recover, or initialize an empty namespace. Config must match on restart.
@@ -181,69 +185,63 @@ impl<S: ObjectStore> Database<S> {
         keys.retain(|k| k != "metadata");
         keys.sort();
         let mut latest_segment = None;
-        let mut last_mutation = 0_u64;
+        let mut latest_compacted = None;
         let mut previous = None;
-        // M3 retains the entire log. Validate its key continuity even when a
-        // segment covers its payloads; deletion/garbage collection belongs to M4.
         for object in &keys {
             if previous == Some(object) {
                 return Err(Error::Corrupt(format!("duplicate listed key: {object}")));
             }
             previous = Some(object);
-            if object.starts_with("segment-") {
-                latest_segment = Some(segment_sequence(object)?);
+            if object.starts_with("compacted-") {
+                latest_compacted = Some(numbered_sequence(object, "compacted-")?);
+            } else if object.starts_with("segment-") {
+                latest_segment = Some(numbered_sequence(object, "segment-")?);
             } else {
-                let next = last_mutation
-                    .checked_add(1)
-                    .ok_or_else(|| Error::Corrupt("sequence overflow".into()))?;
-                if *object != key(next) {
-                    return Err(Error::Corrupt(format!(
-                        "unexpected object or log gap: {object}"
-                    )));
+                let sequence = numbered_sequence(object, "mutation-")?;
+                if sequence == 0 {
+                    return Err(Error::Corrupt("mutation sequence zero".into()));
                 }
-                last_mutation = next;
             }
         }
-        if latest_segment.is_some_and(|s| s > last_mutation) {
-            return Err(Error::Corrupt("segment extends beyond retained log".into()));
+        // Only a compaction snapshot authorizes missing covered keys. Ordinary
+        // M3 snapshots retain their original complete-log validation semantics.
+        let floor = latest_compacted.unwrap_or(0);
+        let mut last_mutation = floor;
+        for object in keys.iter().filter(|k| k.starts_with("mutation-")) {
+            let sequence = numbered_sequence(object, "mutation-")?;
+            if sequence <= floor {
+                continue;
+            }
+            if last_mutation.checked_add(1) != Some(sequence) {
+                return Err(Error::Corrupt(format!("log gap: {object}")));
+            }
+            last_mutation = sequence;
         }
+        if latest_segment.is_some_and(|s| s > last_mutation) {
+            return Err(Error::Corrupt(
+                "segment extends beyond retained history".into(),
+            ));
+        }
+        let checkpoint_sequence = latest_segment.max(latest_compacted);
         let mut db = Self {
             store,
             config,
             documents: BTreeMap::new(),
             sequence: 0,
             poisoned: false,
-            checkpoint_sequence: latest_segment,
+            checkpoint_sequence,
+            compacted_sequence: latest_compacted,
         };
-        if let Some(sequence) = latest_segment {
-            let object = segment_key(sequence);
-            let bytes = db
-                .store
-                .get(&object)?
-                .ok_or_else(|| Error::Corrupt(format!("listed segment missing: {object}")))?;
-            let segment: Segment = decode(&bytes)?;
-            if segment.version != 1 || segment.sequence != sequence || segment.config != config {
-                return Err(Error::Corrupt(
-                    "invalid segment version, sequence or configuration".into(),
-                ));
-            }
-            let mut previous_id = None;
-            for (id, vector) in segment.documents {
-                if previous_id.is_some_and(|previous| previous >= id) {
-                    return Err(Error::Corrupt(
-                        "segment IDs must be strictly increasing".into(),
-                    ));
-                }
-                config
-                    .vector(&vector)
-                    .map_err(|e| Error::Corrupt(e.to_string()))?;
-                previous_id = Some(id);
-                db.documents.insert(id, vector);
-            }
-            db.sequence = sequence;
+        // Validate the reclamation boundary even if a newer ordinary snapshot
+        // supplies the live state. Never fall back from an invalid boundary.
+        if let Some(sequence) = latest_compacted {
+            db.load_snapshot(&compacted_key(sequence), sequence)?;
+        }
+        if let Some(sequence) = latest_segment.filter(|s| latest_compacted.is_none_or(|c| *s > c)) {
+            db.load_snapshot(&segment_key(sequence), sequence)?;
         }
         for object in keys.into_iter().filter(|k| k.starts_with("mutation-")) {
-            if latest_segment.is_some_and(|sequence| object <= key(sequence)) {
+            if checkpoint_sequence.is_some_and(|sequence| object <= key(sequence)) {
                 continue;
             }
             let next = db
@@ -275,6 +273,101 @@ impl<S: ObjectStore> Database<S> {
         }
         Ok(db)
     }
+    fn load_snapshot(&mut self, object: &str, sequence: u64) -> Result<()> {
+        let bytes = self
+            .store
+            .get(object)?
+            .ok_or_else(|| Error::Corrupt(format!("listed snapshot missing: {object}")))?;
+        let segment: Segment = decode(&bytes)?;
+        if segment.version != 1 || segment.sequence != sequence || segment.config != self.config {
+            return Err(Error::Corrupt(
+                "invalid snapshot version, sequence or configuration".into(),
+            ));
+        }
+        let mut documents = BTreeMap::new();
+        let mut previous_id = None;
+        for (id, vector) in segment.documents {
+            if previous_id.is_some_and(|previous| previous >= id) {
+                return Err(Error::Corrupt(
+                    "snapshot IDs must be strictly increasing".into(),
+                ));
+            }
+            self.config
+                .vector(&vector)
+                .map_err(|e| Error::Corrupt(e.to_string()))?;
+            previous_id = Some(id);
+            documents.insert(id, vector);
+        }
+        self.documents = documents;
+        self.sequence = sequence;
+        Ok(())
+    }
+    fn snapshot_bytes(&self) -> Result<Vec<u8>> {
+        encode(&Segment {
+            version: 1,
+            sequence: self.sequence,
+            config: self.config,
+            documents: self
+                .documents
+                .iter()
+                .map(|(&id, v)| (id, v.clone()))
+                .collect(),
+        })
+    }
+    /// Consolidate live state into a durable snapshot, then reclaim covered logs
+    /// and older snapshots. Success acknowledges publication and all listed
+    /// removals. On any storage error/panic, reopen before further writes or
+    /// maintenance; already removed objects were covered by a durable snapshot.
+    /// A repeated call at the same sequence resumes cleanup without republishing.
+    pub fn compact(&mut self) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        if self.compacted_sequence != Some(self.sequence) {
+            let bytes = self.snapshot_bytes()?;
+            self.poisoned = true;
+            self.store.create(&compacted_key(self.sequence), &bytes)?;
+            self.compacted_sequence = Some(self.sequence);
+            self.checkpoint_sequence = Some(self.sequence);
+        }
+        self.poisoned = true;
+        // Build and validate the full deletion plan before removing anything.
+        let mut keys = self.store.list()?;
+        keys.sort();
+        if keys.windows(2).any(|pair| pair[0] == pair[1])
+            || !keys.iter().any(|k| k == "metadata")
+            || !keys.contains(&compacted_key(self.sequence))
+        {
+            return Err(Error::Corrupt("invalid listing during compaction".into()));
+        }
+        let mut obsolete = Vec::new();
+        for object in keys {
+            if object == "metadata" {
+                continue;
+            }
+            let (prefix, inclusive) = if object.starts_with("compacted-") {
+                ("compacted-", false)
+            } else if object.starts_with("segment-") {
+                ("segment-", true)
+            } else {
+                ("mutation-", true)
+            };
+            let sequence = numbered_sequence(&object, prefix)?;
+            if sequence > self.sequence || (prefix == "mutation-" && sequence == 0) {
+                return Err(Error::Corrupt(format!(
+                    "unexpected object during compaction: {object}"
+                )));
+            }
+            if sequence < self.sequence || inclusive {
+                obsolete.push(object);
+            }
+        }
+        for object in obsolete {
+            self.store.remove(&object)?;
+        }
+        self.poisoned = false;
+        Ok(())
+    }
     /// Persist a complete immutable snapshot at the current mutation sequence.
     /// Success means durable publication; errors/panics poison further writes and
     /// checkpoints until reopen. Reads retain their acknowledged state. Existing
@@ -287,16 +380,7 @@ impl<S: ObjectStore> Database<S> {
         if self.checkpoint_sequence == Some(self.sequence) {
             return Ok(());
         }
-        let bytes = encode(&Segment {
-            version: 1,
-            sequence: self.sequence,
-            config: self.config,
-            documents: self
-                .documents
-                .iter()
-                .map(|(&id, vector)| (id, vector.clone()))
-                .collect(),
-        })?;
+        let bytes = self.snapshot_bytes()?;
         self.poisoned = true;
         self.store.create(&segment_key(self.sequence), &bytes)?;
         self.checkpoint_sequence = Some(self.sequence);

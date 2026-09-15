@@ -121,6 +121,10 @@ struct State {
 #[derive(Default, Clone)]
 struct Memory(Rc<RefCell<State>>);
 impl ObjectStore for Memory {
+    fn remove(&mut self, key: &str) -> Result<()> {
+        self.0.borrow_mut().objects.remove(key);
+        Ok(())
+    }
     fn get(&self, k: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.0.borrow().objects.get(k).cloned())
     }

@@ -61,6 +61,9 @@ Done when:
 
 ## M4 — Compaction
 
+Status: complete (full-state consolidation, safe history reclamation, LocalStore/MinIO
+failure tests and archived amplification measurements)
+
 Goal:
 Bound accumulation of immutable persistent state without changing logical
 results.

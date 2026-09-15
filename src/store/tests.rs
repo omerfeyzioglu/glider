@@ -332,3 +332,97 @@ fn segment_publication_failures_preserve_state_and_allow_recovery_then_writes() 
         assert_eq!(db.sequence, 4);
     }
 }
+
+fn removal_points() -> Vec<String> {
+    [
+        "remove-seal",
+        "remove-seal-directory-sync",
+        "remove-body",
+        "remove-body-directory-sync",
+    ]
+    .iter()
+    .flat_map(|op| [format!("{op}-before"), format!("{op}-after")])
+    .collect()
+}
+#[test]
+fn compaction_publication_and_every_local_removal_boundary_recover() {
+    let points = publication_points().into_iter().map(|p| (p, 0)).chain(
+        removal_points()
+            .into_iter()
+            .flat_map(|p| (0..4).map(move |n| (p.clone(), n))),
+    );
+    for (point, occurrence) in points {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("db");
+        let fault = Rc::new(RefCell::new(Fault::default()));
+        let mut db = Database::open(open(&root, &fault).unwrap(), config()).unwrap();
+        db.put(1, vec![1.]).unwrap();
+        db.compact().unwrap();
+        db.put(2, vec![2.]).unwrap();
+        db.checkpoint().unwrap();
+        db.delete(1).unwrap();
+        fault.borrow_mut().arm(&point, occurrence);
+        assert!(db.compact().is_err(), "{point}/{occurrence}");
+        fault.borrow().fired();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(2), Some([2.].as_slice()));
+        assert!(matches!(db.compact(), Err(Error::RecoveryRequired)));
+        assert!(matches!(db.store.list(), Err(Error::RecoveryRequired)));
+        drop(db);
+        let mut db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(2), Some([2.].as_slice()));
+        db.compact().unwrap();
+        drop(db);
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            4,
+            "no orphan files: {point}/{occurrence}"
+        );
+        let mut db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+        db.put(3, vec![3.]).unwrap();
+        drop(db);
+        let db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(3), Some([3.].as_slice()));
+        assert_eq!(db.sequence, 4);
+    }
+}
+#[test]
+fn interrupted_orphan_cleanup_must_finish_before_open_returns() {
+    for point in removal_points() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("db");
+        let fault = Rc::new(RefCell::new(Fault::default()));
+        let mut db = Database::open(open(&root, &fault).unwrap(), config()).unwrap();
+        db.put(1, vec![1.]).unwrap();
+        fault.borrow_mut().arm("remove-body-before", 0);
+        assert!(db.compact().is_err());
+        drop(db);
+        // A complete compacted snapshot exists, and one obsolete unsealed body
+        // remains. Recovery cleanup errors cannot escape as a usable handle.
+        fault.borrow_mut().arm(&point, 0);
+        assert!(open(&root, &fault).is_err(), "{point}");
+        fault.borrow().fired();
+        let mut db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+        db.compact().unwrap();
+        assert_eq!(db.get(1), Some([1.].as_slice()));
+        drop(db);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 4);
+    }
+}
+#[test]
+fn removal_is_idempotent_and_orders_seal_barrier_before_body_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("db");
+    let fault = Rc::new(RefCell::new(Fault::default()));
+    let mut store = open(&root, &fault).unwrap();
+    store.create("object", b"value").unwrap();
+    fault.borrow_mut().trace.clear();
+    store.remove("object").unwrap();
+    assert_eq!(fault.borrow().trace, removal_points());
+    store.remove("object").unwrap();
+    assert!(store.list().unwrap().is_empty());
+    drop(store);
+    assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+}

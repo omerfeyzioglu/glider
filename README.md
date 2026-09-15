@@ -133,5 +133,19 @@ has not been established.
 Call `db.checkpoint()?` to persist the current live state as one immutable segment.
 Reopen loads the latest checkpoint plus newer mutations. Checkpoint errors require
 reopening before further writes, just like uncertain mutations. Logs and older
-checkpoints are retained; this is not compaction. See [DESIGN.md](DESIGN.md) for
+checkpoints are retained until explicitly compacted. See [DESIGN.md](DESIGN.md) for
 publication semantics and [BENCHMARKS.md](BENCHMARKS.md) for recovery measurements.
+
+
+## Compaction (M4)
+
+Call `db.compact()?` to publish a full snapshot and reclaim covered mutations and
+older snapshots. It runs synchronously and preserves live values, deletes and
+sequence numbers. Reopen after a compaction error before writing again; calling
+compaction again finishes interrupted cleanup. Compaction is explicit, so choose
+its frequency based on measured maintenance and recovery costs.
+
+A compacted namespace requires an M4-capable binary. Compaction reclaims logical
+objects; S3 bucket versioning may retain historical versions and delete markers.
+See [DESIGN.md](DESIGN.md) for recovery semantics and [BENCHMARKS.md](BENCHMARKS.md)
+for footprint and amplification measurements.

@@ -319,7 +319,7 @@ def markdown(rows, pairs):
         scenario = config.get("scenario")
         fields = {"search": ("rows", "queries", "samples", "k"),
                   "commit": ("operations",), "recovery": ("rows", "mutations", "samples")}
-        keys = ("scenario", "dimensions", "seed", "checkpoint_at") + fields.get(scenario, ("rows", "mutations", "operations", "queries", "samples", "k"))
+        keys = ("scenario", "dimensions", "seed", "checkpoint_at", "compact_at") + fields.get(scenario, ("rows", "mutations", "operations", "queries", "samples", "k"))
         workload = "; ".join(f"{k}={config[k]}" for k in keys if k in config)
         catalog.append([f"[{ref(row)}]({quote(row['raw_file'], safe='/')})", row["backend"], row["feature"], row["phase"], row["comparison_group"], row["git_revision"][:12] if row["git_revision"] else None, env_ids[canonical(row["comparison_environment"]) ], workload])
     # Links are generated from escaped paths; table cells still escape untrusted metadata.
