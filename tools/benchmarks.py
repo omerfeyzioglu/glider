@@ -19,9 +19,9 @@ METRICS = (
     "get_count", "create_count", "logical_object_count", "physical_file_count",
     "file_footprint_bytes", "list_count", "object_footprint_bytes",
     "http_get_count", "http_list_count", "http_put_count", "http_other_count",
-    "request_body_bytes", "http_error_count", "transport_error_count",
+    "request_body_bytes", "http_error_count", "transport_error_count", "http_delete_count",
 )
-HTTP_FIELDS = ("get", "list", "put", "other", "request_body_bytes", "http_errors", "transport_errors")
+HTTP_FIELDS = ("get", "list", "put", "delete", "other", "request_body_bytes", "http_errors", "transport_errors")
 COUNT_FIELDS = ("list_calls", "get_calls", "create_calls", "get_payload_bytes", "create_payload_bytes")
 
 
@@ -122,7 +122,7 @@ def metrics(timing=None, counts=None, resources=None, inventory=None, throughput
     for dest, source in (("object_footprint_bytes", "object_length_bytes"), ("logical_object_count", "logical_objects"), ("physical_file_count", "physical_files"), ("file_footprint_bytes", "file_length_bytes")):
         result[dest] = number(inventory.get(source))
     for dest, source in (("http_get_count", "get"), ("http_list_count", "list"), ("http_put_count", "put"),
-                         ("http_other_count", "other"), ("request_body_bytes", "request_body_bytes"),
+                         ("http_other_count", "other"), ("http_delete_count", "delete"), ("request_body_bytes", "request_body_bytes"),
                          ("http_error_count", "http_errors"), ("transport_error_count", "transport_errors")):
         result[dest] = number(obj(http).get(source))
     return result
@@ -200,6 +200,7 @@ def normalize(run, raw_file, raw_hash, run_index):
                          "environment": run["environment"], "comparison_environment": env_key,
                          "measurement_protocol": run.get("measurement_protocol"),
                          "comparison_key": digest(canonical(identity).encode()) if complete else None,
+                         "maintenance": {k: result[k] for k in ("checkpoint", "compaction") if k in result} if scope == "recovery/total" else {},
                          "metrics": values})
     return rows
 
@@ -246,7 +247,7 @@ METRIC_LABELS = dict(zip(METRICS, (
     "User CPU (ns)", "System CPU (ns)", "Peak RSS (B)",
     "Read (B)", "Written (B)", "GET", "CREATE", "Objects", "Files",
     "File bytes", "LIST", "Object bytes", "HTTP GET", "HTTP LIST", "HTTP PUT",
-    "HTTP other", "Request body (B)", "HTTP errors", "Transport errors",
+    "HTTP other", "Request body (B)", "HTTP errors", "Transport errors", "HTTP DELETE",
 )))
 
 
@@ -413,11 +414,122 @@ def publish(path, data):
             temporary.unlink(missing_ok=True)
 
 
-def summarize(root, check=False):
+def latest_entries(rows):
+    """Inspection pointers only. Never used to select comparison counterparts."""
+    entries = []
+    for role in ("baseline", "observation"):
+        selected = {}
+        for row in rows:
+            if row["scope"] not in ("search", "commit/insert", "commit/overwrite", "commit/delete", "recovery/total"):
+                continue
+            timestamp = number(row["environment"].get("unix_seconds"))
+            if timestamp is None or (role == "baseline" and row["phase"] != "baseline"):
+                continue
+            key = (row["backend"] or "unknown", row["scope"])
+            rank = (timestamp, row["raw_sha256"], row["run_index"], row["id"])
+            if key not in selected or rank > selected[key][0]:
+                selected[key] = (rank, row)
+        for key, (rank, row) in sorted(selected.items()):
+            entries.append({"role": role, "backend": key[0], "scope": key[1],
+                            "unix_seconds": rank[0], "raw_file": row["raw_file"],
+                            "raw_sha256": row["raw_sha256"], "run_index": row["run_index"],
+                            "git_revision": row["git_revision"], "row_id": row["id"]})
+    return entries
+
+
+def compact_summary(rows, pairs, entries):
+    by_id = {row["id"]: row for row in rows}
+    lines = ["# Benchmark summary", "",
+             f"{len({r['raw_sha256'] for r in rows})} raw reports; {len(pairs)} compatible before/after result pairs. History is preserved in `runs/` and `baselines/`.", "",
+             "Start here or with [latest.json](latest.json). Full tables/index: `python3 tools/benchmarks.py summary --full` (generates ignored `HISTORY.md` and `index.json`).", "",
+             "Latest means greatest recorded timestamp per backend/scope; ties use content hash and run index. Baselines require phase=baseline. Observations may be experiments with different workloads. Missing timestamps are excluded. These pointers never select comparison pairs.", "",
+             "| Kind | Backend / scope | Raw run | Commit | Workload | p50 ns | Objects |",
+             "|---|---|---|---|---|---|---|"]
+    for entry in entries:
+        row = by_id[entry["row_id"]]
+        config = row["workload"]["config"]
+        workload = "; ".join(f"{k}={config[k]}" for k in ("rows", "dimensions", "mutations", "operations", "queries", "samples", "seed", "checkpoint_at", "compact_at") if k in config)
+        ref = f"[{row['raw_sha256'][:12]}:{row['run_index']}]({quote(row['raw_file'], safe='/')})"
+        values = [entry["role"], f"{entry['backend']} / {entry['scope']}", ref,
+                  (row["git_revision"] or "unknown")[:12], workload,
+                  display(row["metrics"]["p50_latency_ns"]), display(row["metrics"]["logical_object_count"])]
+        lines.append("| " + " | ".join(text(v) for v in values) + " |")
+    maintenance = [(entry, by_id[entry["row_id"]]["maintenance"].get("compaction"))
+                   for entry in entries if entry["role"] == "observation" and entry["scope"] == "recovery/total"]
+    maintenance = [(entry, value) for entry, value in maintenance if value]
+    if maintenance:
+        lines += ["", "Latest observed compaction (single maintenance operation; logical payload amplification):", "",
+                  "| Backend | Latency ns | Written B | Removed objects | Additional write amplification | HTTP DELETE |",
+                  "|---|---|---|---|---|---|"]
+        for entry, value in maintenance:
+            values = [entry["backend"], value.get("latency_ns"), value.get("logical_bytes_written"),
+                      value.get("removes"), value.get("additional_write_amplification"),
+                      obj(value.get("http_requests")).get("delete")]
+            lines.append("| " + " | ".join(text(display(v) if isinstance(v, (int, float)) else v) for v in values) + " |")
+    lines += ["", "Timing is descriptive, not a regression gate. Compare explicit raw reports with `python3 tools/benchmarks.py compare BEFORE AFTER`; incompatible or incomplete identities are rejected. Seeds, source fingerprints, environment, raw samples and backend metrics remain in the linked reports.", ""]
+    return "\n".join(lines)
+
+
+def compare_files(before_path, after_path, check_counters=False):
+    def read(path):
+        data = path.read_bytes()
+        return [row for i, run in enumerate(reports(decode(data)))
+                for row in normalize(run, path.name, digest(data), i)]
+    before, after = read(before_path), read(after_path)
+    def keyed(items):
+        result = {}
+        for row in items:
+            key = (row["feature"], row["comparison_group"], row["comparison_key"])
+            if key[-1] is None or key in result:
+                raise ValueError("incomplete or ambiguous comparison identity")
+            result[key] = row
+        return result
+    old, new = keyed(before), keyed(after)
+    if old.keys() != new.keys():
+        raise ValueError("incompatible workload, inputs, backend, protocol, or environment; no comparison made")
+    results = []
+    failed = False
+    for key in sorted(old):
+        a, b = old[key], new[key]
+        am, bm = dict(a["metrics"]), dict(b["metrics"])
+        # Single maintenance observations are not percentiles or recovery samples.
+        for row, values in ((a, am), (b, bm)):
+            for operation, data in row["maintenance"].items():
+                for name, value in data.items():
+                    if isinstance(value, dict):
+                        for field, count in value.items():
+                            values[f"{operation}.{name}.{field}"] = number(count)
+                    else:
+                        values[f"{operation}.{name}"] = number(value)
+        changes = {}
+        for name in sorted(am.keys() | bm.keys()):
+            av, bv = am.get(name), bm.get(name)
+            if av is None and bv is None:
+                continue
+            deterministic = name not in METRICS[:8] and not name.endswith("latency_ns")
+            changed = av != bv
+            failed |= check_counters and deterministic and changed
+            changes[name] = {"before": av, "after": bv, "delta_percent": delta(av, bv),
+                             "counter_changed": deterministic and changed}
+        same_source = bool(a["environment"].get("source_sha256")) and a["environment"].get("source_sha256") == b["environment"].get("source_sha256")
+        results.append({"scope": a["scope"], "backend": a["backend"], "before": a["id"], "after": b["id"],
+                        "before_revision": a["git_revision"], "after_revision": b["git_revision"],
+                        "before_raw_sha256": a["raw_sha256"], "after_raw_sha256": b["raw_sha256"],
+                        "comparison_key": a["comparison_key"],
+                        "interpretation": "repeatability; same source" if same_source else "source attribution requires review",
+                        "metrics": changes})
+    return {"schema_version": 1, "counter_check_failed": failed, "comparisons": results}
+
+
+def summarize(root, check=False, full=False):
     rows = load_archive(root)
     pairs = comparisons(rows)
-    outputs = {"index.json": (json.dumps({"schema_version": 2, "rows": rows, "comparisons": pairs}, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(),
-               "SUMMARY.md": markdown(rows, pairs).encode()}
+    entries = latest_entries(rows)
+    outputs = {"latest.json": (json.dumps({"schema_version": 1, "entries": entries}, indent=2, sort_keys=True) + "\n").encode(),
+               "SUMMARY.md": compact_summary(rows, pairs, entries).encode()}
+    if full:
+        outputs.update({"index.json": (json.dumps({"schema_version": 2, "rows": rows, "comparisons": pairs}, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(),
+                        "HISTORY.md": markdown(rows, pairs).encode()})
     for name, data in outputs.items():
         path = root / name
         if check:
@@ -447,18 +559,28 @@ def archive(source, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    add = sub.add_parser("archive", help="archive raw JSON unchanged and rebuild index/summary")
+    add = sub.add_parser("archive", help="archive raw JSON unchanged and rebuild compact views")
     add.add_argument("report", type=Path)
     add.add_argument("--archive", type=Path, default=Path("benchmarks"))
     summary = sub.add_parser("summary", help="rebuild deterministic derived files")
     summary.add_argument("--archive", type=Path, default=Path("benchmarks"))
     summary.add_argument("--check", action="store_true")
+    summary.add_argument("--full", action="store_true", help="also generate full ignored index and history tables")
+    compare = sub.add_parser("compare", help="compare explicitly chosen compatible reports; no latency threshold")
+    compare.add_argument("before", type=Path)
+    compare.add_argument("after", type=Path)
+    compare.add_argument("--check-counters", action="store_true", help="fail on any deterministic counter/footprint change; for fixed-workload regression checks")
     args = parser.parse_args()
     try:
         if args.command == "archive":
             print(archive(args.report, args.archive))
+        elif args.command == "compare":
+            result = compare_files(args.before, args.after, args.check_counters)
+            print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+            if result["counter_check_failed"]:
+                parser.exit(1, "deterministic benchmark counters changed; review required\n")
         else:
-            summarize(args.archive, args.check)
+            summarize(args.archive, args.check, args.full)
     except (ValueError, OSError, KeyError, TypeError) as error:
         parser.exit(1, f"benchmark archive: {error}\n")
 

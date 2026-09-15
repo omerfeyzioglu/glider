@@ -47,3 +47,19 @@ jobs:
 
       - name: Run isolated MinIO integration tests
         run: python3 tools/test_s3.py --benchmark-smoke target/backend-smoke
+
+      - name: Validate dedicated compaction workload and counter repeatability
+        run: |
+          python3 tools/compaction_benchmark.py --label "CI runner; caches and competing load uncontrolled" --output target/compaction-first.json
+          python3 tools/compaction_benchmark.py --label "CI runner; caches and competing load uncontrolled" --output target/compaction-repeat.json
+          python3 tools/benchmarks.py compare target/compaction-first.json target/compaction-repeat.json --check-counters > target/compaction-comparison.json
+
+      - name: Retain benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-reports
+          path: |
+            target/backend-smoke/*.json
+            target/compaction-*.json
+          if-no-files-found: ignore

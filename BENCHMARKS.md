@@ -5,8 +5,9 @@ custom `cargo bench` harness using `Instant`, the public database API, and `Loca
 on Linux/macOS; there is no Criterion dependency. Archive tooling uses Python 3
 and its standard library. Database implementation and durability are unchanged.
 Normal correctness tests do not run performance workloads. CI compiles the
-harness, tests metric/archive logic, and checks generated summaries; there are no
-latency thresholds.
+harness, tests metric/archive logic, and checks generated summaries. A dedicated compaction workload checks results and
+deterministic counter repeatability; CI retains its raw reports as artifacts.
+There are no latency thresholds.
 
 ```sh
 mkdir -p target/baselines
@@ -147,12 +148,20 @@ Keep these raw reports in version control. Archive imports and summary rebuilds
 should run serially; derived index/summary publication uses atomic local file
 replacement. This tooling is independent of the database storage protocol.
 
-[SUMMARY.md](benchmarks/SUMMARY.md) is generated for human review;
-[index.json](benchmarks/index.json) contains normalized metrics, complete workload
-and environment context, source references, and comparison deltas. Both can be
-deleted and rebuilt from raw JSON. Ordering is deterministic, with no generation
-timestamp or machine-dependent state added during rendering. `--check` reads only
-and fails if either derived file is stale. Raw JSON is the source of truth.
+[SUMMARY.md](benchmarks/SUMMARY.md) is the compact starting point;
+[latest.json](benchmarks/latest.json) contains raw-run pointers. They show the latest
+explicit baseline and latest observation per backend/result scope, chosen by
+recorded timestamp (ties: content hash/run index). Experiments are not silently
+promoted to baselines; missing timestamps are excluded. Different workloads can
+appear in these inspection views and are never implicitly compared.
+
+Detailed views remain reproducible with `python3 tools/benchmarks.py summary --full`:
+`benchmarks/index.json` preserves normalized metrics and complete metadata, and
+`benchmarks/HISTORY.md` renders every historical run and compatible pair. These
+large derived files are ignored by Git; all immutable raw reports remain tracked.
+Default `summary --check` verifies the compact tracked views and validates every
+raw archive digest. Add `--full --check` to check regenerated details locally.
+Raw JSON remains the source of truth; no measurements or metadata are discarded.
 
 For a future feature comparison, use identical workload arguments and environment
 notes on both revisions, and archive the before run before changing code. For separate Git worktrees, use
@@ -181,6 +190,24 @@ produce null. Higher throughput generally helps; higher latency/CPU/RSS/bytes/co
 generally costs more. Equal-revision pairs are labeled repeatability comparisons,
 not evidence of a feature effect. Environment matching is a guard, not proof of
 identical thermal state or absence of background load.
+
+Explicit comparison also works without importing reports or changing their phase:
+
+```sh
+python3 tools/benchmarks.py compare target/baselines/before.json target/baselines/after.json
+# Optional deterministic layout/counter check; any change requires review:
+python3 tools/benchmarks.py compare target/baselines/before.json target/baselines/after.json --check-counters
+```
+
+Comparison requires matching complete workload, input, backend, protocol, environment,
+feature and group identities; ambiguous/incompatible reports fail rather than
+producing misleading percentages. Output includes revisions, raw hashes, signed
+metric deltas and separately labeled maintenance observations. It does not impose
+a latency/CPU/RSS threshold or infer significance. The optional counter check fails
+on any changed measured byte/count/footprint/amplification value, including newly
+missing values; it is a layout regression check, not a universal optimization rule.
+CI runs identical compaction workloads twice and checks deterministic repeatability,
+not performance improvement against an unrelated desktop baseline.
 
 Focused checks (no performance thresholds):
 
@@ -344,11 +371,13 @@ bytes are zero; LocalStore's internal listing still reads and validates envelope
 No physical read/write amplification is measured.
 
 ```sh
+python3 tools/compaction_benchmark.py --output target/compaction.json
+# Same workload without compaction: add --checkpoint-only. S3: add --backend s3.
 python3 tools/test_s3.py --compaction-benchmarks target/m4-recovery
 cargo bench --locked --bench baseline -- --scenario recovery --rows 100 --dimensions 32 --mutations 300 --checkpoint-at 300 --compact-at 300 --samples 3 --seed 42 --root target
 ```
 
-The runner uses 300 round-robin puts over 100 live vectors, dimension 32, seed 42,
+The standalone runner and MinIO runner share the same validation and use 300 round-robin puts over 100 live vectors, dimension 32, seed 42,
 a checkpoint at 300 and three warm reopens. It validates identical inputs and
 recovered vectors, two engine GETs per reopen, and 302 objects before versus two
 after compaction on both backends. Compaction adds one 36,413-byte payload and
