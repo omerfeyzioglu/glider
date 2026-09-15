@@ -70,7 +70,7 @@ impl Observer {
             Self::S3(metrics) => {
                 let c = metrics.snapshot();
                 Some(
-                    json!({"get": c.get, "list": c.list, "put": c.put, "other": c.other,
+                    json!({"get": c.get, "list": c.list, "put": c.put, "delete": c.delete, "other": c.other,
                     "request_body_bytes": c.request_body_bytes, "http_errors": c.http_errors,
                     "transport_errors": c.transport_errors}),
                 )
@@ -87,6 +87,7 @@ pub fn http_delta(before: &Value, after: &Value) -> Value {
         "get",
         "list",
         "put",
+        "delete",
         "other",
         "request_body_bytes",
         "http_errors",

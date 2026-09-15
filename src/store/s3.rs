@@ -28,6 +28,7 @@ pub struct RequestCounts {
     pub get: u64,
     pub list: u64,
     pub put: u64,
+    pub delete: u64,
     pub other: u64,
     pub request_body_bytes: u64,
     /// HTTP client call failures; excludes later response-body consumption errors.
@@ -67,6 +68,7 @@ impl HttpService for MeteredService {
             let mut counts = self.metrics.0.lock().unwrap();
             match request.method().as_str() {
                 "PUT" => counts.put += 1,
+                "DELETE" => counts.delete += 1,
                 "GET"
                     if request
                         .uri()
@@ -130,6 +132,7 @@ impl S3Store {
         let metrics = RequestMetrics::default();
         let remote = builder
             .with_conditional_put(S3ConditionalPut::ETagMatch)
+            .with_disable_bulk_delete(true)
             .with_retry(RetryConfig {
                 max_retries: 0,
                 ..Default::default()
@@ -226,6 +229,19 @@ impl ObjectStore for S3Store {
             keys.push(key.to_owned());
         }
         Ok(keys)
+    }
+    fn remove(&mut self, key: &str) -> Result<()> {
+        self.ready()?;
+        let path = self.path(key)?;
+        self.poisoned = true;
+        self.run(async {
+            match self.remote.delete(&path).await {
+                Err(object_store::Error::NotFound { .. }) => Ok(()),
+                other => other,
+            }
+        })?;
+        self.poisoned = false;
+        Ok(())
     }
     fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.ready()?;

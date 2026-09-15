@@ -19,6 +19,10 @@ struct State {
     duplicate_key: Option<String>,
 }
 impl ObjectStore for Memory {
+    fn remove(&mut self, key: &str) -> Result<()> {
+        self.0.borrow_mut().objects.remove(key);
+        Ok(())
+    }
     fn list(&self) -> Result<Vec<String>> {
         let state = self.0.borrow();
         let mut keys: Vec<_> = state.objects.keys().rev().cloned().collect();

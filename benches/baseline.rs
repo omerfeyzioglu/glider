@@ -60,8 +60,13 @@ struct Counts {
     get_calls: u64,
     list_calls: u64,
     create_calls: u64,
+    #[serde(skip_serializing_if = "zero_count")]
+    remove_calls: u64,
     get_payload_bytes: u64,
     create_payload_bytes: u64,
+}
+fn zero_count(value: &u64) -> bool {
+    *value == 0
 }
 struct Counted<S> {
     inner: S,
@@ -82,6 +87,13 @@ impl<S: ObjectStore> ObjectStore for Counted<S> {
         counts.list_calls += 1;
         self.counts.set(counts);
         Ok(result)
+    }
+    fn remove(&mut self, key: &str) -> glider::Result<()> {
+        self.inner.remove(key)?;
+        let mut counts = self.counts.get();
+        counts.remove_calls += 1;
+        self.counts.set(counts);
+        Ok(())
     }
     fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
         self.inner.create(key, value)?;
@@ -234,9 +246,13 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     // Round-robin overwrite history: live size is fixed independently of history.
     let mut expected = vec![Vec::new(); o.rows];
     let mut checkpoint = None;
+    let mut compaction = None;
+    let mut mutation_bytes = 0_u64;
     for (i, vector) in data.into_iter().enumerate() {
         expected[i % o.rows] = vector.clone();
+        let before_mutation = counts.get().create_payload_bytes;
         db.put((i % o.rows) as u64, vector)?;
+        mutation_bytes += counts.get().create_payload_bytes - before_mutation;
         if o.checkpoint_at == i + 1 {
             let before = counts.get();
             let before_http = observer.snapshot();
@@ -248,6 +264,25 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
                 "creates": counts.get().create_calls - before.create_calls});
             backend::attach_http(&mut result, "http_requests", observer.delta(before_http));
             checkpoint = Some(result);
+        }
+        if o.compact_at == i + 1 {
+            let before = counts.get();
+            let before_http = observer.snapshot();
+            let start = Instant::now();
+            db.compact()?;
+            let elapsed = ns(start);
+            let read = counts.get().get_payload_bytes - before.get_payload_bytes;
+            let written = counts.get().create_payload_bytes - before.create_payload_bytes;
+            let mut result = json!({"sequence": i + 1, "latency_ns": elapsed,
+                "logical_bytes_read": read, "logical_bytes_written": written,
+                "creates": counts.get().create_calls - before.create_calls,
+                "removes": counts.get().remove_calls - before.remove_calls,
+                "lists": counts.get().list_calls - before.list_calls,
+                "input_mutation_payload_bytes": mutation_bytes,
+                "additional_read_amplification": read as f64 / mutation_bytes as f64,
+                "additional_write_amplification": written as f64 / mutation_bytes as f64});
+            backend::attach_http(&mut result, "http_requests", observer.delta(before_http));
+            compaction = Some(result);
         }
     }
     let build_counts = counts.get();
@@ -297,6 +332,9 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         "local_store_open": timing(&store_samples, 1), "database_replay": timing(&replay_samples, 1),
         "total_open": timing(&total_samples, 1), "measured_store_calls_per_sample": calls,
         "inventory": footprint});
+    if let Some(compaction) = compaction {
+        result["compaction"] = compaction;
+    }
     if let Some(checkpoint) = checkpoint {
         result["checkpoint"] = checkpoint;
     }

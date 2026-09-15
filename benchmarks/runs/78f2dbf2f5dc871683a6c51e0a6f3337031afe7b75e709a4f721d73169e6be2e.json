@@ -1,0 +1,301 @@
+{
+  "comparison_group": "m4-layout-300",
+  "config": {
+    "backend": "s3",
+    "checkpoint_at": 300,
+    "compact_at": 300,
+    "comparison_group": "m4-layout-300",
+    "dimensions": 32,
+    "feature": "compaction",
+    "k": 10,
+    "label": "M4 layout experiment; desktop load and power uncontrolled",
+    "mutations": 300,
+    "operations": 200,
+    "phase": "after",
+    "queries": 100,
+    "root": "/Users/omer/Desktop/vecturbo-m4/target",
+    "rows": 100,
+    "samples": 3,
+    "scenario": "recovery",
+    "seed": 42
+  },
+  "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
+  "environment": {
+    "architecture": "aarch64",
+    "argv": [
+      "/Users/omer/Desktop/vecturbo-m4/target/release/deps/baseline-eeaf3323d0724dc1",
+      "--scenario",
+      "recovery",
+      "--backend",
+      "s3",
+      "--rows",
+      "100",
+      "--dimensions",
+      "32",
+      "--mutations",
+      "300",
+      "--samples",
+      "3",
+      "--checkpoint-at",
+      "300",
+      "--compact-at",
+      "300",
+      "--seed",
+      "42",
+      "--feature",
+      "compaction",
+      "--phase",
+      "after",
+      "--comparison-group",
+      "m4-layout-300",
+      "--root",
+      "target",
+      "--label",
+      "M4 layout experiment; desktop load and power uncontrolled",
+      "--bench"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_encoded_rustflags": null,
+    "cpu": "Apple M4",
+    "debug_assertions": false,
+    "filesystem_mount": "Filesystem   1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5   482797652 161390236 289368884    36%    /System/Volumes/Data",
+    "git_revision": "2d2064a10749d09bb8d08628037ec1deef0e7e93",
+    "git_status": "M DESIGN.md\n M README.md\n M benches/baseline.rs\n M benches/support/backend.rs\n M benches/support/options.rs\n M src/lib.rs\n M src/store.rs\n M src/store/s3.rs\n M src/store/s3/tests.rs\n M src/store/tests.rs\n M tests/behavior.rs\n M tests/benchmark_backend.rs\n M tests/local.rs\n M tests/segments.rs\n M tools/benchmarks.py\n M tools/test_s3.py\n?? tests/compaction.rs",
+    "logical_parallelism": 10,
+    "memory": "17179869184",
+    "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+    "profile": "bench",
+    "profile_environment": {},
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "rustflags": null,
+    "s3": {
+      "addressing": "path",
+      "automatic_retries": 0,
+      "bucket": "glider-test",
+      "endpoint": "http://127.0.0.1:61939",
+      "namespace_prefix": "compaction-benchmark",
+      "region": "us-east-1",
+      "request_timeout_seconds": 30,
+      "service_label": "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e; Docker 29.1.3"
+    },
+    "source_sha256": "72936a6842b6b90552f7532442c102feaaea91d085bdbf62875bebd7c132c689",
+    "unix_seconds": 1789474751
+  },
+  "feature": "compaction",
+  "footprint_scope": "Native object count and summed object lengths from an untimed listing; client/server physical file footprint unavailable",
+  "generator": "splitmix64-high24-uniform-f32-v1",
+  "git_revision": "2d2064a10749d09bb8d08628037ec1deef0e7e93",
+  "http_counter_scope": "HTTP client attempts during the measured workload; includes every LIST page and request-body envelope bytes; excludes inventory and setup. Transport errors exclude later response-body consumption errors.",
+  "measurement_protocol": "s3-v1-individual-query-timers-rusage",
+  "metric": "squared_euclidean",
+  "phase": "after",
+  "results": [
+    {
+      "backend": "s3",
+      "build_http_requests": {
+        "delete": 301,
+        "get": 1,
+        "http_errors": 1,
+        "list": 2,
+        "other": 0,
+        "put": 303,
+        "request_body_bytes": 216064,
+        "transport_errors": 0
+      },
+      "build_store_calls": {
+        "create_calls": 303,
+        "create_payload_bytes": 201520,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 2,
+        "remove_calls": 301
+      },
+      "cache": "remote reopen after one warmup; server cache uncontrolled",
+      "checkpoint": {
+        "creates": 1,
+        "http_requests": {
+          "delete": 0,
+          "get": 0,
+          "http_errors": 0,
+          "list": 0,
+          "other": 0,
+          "put": 1,
+          "request_body_bytes": 36461,
+          "transport_errors": 0
+        },
+        "latency_ns": 2238125.0,
+        "logical_bytes_written": 36413,
+        "sequence": 300
+      },
+      "compaction": {
+        "additional_read_amplification": 0.0,
+        "additional_write_amplification": 0.28309426627793977,
+        "creates": 1,
+        "http_requests": {
+          "delete": 301,
+          "get": 0,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 1,
+          "request_body_bytes": 36461,
+          "transport_errors": 0
+        },
+        "input_mutation_payload_bytes": 128625,
+        "latency_ns": 150212584.0,
+        "lists": 1,
+        "logical_bytes_read": 0,
+        "logical_bytes_written": 36413,
+        "removes": 301,
+        "sequence": 300
+      },
+      "database_replay": {
+        "max_sample_ns": 3237000.0,
+        "mean_ns_per_operation": 2657347.3333333335,
+        "min_sample_ns": 2139584.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 376.31512729110057,
+        "p50_amortized_ns_per_operation": 2595458.0,
+        "p50_sample_ns": 2595458.0,
+        "p95_sample_ns": 3237000.0,
+        "p99_sample_ns": 3237000.0,
+        "raw_sample_ns": [
+          2139584.0,
+          2595458.0,
+          3237000.0
+        ],
+        "sample_count": 3
+      },
+      "dataset_seed": 42,
+      "dataset_sha256": "7c7d1dbe432f061e3b68ae039928e082be6437a9cf772b66644f43d6a501e921",
+      "history": "round-robin puts",
+      "http_requests_per_sample": [
+        {
+          "delete": 0,
+          "get": 2,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "delete": 0,
+          "get": 2,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "delete": 0,
+          "get": 2,
+          "http_errors": 0,
+          "list": 1,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        }
+      ],
+      "inventory": {
+        "file_length_bytes": null,
+        "logical_objects": 2,
+        "object_length_bytes": 36578,
+        "physical_files": null
+      },
+      "live_documents": 100,
+      "measured_store_calls_per_sample": [
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2,
+          "get_payload_bytes": 36482,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2,
+          "get_payload_bytes": 36482,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2,
+          "get_payload_bytes": 36482,
+          "list_calls": 1
+        }
+      ],
+      "mutation_history": 300,
+      "namespace": "compaction-benchmark/glider-recovery-9wptQK",
+      "query_seed": null,
+      "query_sha256": null,
+      "resources": {
+        "cpu_scope": "sum of open windows excluding validation and destruction",
+        "process_max_rss_bytes": 11190272,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 11108352,
+            "system_cpu_ns": 194000,
+            "user_cpu_ns": 642000
+          },
+          {
+            "process_max_rss_bytes": 11141120,
+            "system_cpu_ns": 161000,
+            "user_cpu_ns": 619000
+          },
+          {
+            "process_max_rss_bytes": 11190272,
+            "system_cpu_ns": 225000,
+            "user_cpu_ns": 701000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 580000,
+        "user_cpu_ns": 1962000
+      },
+      "scenario": "recovery",
+      "store_open": {
+        "max_sample_ns": 48209.0,
+        "mean_ns_per_operation": 41236.333333333336,
+        "min_sample_ns": 31291.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 24250.458737844456,
+        "p50_amortized_ns_per_operation": 44209.0,
+        "p50_sample_ns": 44209.0,
+        "p95_sample_ns": 48209.0,
+        "p99_sample_ns": 48209.0,
+        "raw_sample_ns": [
+          48209.0,
+          31291.0,
+          44209.0
+        ],
+        "sample_count": 3
+      },
+      "total_open": {
+        "max_sample_ns": 3282625.0,
+        "mean_ns_per_operation": 2699375.0,
+        "min_sample_ns": 2188584.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 370.4561241028016,
+        "p50_amortized_ns_per_operation": 2626916.0,
+        "p50_sample_ns": 2626916.0,
+        "p95_sample_ns": 3282625.0,
+        "p99_sample_ns": 3282625.0,
+        "raw_sample_ns": [
+          2188584.0,
+          2626916.0,
+          3282625.0
+        ],
+        "sample_count": 3
+      },
+      "warmup_reopens": 1
+    }
+  ],
+  "schema_version": 3
+}

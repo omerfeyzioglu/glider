@@ -48,14 +48,14 @@ fn default_options_keep_local_json_and_explicit_backend_parses() {
 
 #[test]
 fn request_metrics_are_deltas_and_do_not_invent_local_http_counts() {
-    let before = json!({"get": 4, "list": 2, "put": 1, "other": 0,
+    let before = json!({"get": 4, "list": 2, "put": 1, "delete": 1, "other": 0,
         "request_body_bytes": 100, "http_errors": 1, "transport_errors": 0});
-    let after = json!({"get": 6, "list": 5, "put": 4, "other": 1,
+    let after = json!({"get": 6, "list": 5, "put": 4, "delete": 4, "other": 1,
         "request_body_bytes": 200, "http_errors": 2, "transport_errors": 3});
     let delta = http_delta(&before, &after);
     assert_eq!(
         delta,
-        json!({"get": 2, "list": 3, "put": 3, "other": 1,
+        json!({"get": 2, "list": 3, "put": 3, "delete": 3, "other": 1,
         "request_body_bytes": 100, "http_errors": 1, "transport_errors": 3})
     );
     assert!(http_delta(&after, &before)["get"].is_null());
@@ -171,6 +171,27 @@ fn checkpoint_benchmark_option_is_explicit_and_validated() {
         vec!["--scenario", "search", "--checkpoint-at", "1"],
         vec!["--checkpoint-at", "5001"],
         vec!["--checkpoint-at", "-1"],
+    ] {
+        assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
+    }
+}
+
+#[test]
+fn compaction_benchmark_option_is_explicit_and_validated() {
+    let default = Options::parse_from(Vec::<String>::new()).unwrap().unwrap();
+    assert!(serde_json::to_value(default)
+        .unwrap()
+        .get("compact_at")
+        .is_none());
+    let options =
+        Options::parse_from(["--scenario", "recovery", "--compact-at", "900"].map(String::from))
+            .unwrap()
+            .unwrap();
+    assert_eq!(serde_json::to_value(options).unwrap()["compact_at"], 900);
+    for args in [
+        vec!["--scenario", "search", "--compact-at", "1"],
+        vec!["--compact-at", "5001"],
+        vec!["--compact-at", "-1"],
     ] {
         assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
     }

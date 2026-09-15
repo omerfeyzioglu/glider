@@ -231,6 +231,8 @@ fn minio_replay_pagination_and_namespace_isolation() {
 enum Cut {
     Before,
     After,
+    DeleteBefore,
+    DeleteAfter,
 }
 #[derive(Debug, Clone, Default)]
 struct Fault(Arc<Mutex<Option<Cut>>>);
@@ -250,16 +252,24 @@ impl HttpConnector for Fault {
 #[async_trait]
 impl HttpService for FaultService {
     async fn call(&self, request: HttpRequest) -> std::result::Result<HttpResponse, HttpError> {
-        let cut = if request.method() == "PUT" {
-            self.fault.0.lock().unwrap().take()
-        } else {
-            None
+        let cut = {
+            let mut armed = self.fault.0.lock().unwrap();
+            let method = if matches!(*armed, Some(Cut::DeleteBefore | Cut::DeleteAfter)) {
+                "DELETE"
+            } else {
+                "PUT"
+            };
+            if request.method() == method {
+                armed.take()
+            } else {
+                None
+            }
         };
-        if matches!(cut, Some(Cut::Before)) {
+        if matches!(cut, Some(Cut::Before | Cut::DeleteBefore)) {
             return Err(disconnected());
         }
         let result = self.inner.execute(request).await?;
-        if matches!(cut, Some(Cut::After)) {
+        if matches!(cut, Some(Cut::After | Cut::DeleteAfter)) {
             assert!(result.status().is_success());
             result.into_body().bytes().await?;
             return Err(disconnected()); // server published; client never sees success
@@ -383,25 +393,32 @@ fn minio_process_exit() {
 #[test]
 #[ignore = "runner phase before restarting MinIO"]
 fn server_restart_prepare() {
-    for checkpoint in [false, true] {
-        let namespace = if checkpoint {
-            "server-segment-restart"
-        } else {
-            "server-restart"
-        };
+    for mode in [0, 1, 2] {
+        let namespace = [
+            "server-restart",
+            "server-segment-restart",
+            "server-compacted-restart",
+        ][mode];
         let mut db = Database::open(minio(namespace), config()).unwrap();
         db.put(1, vec![1., 2.]).unwrap();
         db.put(2, vec![3., 4.]).unwrap();
-        if checkpoint {
+        if mode == 1 {
             db.checkpoint().unwrap();
         }
         db.delete(1).unwrap();
+        if mode == 2 {
+            db.compact().unwrap();
+        }
     }
 }
 #[test]
 #[ignore = "runner phase after restarting MinIO"]
 fn server_restart_verify() {
-    for namespace in ["server-restart", "server-segment-restart"] {
+    for namespace in [
+        "server-restart",
+        "server-segment-restart",
+        "server-compacted-restart",
+    ] {
         let mut db = Database::open(minio(namespace), config()).unwrap();
         assert_eq!(db.get(1), None);
         assert_eq!(db.get(2), Some([3., 4.].as_slice()));
@@ -634,4 +651,159 @@ fn minio_delayed_checkpoint_races_retry_at_same_key() {
         assert_eq!(db.get(2), Some([3., 4.].as_slice()));
         assert_eq!(db.sequence, 3);
     }
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_compaction_preserves_results_with_uncertain_publication_and_deletion() {
+    for (suffix, cut) in [
+        ("put-before", Cut::Before),
+        ("put-after", Cut::After),
+        ("delete-before", Cut::DeleteBefore),
+        ("delete-after", Cut::DeleteAfter),
+    ] {
+        let namespace = format!("compact-{suffix}");
+        let fault = Fault::default();
+        let store = S3Store::with_connector(minio_builder(), &namespace, fault.clone()).unwrap();
+        let mut db = Database::open(store, config()).unwrap();
+        db.put(1, vec![1., 2.]).unwrap();
+        db.compact().unwrap();
+        db.put(2, vec![3., 4.]).unwrap();
+        db.checkpoint().unwrap();
+        db.delete(1).unwrap();
+        *fault.0.lock().unwrap() = Some(cut);
+        assert!(db.compact().is_err());
+        assert!(fault.0.lock().unwrap().is_none());
+        assert!(matches!(db.compact(), Err(Error::RecoveryRequired)));
+        assert!(matches!(
+            db.put(3, vec![5., 6.]),
+            Err(Error::RecoveryRequired)
+        ));
+        assert_eq!(db.get(1), None);
+        drop(db);
+        let mut db = Database::open(minio(&namespace), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+        db.compact().unwrap();
+        drop(db);
+        let store = minio(&namespace);
+        let keys = store.list().unwrap();
+        assert_eq!(keys.len(), 2);
+        let mut db = Database::open(store, config()).unwrap();
+        db.put(3, vec![5., 6.]).unwrap();
+        drop(db);
+        let db = Database::open(minio(&namespace), config()).unwrap();
+        assert_eq!(db.get(1), None);
+        assert_eq!(db.get(3), Some([5., 6.].as_slice()));
+        assert_eq!(db.sequence, 4);
+    }
+    let mut store = minio("delete-idempotence");
+    let metrics = store.metrics();
+    store.create("object", b"value").unwrap();
+    store.remove("object").unwrap();
+    store.remove("object").unwrap();
+    assert_eq!(metrics.snapshot().delete, 2);
+    assert_eq!(metrics.snapshot().other, 0);
+    assert_eq!(store.get("object").unwrap(), None);
+}
+
+#[derive(Debug, Default, Clone)]
+struct DeferredDelete(Arc<Mutex<Option<HttpRequest>>>);
+#[derive(Debug)]
+struct DeferredDeleteService {
+    inner: HttpClient,
+    deferred: DeferredDelete,
+}
+impl HttpConnector for DeferredDelete {
+    fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
+        Ok(HttpClient::new(DeferredDeleteService {
+            inner: ReqwestConnector::default().connect(options)?,
+            deferred: self.clone(),
+        }))
+    }
+}
+#[async_trait]
+impl HttpService for DeferredDeleteService {
+    async fn call(&self, request: HttpRequest) -> std::result::Result<HttpResponse, HttpError> {
+        if request.method() == "DELETE" {
+            *self.deferred.0.lock().unwrap() = Some(request);
+            return Err(disconnected());
+        }
+        self.inner.execute(request).await
+    }
+}
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_delayed_delete_never_targets_a_new_authoritative_object() {
+    let namespace = "late-compact-delete";
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.put(1, vec![1., 2.]).unwrap();
+    db.compact().unwrap();
+    drop(db);
+    let deferred = DeferredDelete::default();
+    let store = S3Store::with_connector(minio_builder(), namespace, deferred.clone()).unwrap();
+    let mut db = Database::open(store, config()).unwrap();
+    db.delete(1).unwrap();
+    assert!(db.compact().is_err());
+    drop(db);
+    let request = deferred.0.lock().unwrap().take().unwrap();
+    assert!(request
+        .uri()
+        .path()
+        .ends_with("compacted-00000000000000000001"));
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.compact().unwrap();
+    db.put(2, vec![3., 4.]).unwrap();
+    db.compact().unwrap();
+    drop(db);
+    let client = ReqwestConnector::default()
+        .connect(&ClientOptions::new().with_allow_http(true))
+        .unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    assert!(rt
+        .block_on(client.execute(request))
+        .unwrap()
+        .status()
+        .is_success());
+    let db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+    assert_eq!(db.sequence, 3);
+}
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_delayed_old_compaction_publication_is_ignored_and_reclaimable() {
+    let namespace = "late-compact-put";
+    let deferred = DeferredPut::default();
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.put(1, vec![1., 2.]).unwrap();
+    drop(db);
+    let store = S3Store::with_connector(minio_builder(), namespace, deferred.clone()).unwrap();
+    let mut db = Database::open(store, config()).unwrap();
+    assert!(db.compact().is_err());
+    drop(db);
+    let request = deferred.0.lock().unwrap().take().unwrap();
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.delete(1).unwrap();
+    db.compact().unwrap();
+    drop(db);
+    let client = ReqwestConnector::default()
+        .connect(&ClientOptions::new().with_allow_http(true))
+        .unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    assert!(rt
+        .block_on(client.execute(request))
+        .unwrap()
+        .status()
+        .is_success());
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    db.compact().unwrap();
+    drop(db);
+    assert_eq!(minio(namespace).list().unwrap().len(), 2);
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.put(2, vec![3., 4.]).unwrap();
+    drop(db);
+    let db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.get(2), Some([3., 4.].as_slice()));
 }

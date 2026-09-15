@@ -248,7 +248,7 @@ logical counters:
 - `measured_http_requests` covers search or each commit phase.
 - `http_requests_per_sample` covers each timed recovery; archive totals sum all
   samples. Recovery total/replay rows overlap and must not be added together.
-- HTTP counters include GET, each LIST page, PUT, other attempts, attempted request
+- HTTP counters include GET, each LIST page, PUT, DELETE, other attempts, attempted request
   body bytes including envelopes, HTTP error responses, and HTTP client call
   errors. Later response-body consumption errors are excluded from that last
   counter. Any workload error aborts the run; these are not failure-rate benchmarks.
@@ -326,3 +326,46 @@ recovery. Its engine GET savings are not physical-I/O savings. S3 avoids GETs fo
 covered payloads but still lists the complete retained namespace. Checkpoint
 creation adds one object, and M3 removes none. Desktop/MinIO measurements do not
 establish cloud-provider latency or production durability.
+
+
+## Compaction (M4)
+
+`--compact-at N` compacts after put N in recovery setup (0 disables it). If a
+checkpoint is scheduled at the same N, it runs first. Recovery timing excludes
+both maintenance operations. Raw `compaction` results record latency, create/list/
+remove counts, logical payload bytes, and S3 HTTP attempts including DELETE.
+Zero removal counts are omitted to preserve default LocalStore report shape.
+
+Additional read/write amplification divides compaction's engine payload bytes by
+all mutation payload bytes through N; metadata and prior checkpoint bytes are
+excluded from the denominator. This is maintenance overhead, not total workload
+amplification or device I/O. The live map supplies the snapshot, so engine GET
+bytes are zero; LocalStore's internal listing still reads and validates envelopes.
+No physical read/write amplification is measured.
+
+```sh
+python3 tools/test_s3.py --compaction-benchmarks target/m4-recovery
+cargo bench --locked --bench baseline -- --scenario recovery --rows 100 --dimensions 32 --mutations 300 --checkpoint-at 300 --compact-at 300 --samples 3 --seed 42 --root target
+```
+
+The runner uses 300 round-robin puts over 100 live vectors, dimension 32, seed 42,
+a checkpoint at 300 and three warm reopens. It validates identical inputs and
+recovered vectors, two engine GETs per reopen, and 302 objects before versus two
+after compaction on both backends. Compaction adds one 36,413-byte payload and
+removes 301 objects: 0 additional engine read amplification and 0.2831 additional
+write amplification relative to 128,625 mutation payload bytes. MinIO records
+one PUT, one LIST and 301 DELETE attempts, with no GET or retry.
+
+| Backend / raw measurements | Warm reopen p50 before → after | Compaction latency |
+|---|---:|---:|
+| LocalStore ([before](benchmarks/runs/e2df5ef8d12496d57db96a9ccbc69f0922aa0e8349cc714bc64d0485c07003a8.json), [after](benchmarks/runs/8e922662f8e08c4a87fc61937389763456c862b684c416ba6bc743e56f908a58.json)) | 870.677 → 37.140 ms | 3537.080 ms |
+| MinIO ([before](benchmarks/runs/a6a9341d47616b20e89e3ddbf778401fbf991028e7ef952ede0f5a130f8b4658.json), [after](benchmarks/runs/78f2dbf2f5dc871683a6c51e0a6f3337031afe7b75e709a4f721d73169e6be2e.json)) | 7.114 → 2.627 ms | 150.213 ms |
+
+These compare layouts in the same executable. `compact_at` is part of workload
+identity, so the archive does not automatically pair them. A separate
+[pre-change LocalStore baseline](benchmarks/runs/65aaa5bb71e71382d95104711b3c5f2a01e02a234e83032ecf7b23ff1fbeb4b1.json)
+measured 22.580 ms for the uncompact layout. That variability, uncontrolled desktop
+load/cache and three samples preclude a stable latency or amortized-cost claim.
+The observed object-count reduction is the demonstrated result. Retained bytes
+exclude S3 historical versions/delete markers. Raw reports retain environment,
+source hashes, all samples and exact amplification values.

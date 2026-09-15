@@ -36,7 +36,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark-smoke", type=Path, help="also validate and save local/S3 all-scenario smoke JSON in a new directory")
     parser.add_argument("--segment-benchmarks", type=Path, help="save local/S3 recovery measurements with and without a checkpoint in a new directory")
+    parser.add_argument("--compaction-benchmarks", type=Path, help="save local/S3 checkpoint recovery measurements before and after compaction in a new directory")
     args = parser.parse_args()
+    compaction_output = args.compaction_benchmarks
+    if compaction_output:
+        compaction_output.mkdir(parents=True, exist_ok=False)
     segment_output = args.segment_benchmarks
     if segment_output:
         segment_output.mkdir(parents=True, exist_ok=False)
@@ -48,7 +52,7 @@ def main():
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
-    if output or segment_output:
+    if output or segment_output or compaction_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
         run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
     try:
@@ -130,6 +134,51 @@ def main():
                     with (segment_output / f"{backend}-{phase}.json").open("x") as file:
                         file.write(raw)
             print("Segment and full-replay recovery measurements validated.", flush=True)
+        if compaction_output:
+            env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="compaction-benchmark",
+                       GLIDER_S3_SERVICE_LABEL=IMAGE + "; Docker " + run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip())
+            for backend in ("local", "s3"):
+                hashes = []
+                for compact in (0, 300):
+                    command = ["cargo", "bench", "--locked"]
+                    if backend == "s3":
+                        command += ["--features", "s3"]
+                    phase = "before" if compact == 0 else "after"
+                    command += ["--bench", "baseline", "--", "--scenario", "recovery", "--backend", backend,
+                                "--rows", "100", "--dimensions", "32", "--mutations", "300", "--samples", "3",
+                                "--checkpoint-at", "300", "--compact-at", str(compact), "--seed", "42",
+                                "--feature", "compaction", "--phase", phase, "--comparison-group", "m4-layout-300",
+                                "--root", "target", "--label", "M4 layout experiment; desktop load and power uncontrolled"]
+                    raw = run(*command, env=env, capture=True)
+                    result = json.loads(raw)["results"][0]
+                    hashes.append(result["dataset_sha256"])
+                    assert result["inventory"]["logical_objects"] == (2 if compact else 302)
+                    for counts in result["measured_store_calls_per_sample"]:
+                        assert counts["get_calls"] == 2 and counts["list_calls"] == 1
+                        assert counts["create_calls"] == counts.get("remove_calls", 0) == 0
+                    if compact:
+                        maintenance = result["compaction"]
+                        assert maintenance["sequence"] == compact
+                        assert maintenance["creates"] == maintenance["lists"] == 1
+                        assert maintenance["removes"] == 301
+                        assert maintenance["logical_bytes_read"] == 0
+                        assert maintenance["logical_bytes_written"] > 0
+                        assert maintenance["additional_read_amplification"] == 0
+                        assert maintenance["additional_write_amplification"] == maintenance["logical_bytes_written"] / maintenance["input_mutation_payload_bytes"]
+                        if backend == "s3":
+                            http = maintenance["http_requests"]
+                            assert http["put"] == http["list"] == 1 and http["delete"] == 301
+                            assert http["get"] == http["other"] == http["http_errors"] == http["transport_errors"] == 0
+                    if backend == "s3":
+                        for counts in result["http_requests_per_sample"]:
+                            assert counts["get"] == 2 and counts["list"] == 1
+                            assert counts["put"] == counts["delete"] == counts["http_errors"] == counts["transport_errors"] == 0
+                    for secret in (env["AWS_ACCESS_KEY_ID"], env["AWS_SECRET_ACCESS_KEY"]):
+                        assert secret not in raw
+                    with (compaction_output / f"{backend}-{phase}.json").open("x") as file:
+                        file.write(raw)
+                assert hashes[0] == hashes[1]
+            print("Compaction footprint, amplification and recovery measurements validated.", flush=True)
         print("S3 integration and abrupt MinIO restart checks passed.", flush=True)
     finally:
         subprocess.run(["docker", "rm", "-fv", name], check=False, stdout=subprocess.DEVNULL)

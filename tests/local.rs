@@ -149,3 +149,39 @@ fn segment_and_tail_survive_process_exit_without_destructors() {
     assert_eq!(db.get(1), None);
     assert_eq!(db.get(3), Some([5., 6.].as_slice()));
 }
+
+#[test]
+fn compacted_crash_child() {
+    let Some(root) = std::env::var_os("GLIDER_COMPACTION_CRASH_PATH") else {
+        return;
+    };
+    let mut db = Database::open(LocalStore::open(root).unwrap(), config()).unwrap();
+    db.put(1, vec![1., 2.]).unwrap();
+    db.checkpoint().unwrap();
+    db.put(2, vec![3., 4.]).unwrap();
+    db.delete(1).unwrap();
+    db.compact().unwrap();
+    db.put(3, vec![5., 6.]).unwrap();
+    std::process::exit(73);
+}
+#[test]
+fn compacted_snapshot_and_tail_survive_process_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("db");
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "compacted_crash_child"])
+        .env("GLIDER_COMPACTION_CRASH_PATH", &root)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(73));
+    let mut db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(2), Some([3., 4.].as_slice()));
+    assert_eq!(db.get(3), Some([5., 6.].as_slice()));
+    db.compact().unwrap();
+    db.put(4, vec![7., 8.]).unwrap();
+    drop(db);
+    let db = Database::open(LocalStore::open(&root).unwrap(), config()).unwrap();
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(4), Some([7., 8.].as_slice()));
+}

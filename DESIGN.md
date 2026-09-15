@@ -108,7 +108,7 @@ feature checklist or a promise to implement every referenced mechanism.
    repeated replay is idempotent.
 4. Exact kNN returns the correct top-k for the configured metric with deterministic
    ties. It remains the correctness oracle for future ANN quality evaluation.
-5. Checkpoints and future compaction must preserve logical results.
+5. Checkpoints and compaction must preserve logical results.
 6. Changing storage backends must preserve database-level correctness semantics.
 
 ## Object storage and persisted formats
@@ -116,7 +116,10 @@ feature checklist or a promise to implement every referenced mechanism.
 Successful object creation means complete, immutable bytes are durable and visible
 to get/list. Reads and listings must expose only durable complete objects; after
 an uncertain create, a backend must stabilize them or reject access until reopened.
-Complete keys cannot be replaced. Listings must be complete and
+Complete keys cannot be replaced. Successful removal means durable absence;
+removing an absent key succeeds. Removal errors are uncertain and require the
+same stabilization or rejection. The engine never reuses reclaimed keys, so a
+delayed remote DELETE cannot remove newer authoritative data. Listings must be complete and
 strongly consistent, though ordering is not required. The S3-compatible
 backend collects all listing pages and provides this object contract using native
 complete-object publication.
@@ -130,8 +133,8 @@ Schema changes require explicit format-version handling.
 Immutable numbered objects avoid append operations unavailable in object stores.
 Immutable segments with a conditional mutable head could coordinate writers but
 add a publication protocol unnecessary for exclusive ownership. The chosen layout
-costs one object per mutation; checkpoints reduce payload replay without deleting
-history. JSON favors straightforward validation over a custom binary format.
+costs one object per mutation; checkpoints reduce payload replay, while explicit
+compaction reclaims covered history. JSON favors straightforward validation over a custom binary format.
 
 ## Acknowledgement and recovery
 
@@ -173,17 +176,53 @@ checkpoint sequence is a no-op; no object is overwritten.
 Recovery validates the selected segment's version, configuration, sequence,
 strict ID ordering, dimensions and finite vectors, then decodes only newer mutation
 payloads. An invalid or missing selected segment fails recovery, never silently
-falls back. All retained mutation keys must still be contiguous from 1, and no
-segment may extend beyond that history. Covered mutation payloads and older
+falls back. Without a compaction snapshot, retained mutation keys must be contiguous from 1;
+with one, continuity is required only above its sequence. An ordinary segment
+cannot extend beyond that boundary plus the retained contiguous tail. Covered mutation payloads and older
 segments are not decoded by the engine; LocalStore still validates all envelopes
 and stabilizes all files on open. Older binaries reject segment keys rather than
 misread the namespace. Existing log-only databases remain readable.
 
 Checkpointing is explicit and synchronous; it serializes the full live map in
-memory. M3 retains all logs and snapshots, requires listing all keys, and does not
-bound storage, listing, memory or LocalStore reopen costs. Deletion/garbage
-collection and merging segments belong to M4. Checkpoints do not change mutation
-acknowledgement or solve external deletion of an unwitnessed log tail.
+memory. Checkpointing alone retains all logs and snapshots and requires listing
+all keys. It does not change mutation acknowledgement or detect external loss of
+an unwitnessed tail.
+
+## Compaction (M4)
+
+`Database::compact()` publishes the complete current live state as
+`compacted-` plus its 20-digit mutation sequence, using the same version-1 snapshot
+payload as an ordinary segment. Only this distinct snapshot kind authorizes
+reclamation. After durable publication, compaction lists and validates the cleanup
+plan, then removes covered mutations, covered ordinary segments and older
+compaction snapshots. Metadata and the new compaction snapshot remain.
+
+Existing segments already contain full live state; consolidation serializes the
+recovered map rather than merging overlapping full snapshots. Combining state and
+reclamation boundary in one object avoids an additional manifest publication;
+a mutable head would introduce a coordination requirement unnecessary for the
+exclusive owner. There are no background workers or automatic compaction policy.
+
+Success acknowledges the snapshot and all listed removals, without consuming a
+mutation sequence. Any storage error or panic poisons writes and maintenance until
+reopen. Interrupted publication leaves the prior history intact; interrupted
+cleanup leaves a complete replacement plus an arbitrary subset of obsolete keys.
+Repeating compaction at the recovered sequence resumes cleanup without rewriting
+the snapshot. A late older PUT may recreate obsolete garbage; recovery ignores it
+and a later compaction reclaims it. Successful cleanup covers the listing, not
+requests still in flight from a discarded handle.
+
+Recovery validates the highest compaction snapshot, even when a newer ordinary
+segment supplies the live state. It allows missing keys at or below that boundary,
+requires a contiguous mutation tail above it, and never falls back from a corrupt
+selected snapshot. Old log/segment namespaces remain readable; older binaries
+reject the new key kind and cannot open a compacted namespace.
+
+After cleanup, storage contains metadata plus one snapshot, growing again with
+new writes and checkpoints until the next explicit compaction. Full-map cloning
+and serialization require temporary memory, and the replacement coexists with
+old objects until cleanup. This bounds retained logical history between explicit
+compactions, not live dataset size, total memory, or provider-retained versions.
 
 ## Local backend
 
@@ -204,12 +243,17 @@ The write protocol is:
 2. Write and sync the seal, then sync the directory before acknowledging creation.
 
 A missing or partial seal denotes an unpublished attempt, excluded from get/list
-and reclaimable by a subsequent create. A complete seal requires a valid body and
+and reclaimed on reopen or by a subsequent create. A complete seal requires a valid body and
 checksum; invalid full-length seals or sealed bodies fail recovery. Published objects are
 never modified. A local handle rejects get/list/create after an interrupted or
-failed publication; passing that handle to database recovery also fails. On reopen,
+failed publication or removal; passing that handle to database recovery also fails. On reopen,
 complete objects are validated and synced before new writes, stabilizing any full
 seal left by failure before the final sync.
+
+Removal deletes the seal and syncs the directory before deleting the body and
+syncing the directory again. This prevents a crash from exposing a complete seal
+with a deleted body. Reopen reclaims unsealed debris; failure during cleanup or
+synchronization fails open. Filesystem synchronization stays inside LocalStore.
 
 The namespace's parent directory must already exist. Initialization syncs both
 namespace and parent. Local durability requires exclusive access and a
@@ -234,6 +278,12 @@ opened; the database retains its existing acknowledged-state read semantics.
 A timed-out request may still complete remotely. Conditional creation prevents a
 late request from replacing a newly committed object at the same sequence key.
 
+Removal sends one native DELETE, with no automatic retry; absence is success.
+Errors or panics poison the store. Never reusing reclaimed keys makes delayed
+DELETE requests safe across reopen and later compactions. Versioned buckets may
+retain old versions and delete markers: glider reclaims the visible namespace,
+not those provider-managed historical bytes.
+
 Each S3 object contains the existing `VTOBJ001` length/payload/SHA-256 envelope;
 there are no seal objects. Native publication replaces local sealing. GET consumes
 and validates the entire envelope before returning payload bytes. Recovery gets
@@ -243,7 +293,7 @@ Complete visible objects are already durable under the required service contract
 so recovery needs no local synchronization barrier. External tail-object deletion
 remains undetectable, as with the local backend.
 
-Cloneable request metrics count transport-level GET, listing-page, PUT and other
+Cloneable request metrics count transport-level GET, listing-page, PUT, DELETE and other
 attempts, request body bytes, HTTP error responses and transport errors. These
 are not device I/O or latency measurements. MinIO integration tests exercise
 conditional creation, pagination, namespace isolation, response-loss uncertainty,
@@ -256,11 +306,12 @@ chosen S3-compatible service.
 The durability contract covers process termination and interrupted writes, not
 arbitrary media loss. Checksums detect sealed body corruption, but deletion of
 the final log object or loss/truncation of its seal is indistinguishable from an
-operation that never published. Detecting such external loss requires an
+operation that never published. Loss of an unwitnessed compaction snapshot can
+also erase the only remaining state without a detectable gap. Detecting such external loss requires an
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-ANN, filtering, compaction, sharding, replication, distributed
+ANN, filtering, sharding, replication, distributed
 consensus, multi-node execution, quantization, networking, SQL compatibility,
 authentication/authorization, production hardening, and GPU execution are outside
 the current implementation. These are not permanent restrictions; additions

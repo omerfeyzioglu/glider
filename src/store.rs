@@ -18,6 +18,10 @@ pub trait ObjectStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
     fn list(&self) -> Result<Vec<String>>;
     fn create(&mut self, key: &str, value: &[u8]) -> Result<()>;
+    /// Durably remove an object; absence is success. Errors may have removed it.
+    /// After uncertainty, stabilize or reject access until reopened. The engine
+    /// must never reuse reclaimed keys: an old remote DELETE may arrive late.
+    fn remove(&mut self, key: &str) -> Result<()>;
 }
 
 /// Development backend; callers must ensure exclusive ownership of this path,
@@ -67,7 +71,13 @@ impl LocalStore {
         store.io("open-parent-sync", || File::open(parent)?.sync_all())?;
         // A previous process may have published a full seal but failed before
         // syncing it. Stabilize that recovered prefix before accepting new writes.
-        for key in store.list()? {
+        for key in store.candidates()? {
+            if store.get(&key)?.is_none() {
+                // Includes interrupted creates and seal-first deletes. Otherwise
+                // invisible orphan bodies would accumulate after failed cleanup.
+                store.remove_files(&key)?;
+                continue;
+            }
             let body = store.path(&format!("{key}-body"))?;
             let seal = store.path(&format!("{key}-seal"))?;
             store.io("recover-body-sync", || File::open(body)?.sync_all())?;
@@ -77,6 +87,37 @@ impl LocalStore {
             File::open(&store.root)?.sync_all()
         })?;
         Ok(store)
+    }
+    fn candidates(&self) -> Result<std::collections::BTreeSet<String>> {
+        let mut candidates = std::collections::BTreeSet::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::Corrupt("non-UTF8 object key".into()))?;
+            let key = name
+                .strip_suffix("-body")
+                .or_else(|| name.strip_suffix("-seal"))
+                .ok_or_else(|| Error::Corrupt(format!("unexpected local file: {name}")))?;
+            candidates.insert(key.to_owned());
+        }
+        Ok(candidates)
+    }
+    fn remove_files(&self, key: &str) -> Result<()> {
+        let seal = self.path(&format!("{key}-seal"))?;
+        let body = self.path(&format!("{key}-body"))?;
+        self.io("remove-seal", || remove_if_present(&seal))?;
+        // A durable seal removal must precede body removal; otherwise a crash
+        // could leave a published seal pointing to a missing body.
+        self.io("remove-seal-directory-sync", || {
+            File::open(&self.root)?.sync_all()
+        })?;
+        self.io("remove-body", || remove_if_present(&body))?;
+        self.io("remove-body-directory-sync", || {
+            File::open(&self.root)?.sync_all()
+        })?;
+        Ok(())
     }
     fn ready(&self) -> Result<()> {
         if self.poisoned {
@@ -135,19 +176,7 @@ impl ObjectStore for LocalStore {
     }
     fn list(&self) -> Result<Vec<String>> {
         self.ready()?;
-        let mut candidates = std::collections::BTreeSet::new();
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| Error::Corrupt("non-UTF8 object key".into()))?;
-            let key = name
-                .strip_suffix("-body")
-                .or_else(|| name.strip_suffix("-seal"))
-                .ok_or_else(|| Error::Corrupt(format!("unexpected local file: {name}")))?;
-            candidates.insert(key.to_owned());
-        }
+        let candidates = self.candidates()?;
         let mut keys = Vec::new();
         for key in candidates {
             if self.get(&key)?.is_some() {
@@ -155,6 +184,14 @@ impl ObjectStore for LocalStore {
             }
         }
         Ok(keys)
+    }
+    fn remove(&mut self, key: &str) -> Result<()> {
+        self.ready()?;
+        self.path(key)?;
+        self.poisoned = true;
+        self.remove_files(key)?;
+        self.poisoned = false;
+        Ok(())
     }
     fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
         if self.get(key)?.is_some() {
@@ -223,3 +260,10 @@ fn decode_envelope(bytes: &[u8], key: &str) -> Result<Vec<u8>> {
 
 #[cfg(feature = "s3")]
 pub mod s3;
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
