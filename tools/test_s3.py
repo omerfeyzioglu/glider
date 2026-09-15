@@ -37,7 +37,9 @@ def main():
     parser.add_argument("--benchmark-smoke", type=Path, help="also validate and save local/S3 all-scenario smoke JSON in a new directory")
     parser.add_argument("--segment-benchmarks", type=Path, help="save local/S3 recovery measurements with and without a checkpoint in a new directory")
     parser.add_argument("--compaction-benchmarks", type=Path, help="save local/S3 checkpoint recovery measurements before and after compaction in a new directory")
+    parser.add_argument("--search-smoke", type=Path, help="validate the M5 search matrix against the disposable MinIO service")
     args = parser.parse_args()
+    search_output = args.search_smoke
     compaction_output = args.compaction_benchmarks
     if compaction_output:
         compaction_output.mkdir(parents=True, exist_ok=False)
@@ -52,7 +54,7 @@ def main():
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
-    if output or segment_output or compaction_output:
+    if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
         run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
     try:
@@ -149,6 +151,12 @@ def main():
                         file.write(raw)
                 assert hashes[0] == hashes[1]
             print("Compaction footprint, amplification and recovery measurements validated.", flush=True)
+        if search_output:
+            env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="search-smoke",
+                       GLIDER_S3_SERVICE_LABEL=IMAGE + "; Docker " + run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip())
+            # Child runner inherits only this isolated service's credentials.
+            run("python3", "tools/search_benchmark.py", "--backend", "s3", "--smoke",
+                "--output", str(search_output), "--label", "MinIO search smoke; desktop load uncontrolled", env=env)
         print("S3 integration and abrupt MinIO restart checks passed.", flush=True)
     finally:
         subprocess.run(["docker", "rm", "-fv", name], check=False, stdout=subprocess.DEVNULL)
