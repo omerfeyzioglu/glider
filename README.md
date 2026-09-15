@@ -1,3 +1,5 @@
+![Glider](glider.png)
+
 # Glider
 
 Glider is a Rust-based, object-storage-native vector database and search engine
