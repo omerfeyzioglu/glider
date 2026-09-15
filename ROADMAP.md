@@ -76,6 +76,9 @@ Done when:
 
 ## M5 — Search baseline and performance characterization
 
+Status: complete (archived warm synthetic matrix, independent exact-oracle checks,
+local/S3 smoke validation; cold caches and production capacity remain unmeasured)
+
 Goal:
 Establish reproducible performance baselines before approximate indexing.
 

@@ -35,7 +35,7 @@ jobs:
         run: cargo test --locked
 
       - name: Test benchmark archive tooling
-        run: python3 -m unittest discover -s tests -p 'test_benchmarks.py'
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Check generated benchmark summary
         run: python3 tools/benchmarks.py summary --check
@@ -46,13 +46,16 @@ jobs:
           cargo test --all-features --locked
 
       - name: Run isolated MinIO integration tests
-        run: python3 tools/test_s3.py --benchmark-smoke target/backend-smoke
+        run: python3 tools/test_s3.py --benchmark-smoke target/backend-smoke --search-smoke target/search-s3-smoke
 
       - name: Validate dedicated compaction workload and counter repeatability
         run: |
           python3 tools/compaction_benchmark.py --label "CI runner; caches and competing load uncontrolled" --output target/compaction-first.json
           python3 tools/compaction_benchmark.py --label "CI runner; caches and competing load uncontrolled" --output target/compaction-repeat.json
           python3 tools/benchmarks.py compare target/compaction-first.json target/compaction-repeat.json --check-counters > target/compaction-comparison.json
+
+      - name: Validate search matrix and exact oracle
+        run: python3 tools/search_benchmark.py --smoke --label "CI runner; caches and competing load uncontrolled" --output target/search-smoke
 
       - name: Retain benchmark reports
         if: always()
@@ -62,4 +65,6 @@ jobs:
           path: |
             target/backend-smoke/*.json
             target/compaction-*.json
+            target/search-smoke/*.json
+            target/search-s3-smoke/*.json
           if-no-files-found: ignore

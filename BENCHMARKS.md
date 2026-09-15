@@ -398,3 +398,54 @@ load/cache and three samples preclude a stable latency or amortized-cost claim.
 The observed object-count reduction is the demonstrated result. Retained bytes
 exclude S3 historical versions/delete markers. Raw reports retain environment,
 source hashes, all samples and exact amplification values.
+
+
+## Search characterization (M5)
+
+```sh
+python3 tools/search_benchmark.py --output target/m5-search
+python3 tools/search_benchmark.py --smoke --output target/search-smoke
+python3 tools/test_s3.py --search-smoke target/search-s3-smoke
+```
+
+The full matrix varies one factor around 1,000 rows, 128 dimensions and k=10:
+10,000 rows; 32 or 768 dimensions; k=100. Each case runs twice in a fresh process
+with seed 42, 100 queries and five timed batches (500 individual query samples).
+This is a provisional synthetic workload, not a production capacity target.
+`--backend s3` uses the existing explicit S3 environment; the MinIO smoke command
+provisions an isolated service. CI runs small local/S3 correctness matrices and
+retains their reports, without latency thresholds.
+
+The runner preserves the existing Cargo harness, generator, timings and raw JSON.
+It independently regenerates input fingerprints and checks the first three query
+answers with a scalar f64 oracle outside the measured process. All saved answers
+must match across repeats and form consistent prefixes across k. Every query must
+issue zero engine storage calls/bytes and, on S3, zero HTTP requests. The matrix
+inventory records raw-file hashes and the independently checked query indices.
+
+These are warm in-memory queries after ingestion and one full warmup pass. Cold
+CPU/OS caches and cold startup are not measured; opening a process alone would
+not evict those caches. The current query path holds all vectors in memory, so
+cold object-store query latency is not represented. RSS is the Rust process's
+lifetime high-water mark, including setup; it excludes the separate Python oracle.
+
+Recorded on Apple M4/macOS, with desktop load and power uncontrolled. Ranges below
+span the two invocations; throughput uses batch time. Raw reports retain all
+samples, CPU counters, RSS, exact neighbor IDs, source/commit and environment data.
+
+| Rows × dimensions / k (raw runs) | p50 µs | p95 µs | Queries/s | Peak RSS MiB |
+|---|---:|---:|---:|---:|
+| 1,000 × 128 / 10 ([r1](benchmarks/runs/7aeb9adc7cdcd3fd24cf0001532858c9a8c5c9c223b0d9d72c61871a2731eedf.json), [r2](benchmarks/runs/c56ec61b5deaae2a68f70bb8bb64fe72d8424acb6cf5f5e17be64587df344c50.json)) | 87.75–87.96 | 153.12–153.83 | 10304–10907 | 4.05–4.67 |
+| 10,000 × 128 / 10 ([r1](benchmarks/runs/1720fc520c7f20c1627205d592465bfc79d24ce7653d08b4f1102ec76b24a2fd.json), [r2](benchmarks/runs/ce2c0a14454d31f911852fff79f87e2c441a48567d259587159f71e811dfc8e7.json)) | 551.38–562.67 | 583.42–610.00 | 1777–1782 | 23.42–23.50 |
+| 1,000 × 32 / 10 ([r1](benchmarks/runs/8849c1b2907eb1cc1a5aeede19097d68c0dba2e6f91d4492301ed5645b2bcdfa.json), [r2](benchmarks/runs/927d6eefc65ee50511d0c0f32f90776dd6720ea1117d14921f003504a1ba0862.json)) | 48.79–49.17 | 57.50–57.54 | 20139–20163 | 4.14–4.23 |
+| 1,000 × 768 / 10 ([r1](benchmarks/runs/483ffca854fca02169725b44fb22f4a94c87d888046198f9f62b5f5948035a91.json), [r2](benchmarks/runs/43d319d1f08b47c4c09a223e320c719e822733ccaf333253817a0566903cc1d5.json)) | 360.96–361.33 | 425.58–425.79 | 2698–2701 | 7.55–7.56 |
+| 1,000 × 128 / 100 ([r1](benchmarks/runs/9a6eedf68c6f6b03830d3e8a58a1c12ae9b956f0a9dc22e411c4360901c608e1.json), [r2](benchmarks/runs/9ba388d3a60cb66dc96226c06518739f9ad7e495cc7e1eb3fb6963fbd533f7b6.json)) | 87.88–87.88 | 153.75–154.08 | 10290–10400 | 4.62–4.62 |
+
+Larger row counts and dimensions increased observed query cost. Raising k from
+10 to 100 left the 1,000 × 128 median near 88 µs, consistent with the engine
+sorting every scored vector before truncation. This does not isolate scoring
+versus sorting time: profile those stages before selecting an optimization.
+Two invocations and synthetic uniform vectors do not establish tail guarantees,
+production throughput, or an ANN requirement. M5 changes measurement coverage,
+not engine performance; the next design decision still needs a workload/recall
+budget and profiling evidence.
