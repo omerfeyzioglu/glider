@@ -18,3 +18,7 @@
 
 # Python benchmark tooling
 __pycache__/
+
+# Rebuildable detailed benchmark views; immutable raw history remains tracked
+/benchmarks/index.json
+/benchmarks/HISTORY.md

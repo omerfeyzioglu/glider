@@ -137,44 +137,14 @@ def main():
         if compaction_output:
             env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="compaction-benchmark",
                        GLIDER_S3_SERVICE_LABEL=IMAGE + "; Docker " + run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip())
+            from compaction_benchmark import measure
             for backend in ("local", "s3"):
                 hashes = []
-                for compact in (0, 300):
-                    command = ["cargo", "bench", "--locked"]
-                    if backend == "s3":
-                        command += ["--features", "s3"]
-                    phase = "before" if compact == 0 else "after"
-                    command += ["--bench", "baseline", "--", "--scenario", "recovery", "--backend", backend,
-                                "--rows", "100", "--dimensions", "32", "--mutations", "300", "--samples", "3",
-                                "--checkpoint-at", "300", "--compact-at", str(compact), "--seed", "42",
-                                "--feature", "compaction", "--phase", phase, "--comparison-group", "m4-layout-300",
-                                "--root", "target", "--label", "M4 layout experiment; desktop load and power uncontrolled"]
-                    raw = run(*command, env=env, capture=True)
-                    result = json.loads(raw)["results"][0]
-                    hashes.append(result["dataset_sha256"])
-                    assert result["inventory"]["logical_objects"] == (2 if compact else 302)
-                    for counts in result["measured_store_calls_per_sample"]:
-                        assert counts["get_calls"] == 2 and counts["list_calls"] == 1
-                        assert counts["create_calls"] == counts.get("remove_calls", 0) == 0
-                    if compact:
-                        maintenance = result["compaction"]
-                        assert maintenance["sequence"] == compact
-                        assert maintenance["creates"] == maintenance["lists"] == 1
-                        assert maintenance["removes"] == 301
-                        assert maintenance["logical_bytes_read"] == 0
-                        assert maintenance["logical_bytes_written"] > 0
-                        assert maintenance["additional_read_amplification"] == 0
-                        assert maintenance["additional_write_amplification"] == maintenance["logical_bytes_written"] / maintenance["input_mutation_payload_bytes"]
-                        if backend == "s3":
-                            http = maintenance["http_requests"]
-                            assert http["put"] == http["list"] == 1 and http["delete"] == 301
-                            assert http["get"] == http["other"] == http["http_errors"] == http["transport_errors"] == 0
-                    if backend == "s3":
-                        for counts in result["http_requests_per_sample"]:
-                            assert counts["get"] == 2 and counts["list"] == 1
-                            assert counts["put"] == counts["delete"] == counts["http_errors"] == counts["transport_errors"] == 0
-                    for secret in (env["AWS_ACCESS_KEY_ID"], env["AWS_SECRET_ACCESS_KEY"]):
-                        assert secret not in raw
+                for compact in (False, True):
+                    raw = measure(backend, compact, env=env,
+                                  secrets=(env["AWS_ACCESS_KEY_ID"], env["AWS_SECRET_ACCESS_KEY"]))
+                    hashes.append(json.loads(raw)["results"][0]["dataset_sha256"])
+                    phase = "after" if compact else "before"
                     with (compaction_output / f"{backend}-{phase}.json").open("x") as file:
                         file.write(raw)
                 assert hashes[0] == hashes[1]

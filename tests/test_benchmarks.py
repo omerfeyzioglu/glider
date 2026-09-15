@@ -182,15 +182,15 @@ class Archival(unittest.TestCase):
             target = bench.archive(source, archive)
             self.assertEqual(target.read_bytes(), data)
             expected_summary = (archive / "SUMMARY.md").read_bytes()
-            expected_index = (archive / "index.json").read_bytes()
+            expected_index = (archive / "latest.json").read_bytes()
             self.assertEqual(bench.archive(source, archive), target)
             self.assertEqual(len(list((archive / "runs").glob("*.json"))), 1)
             bench.summarize(archive, check=True)
             self.assertEqual((archive / "SUMMARY.md").read_bytes(), expected_summary)
-            (archive / "index.json").unlink()
+            (archive / "latest.json").unlink()
             (archive / "SUMMARY.md").unlink()
             bench.summarize(archive)
-            self.assertEqual((archive / "index.json").read_bytes(), expected_index)
+            self.assertEqual((archive / "latest.json").read_bytes(), expected_index)
             self.assertEqual((archive / "SUMMARY.md").read_bytes(), expected_summary)
             (archive / "SUMMARY.md").write_text("stale")
             with self.assertRaisesRegex(ValueError, "stale"):
@@ -214,7 +214,7 @@ class Archival(unittest.TestCase):
                 bench.archive(path, root / "a")
             for path in reversed(inputs):
                 bench.archive(path, root / "b")
-            for name in ("SUMMARY.md", "index.json"):
+            for name in ("SUMMARY.md", "latest.json"):
                 self.assertEqual((root / "a" / name).read_bytes(), (root / "b" / name).read_bytes())
 
     def test_invalid_input_never_creates_an_archive(self):
@@ -410,6 +410,98 @@ class SegmentBenchmarkMetadata(unittest.TestCase):
         summary = bench.markdown(values, [])
         self.assertIn("checkpoint_at=9", summary)
         self.assertIn("Unpaired runs", summary)
+
+
+class CompactInspectionAndComparison(unittest.TestCase):
+    def test_latest_is_explicit_deterministic_and_separate_from_pairing(self):
+        old, new = report("baseline"), report("after", "new")
+        old["environment"]["unix_seconds"] = 10
+        new["environment"]["unix_seconds"] = 20
+        values = rows(old) + rows(new)
+        selected = bench.latest_entries(values)
+        self.assertEqual([x["git_revision"] for x in selected], ["abc", "new"])
+        self.assertEqual(selected, bench.latest_entries(list(reversed(values))))
+        self.assertEqual(bench.comparisons(values), [])
+        self.assertEqual(bench.latest_entries(rows(report())), [])
+        new["environment"]["unix_seconds"] = 10
+        tied = rows(old) + rows(new)
+        self.assertEqual(bench.latest_entries(tied), bench.latest_entries(list(reversed(tied))))
+
+    def test_full_outputs_are_optional_rebuildable_and_raw_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.json"
+            source.write_text(json.dumps(report()))
+            target = bench.archive(source, root / "archive")
+            raw = target.read_bytes()
+            self.assertFalse((target.parent.parent / "index.json").exists())
+            bench.summarize(target.parent.parent, full=True)
+            bench.summarize(target.parent.parent, check=True, full=True)
+            index = json.loads((target.parent.parent / "index.json").read_text())
+            self.assertEqual(index["rows"][0]["environment"], report()["environment"])
+            self.assertIn("Benchmark archive", (target.parent.parent / "HISTORY.md").read_text())
+            self.assertEqual(target.read_bytes(), raw)
+
+    def test_comparison_is_explicit_no_latency_gate_and_checks_counters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory) / "a.json", Path(directory) / "b.json"
+            before, after = report(), report(latency=100000)
+            a.write_text(json.dumps(before)); b.write_text(json.dumps(after))
+            result = bench.compare_files(a, b, True)
+            self.assertFalse(result["counter_check_failed"])
+            after["results"][0]["measured_store_calls"]["get_calls"] = 1
+            b.write_text(json.dumps(after))
+            self.assertTrue(bench.compare_files(a, b, True)["counter_check_failed"])
+            self.assertFalse(bench.compare_files(a, b)["counter_check_failed"])
+            after["config"]["seed"] = 43
+            b.write_text(json.dumps(after))
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                bench.compare_files(a, b)
+            before["environment"].pop("cpu")
+            a.write_text(json.dumps(before))
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                bench.compare_files(a, b)
+
+    def test_compare_cli_reports_counter_regression_and_missing_data(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory) / "a.json", Path(directory) / "b.json"
+            before, after = report(), report()
+            after["results"][0]["measured_store_calls"].pop("get_calls")
+            a.write_text(json.dumps(before)); b.write_text(json.dumps(after))
+            command = [sys.executable, str(REPO / "tools/benchmarks.py"), "compare", str(a), str(b)]
+            checked = subprocess.run(command + ["--check-counters"], capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 1)
+            data = json.loads(checked.stdout)
+            self.assertTrue(data["counter_check_failed"])
+            self.assertEqual(len(data["comparisons"][0]["before_raw_sha256"]), 64)
+            advisory = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(advisory.returncode, 0)
+
+
+    def test_compaction_runner_preserves_existing_reports_and_validation(self):
+        import sys
+        sys.path.insert(0, str(REPO / "tools"))
+        import compaction_benchmark as compaction
+        for backend, filename in [
+            ("local", "8e922662f8e08c4a87fc61937389763456c862b684c416ba6bc743e56f908a58"),
+            ("s3", "78f2dbf2f5dc871683a6c51e0a6f3337031afe7b75e709a4f721d73169e6be2e")]:
+            document = json.loads((REPO / f"benchmarks/runs/{filename}.json").read_text())
+            compaction.validate(document, backend, True)
+            command = compaction.command(backend)
+            self.assertIn("--locked", command)
+            self.assertEqual(command[command.index("--checkpoint-at") + 1], "300")
+            self.assertEqual(command[command.index("--compact-at") + 1], "300")
+            normalized = rows(document)[0]
+            self.assertEqual(normalized["maintenance"]["compaction"]["removes"], 301)
+            document["results"][0]["compaction"]["removes"] = 300
+            with self.assertRaises(AssertionError):
+                compaction.validate(document, backend, True)
+        remote = BackendReports.s3_report()
+        remote["results"][0]["measured_http_requests"]["delete"] = 7
+        self.assertEqual(rows(remote)[0]["metrics"]["http_delete_count"], 7)
+        self.assertIsNone(rows(report())[0]["metrics"]["http_delete_count"])
 
 
 if __name__ == "__main__":
