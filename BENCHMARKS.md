@@ -449,3 +449,64 @@ Two invocations and synthetic uniform vectors do not establish tail guarantees,
 production throughput, or an ANN requirement. M5 changes measurement coverage,
 not engine performance; the next design decision still needs a workload/recall
 budget and profiling evidence.
+
+## Native search profiling and exact top-k
+
+```sh
+python3 tools/profile_search.py --output target/search-profile
+```
+
+On macOS this builds the normal harness with bench debug information, waits for
+`PROFILE_READY <pid>` after ingestion and oracle warmup, and samples five seconds
+of an eight-second diagnostic search loop. `--profile-seconds N` is opt-in and
+search-only; its default is zero and omitted from ordinary reports. Other native
+profilers can attach at the same marker. Profiled JSON is diagnostic, not an
+unprofiled latency baseline; its configuration and build environment distinguish it.
+
+For 10,000 vectors × 128 dimensions, k=10, seed 42, the
+[compressed native sample](benchmarks/profiles/ea12da7154ec2145c8a9b9d28ba86bbfc787c0904ceb96faa7a3f5471f19c00e.sample.txt.gz)
+and [diagnostic metadata](benchmarks/profiles/08fde9b3852be8f80cd3da950b429364dd678b6305f48d9b40484e70866263c1.json)
+record 4,169 main-thread samples: 3,039 in `Metric::score` (about 73%) and
+1,036 at the full-sort call (about 25%). These are sampled stack shares, not exact
+stage timers or hardware counters. Nested sort frames must not be added together.
+Profiles stay outside `runs/`, so they do not become latest latency baselines.
+
+Scoring is the larger cost, but sorting is material. Search now partitions to the
+best k and sorts only that prefix, removing unnecessary ordering work with the
+existing candidate vector. A bounded heap could instead reduce candidate memory
+to O(k), but adds per-candidate heap bookkeeping and comparator machinery; memory
+pressure has not been demonstrated here. Partitioning still scores every vector
+and retains O(N) candidate storage, so it does not remove the eventual need for
+ANN if the workload requires fewer distance calculations.
+
+Fresh unprofiled before/after runs use 1,000 rows, seed 42, 100 queries and five
+batches, with two process invocations per case. All six pairs preserve every
+ordered neighbor ID, build counters, query counters and storage footprint.
+
+| Dimensions / k | Before p50 µs | After p50 µs | Paired p50 reduction |
+|---|---:|---:|---:|
+| 128 / 10 | 77.29–88.42 | 63.38–77.54 | 12.3–18.0% |
+| 768 / 10 | 361.13–361.63 | 351.46–351.63 | 2.7–2.8% |
+| 128 / 900 | 87.79–88.79 | 74.88–75.17 | 14.4–15.7% |
+
+These desktop measurements do not establish a universal speedup: load and power
+were uncontrolled, and 768-dimensional p99 increased from 452.54–455.25 µs to
+519.29–523.88 µs. The modest high-dimensional median gain is consistent with
+scoring dominating. No timing threshold or candidate-memory improvement is claimed.
+Both phases report the same dirty parent commit; their recorded source hashes
+distinguish the implementations. Raw runs remain in the archive under feature
+`exact-top-k`, phases `before`/`after` and groups `topk-r1`/`topk-r2`; inspect
+`benchmarks/SUMMARY.md`, or generate the complete index with
+`python3 tools/benchmarks.py summary --full`.
+
+Reproduce each case at its respective source version, substituting phase,
+dimensions, k and repetition (1 or 2):
+
+```sh
+cargo bench --locked --bench baseline -- --scenario search --backend local \
+  --rows 1000 --dimensions 128 --k 10 --queries 100 --samples 5 --seed 42 \
+  --feature exact-top-k --phase after --comparison-group topk-r1 \
+  --root target --label 'top-k experiment; desktop load and power uncontrolled' > target/topk.json
+python3 tools/benchmarks.py archive target/topk.json
+python3 tools/benchmarks.py compare BEFORE.json AFTER.json --check-counters
+```

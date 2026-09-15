@@ -403,6 +403,9 @@ impl<S: ObjectStore> Database<S> {
     }
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<Neighbor>> {
         self.config.vector(query)?;
+        if k == 0 {
+            return Ok(Vec::new());
+        }
         let mut results: Vec<_> = self
             .documents
             .iter()
@@ -411,8 +414,14 @@ impl<S: ObjectStore> Database<S> {
                 distance: self.config.metric.score(query, vector),
             })
             .collect();
-        results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
-        results.truncate(k);
+        let order =
+            |a: &Neighbor, b: &Neighbor| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id));
+        if k < results.len() {
+            // The total (distance, ID) order makes cutoff ties deterministic.
+            results.select_nth_unstable_by(k, order);
+            results.truncate(k);
+        }
+        results.sort_by(order);
         Ok(results)
     }
     fn commit(&mut self, mutation: Mutation) -> Result<()> {
