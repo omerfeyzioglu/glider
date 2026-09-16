@@ -31,6 +31,12 @@ available in context as described below, and inspect relevant code and tests.
   planning, `README.md` for setup or public usage, and relevant `BENCHMARKS.md`
   sections for benchmark work. Search `benchmarks/SUMMARY.md` by backend, scenario,
   or run; consult matching raw results and measurement definitions as needed.
+- `docs/EVOLUTION.md` is an optional historical reference, not required reading
+  for every task. Read only relevant entries when investigating past decisions,
+  preparing a retrospective, or documenting a significant development. Update it
+  only for meaningful algorithm/data-structure changes, architectural decisions,
+  critical correctness fixes, or measured findings that influence development;
+  routine edits, refactors, formatting, and individual benchmark runs need no entry.
 - Locate sections with `rg -n '^#{1,6} ' FILE` and read relevant ranges. Read full
   documents when the task requires it. Never omit architecture, durability,
   recovery, or persisted-format requirements needed for correctness.
