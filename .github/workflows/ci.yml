@@ -57,6 +57,9 @@ jobs:
       - name: Validate search matrix and exact oracle
         run: python3 tools/search_benchmark.py --smoke --label "CI runner; caches and competing load uncontrolled" --output target/search-smoke
 
+      - name: Validate short exact versus IVF comparison
+        run: python3 tools/ann_benchmark.py --smoke --output target/ann-smoke
+
       - name: Retain benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -67,4 +70,6 @@ jobs:
             target/compaction-*.json
             target/search-smoke/*.json
             target/search-s3-smoke/*.json
+            target/ann-smoke/*.json
+            target/ann-smoke/SUMMARY.md
           if-no-files-found: ignore

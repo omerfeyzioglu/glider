@@ -16,6 +16,7 @@
 //! db.delete(42)?;
 //! # Ok::<(), glider::Error>(())
 //! ```
+pub mod ivf;
 pub mod store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -147,6 +148,7 @@ pub struct Database<S> {
     poisoned: bool,
     checkpoint_sequence: Option<u64>,
     compacted_sequence: Option<u64>,
+    ivf: Option<ivf::Index>,
 }
 impl<S: ObjectStore> Database<S> {
     /// Open/recover, or initialize an empty namespace. Config must match on restart.
@@ -231,6 +233,7 @@ impl<S: ObjectStore> Database<S> {
             poisoned: false,
             checkpoint_sequence,
             compacted_sequence: latest_compacted,
+            ivf: None,
         };
         // Validate the reclamation boundary even if a newer ordinary snapshot
         // supplies the live state. Never fall back from an invalid boundary.
@@ -447,6 +450,7 @@ impl<S: ObjectStore> Database<S> {
         Ok(())
     }
     fn apply(&mut self, mutation: Mutation) {
+        self.ivf = None;
         match mutation {
             Mutation::Put { id, vector } => {
                 self.documents.insert(id, vector);

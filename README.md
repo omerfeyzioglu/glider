@@ -151,3 +151,25 @@ A compacted namespace requires an M4-capable binary. Compaction reclaims logical
 objects; S3 bucket versioning may retain historical versions and delete markers.
 See [DESIGN.md](DESIGN.md) for recovery semantics and [BENCHMARKS.md](BENCHMARKS.md)
 for footprint and amplification measurements.
+
+## Rebuildable IVF-Flat search
+
+Exact `db.search(query, k)` remains available. To trade recall for fewer distance
+calculations, build the derived in-memory index after loading your data:
+
+```rust,ignore
+use glider::ivf::IvfConfig;
+db.build_ivf(IvfConfig { partitions: 16, iterations: 8, seed: 42 })?;
+let result = db.search_ivf(&query, 10, 4)?; // probe four nearest partitions
+println!("{:?}", result.neighbors);
+```
+
+These parameters are examples, not recommended settings for every dataset.
+Probing all partitions matches exact search; fewer probes can miss neighbors and
+return fewer than k results. Every successful put/delete invalidates the index;
+rebuild before the next IVF query. Reopening also requires rebuilding. Indexes
+are not persisted and do not change write durability. See [DESIGN.md](DESIGN.md)
+for training and lifecycle semantics.
+
+Run the short comparison with `python3 tools/ann_benchmark.py --output target/ann`.
+See [BENCHMARKS.md](BENCHMARKS.md) and [the latest ANN comparison](benchmarks/ANN.md).

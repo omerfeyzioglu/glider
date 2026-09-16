@@ -42,6 +42,14 @@ pub struct Options {
     pub compact_at: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub profile_seconds: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ivf_partitions: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ivf_probes: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ivf_iterations: usize,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub distribution: String,
     pub operations: usize,
     pub queries: usize,
     pub samples: usize,
@@ -71,6 +79,10 @@ impl Options {
             checkpoint_at: 0,
             compact_at: 0,
             profile_seconds: 0,
+            ivf_partitions: 0,
+            ivf_probes: 0,
+            ivf_iterations: 0,
+            distribution: String::new(),
             operations: 200,
             queries: 100,
             samples: 5,
@@ -100,6 +112,8 @@ impl Options {
                     --profile-seconds N (0; separate diagnostic search loop before measurement)\n\
                     --operations N (200; commits per insert/overwrite/delete phase)\n\
                     --queries N (100) --samples N (5; search batches / warm reopens)\n\
+                    --ivf-partitions N --ivf-probes N --ivf-iterations N (search only; all required)\n\
+                    --distribution clustered (search only; omitted = uniform)\n\
                     --k N (10) --seed N (42) --root EXISTING_DIRECTORY (OS temp directory)\n\
                     --label TEXT (filesystem/device/power/load notes; unspecified)\n\
                     Output: one JSON document on stdout. Run without --help to measure."
@@ -127,6 +141,10 @@ impl Options {
                 "--checkpoint-at" => o.checkpoint_at = value.parse()?,
                 "--compact-at" => o.compact_at = value.parse()?,
                 "--profile-seconds" => o.profile_seconds = value.parse()?,
+                "--ivf-partitions" => o.ivf_partitions = value.parse()?,
+                "--ivf-probes" => o.ivf_probes = value.parse()?,
+                "--ivf-iterations" => o.ivf_iterations = value.parse()?,
+                "--distribution" => o.distribution = value,
                 "--operations" => o.operations = value.parse()?,
                 "--queries" => o.queries = value.parse()?,
                 "--samples" => o.samples = value.parse()?,
@@ -173,11 +191,56 @@ impl Options {
         if o.profile_seconds > 0 && o.scenario != "search" {
             return Err("profile-seconds requires --scenario search".into());
         }
+        if [o.ivf_partitions, o.ivf_probes, o.ivf_iterations]
+            .iter()
+            .any(|&n| n > 0)
+            && (o.scenario != "search"
+                || o.profile_seconds != 0
+                || [o.ivf_partitions, o.ivf_probes, o.ivf_iterations].contains(&0))
+        {
+            return Err(
+                "IVF requires search, positive partitions/probes/iterations, and no profiling"
+                    .into(),
+            );
+        }
+        if !o.distribution.is_empty() && (o.distribution != "clustered" || o.scenario != "search") {
+            return Err("distribution accepts clustered for search only; omit for uniform".into());
+        }
         if o.backend == Backend::S3 && !cfg!(feature = "s3") {
             return Err("S3 benchmarks require cargo bench --features s3".into());
         }
+        if [o.ivf_partitions, o.ivf_probes, o.ivf_iterations]
+            .iter()
+            .any(|&n| n > 0)
+            && (o.scenario != "search"
+                || o.profile_seconds != 0
+                || [o.ivf_partitions, o.ivf_probes, o.ivf_iterations].contains(&0))
+        {
+            return Err(
+                "IVF requires search, positive partitions/probes/iterations, and no profiling"
+                    .into(),
+            );
+        }
+        if !o.distribution.is_empty() && (o.distribution != "clustered" || o.scenario != "search") {
+            return Err("distribution accepts clustered for search only; omit for uniform".into());
+        }
         if o.backend == Backend::S3 && !group_explicit {
             o.comparison_group = "s3-v1".into();
+        }
+        if [o.ivf_partitions, o.ivf_probes, o.ivf_iterations]
+            .iter()
+            .any(|&n| n > 0)
+            && (o.scenario != "search"
+                || o.profile_seconds != 0
+                || [o.ivf_partitions, o.ivf_probes, o.ivf_iterations].contains(&0))
+        {
+            return Err(
+                "IVF requires search, positive partitions/probes/iterations, and no profiling"
+                    .into(),
+            );
+        }
+        if !o.distribution.is_empty() && (o.distribution != "clustered" || o.scenario != "search") {
+            return Err("distribution accepts clustered for search only; omit for uniform".into());
         }
         if o.backend == Backend::S3 && !feature_explicit {
             o.feature = "m2".into();

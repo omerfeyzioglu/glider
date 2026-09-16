@@ -30,6 +30,36 @@ f32 components. The persisted metric enum supports squared Euclidean and Manhatt
 distance, accumulated in f64. Exact search scans all live documents, sorts by
 ascending distance then ID, and returns at most k results.
 
+## Derived IVF-Flat candidate index
+
+`build_ivf(IvfConfig)` explicitly builds an in-memory index from the acknowledged
+map. Seeded farthest-point initialization and a fixed number of assignment/update
+iterations train means for squared Euclidean distance and coordinate medians for
+Manhattan distance. Each ID belongs to one final partition; full-precision vectors
+remain in the document map. Empty partitions retain their centers. Ties are
+deterministic; partitions are capped at the live row count.
+
+`search_ivf(query, k, probes)` scores every center, scans the nearest partitions,
+and orders candidates by exact distance then ID. It can miss true neighbors and
+return fewer than k results; probing all partitions equals exact search. Results
+include centroid and vector distance counts. The exact `search` API is unchanged.
+
+Every successful put/delete invalidates the index; queries then return an explicit
+error until rebuilt. Failed publication leaves both reads and the index at the
+last acknowledged state, including on a poisoned handle. Recovery starts without
+an index. Checkpoint/compaction preserve it because they do not change live state.
+Building and querying the index perform no storage I/O, change no persisted format
+and introduce no acknowledgement or recovery boundary.
+
+IVF is the first partitioned baseline, chosen for a small implementation and a
+layout suitable for later object-storage evaluation. HNSW would instead add graph
+memory and maintenance; SPFresh-style local rebalancing is deferred until update
+workloads demonstrate that rebuilding is too costly. This prototype rebuilds
+synchronously in O(iterations × rows × partitions × dimensions) assignment work;
+Manhattan median updates add selection work. Training uses O(rows + partitions ×
+dimensions) auxiliary state. It does not provide online index maintenance,
+persisted ANN partitions, filtering, or a guaranteed recall/latency target.
+
 ## Future / target architecture
 
 This section describes the direction of the project, not functionality that is
@@ -311,7 +341,7 @@ also erase the only remaining state without a detectable gap. Detecting such ext
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-ANN, filtering, sharding, replication, distributed
+Persisted ANN indexes, filtering, sharding, replication, distributed
 consensus, multi-node execution, quantization, networking, SQL compatibility,
 authentication/authorization, production hardening, and GPU execution are outside
 the current implementation. These are not permanent restrictions; additions

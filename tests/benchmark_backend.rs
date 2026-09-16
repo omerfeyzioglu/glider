@@ -217,3 +217,57 @@ fn diagnostic_profiling_is_opt_in_and_search_only() {
         assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
     }
 }
+
+#[test]
+fn ivf_options_are_explicit_and_preserve_defaults() {
+    let default = Options::parse_from(Vec::<String>::new()).unwrap().unwrap();
+    let value = serde_json::to_value(default).unwrap();
+    for key in [
+        "ivf_partitions",
+        "ivf_probes",
+        "ivf_iterations",
+        "distribution",
+    ] {
+        assert!(value.get(key).is_none());
+    }
+    let valid = [
+        "--scenario",
+        "search",
+        "--ivf-partitions",
+        "16",
+        "--ivf-probes",
+        "4",
+        "--ivf-iterations",
+        "8",
+        "--distribution",
+        "clustered",
+    ];
+    assert!(Options::parse_from(valid.map(String::from)).is_ok());
+    for args in [
+        vec!["--scenario", "search", "--ivf-partitions", "16"],
+        vec![
+            "--ivf-partitions",
+            "16",
+            "--ivf-probes",
+            "4",
+            "--ivf-iterations",
+            "8",
+        ],
+        vec!["--scenario", "search", "--distribution", "unknown"],
+        vec!["--distribution", "clustered"],
+        vec![
+            "--scenario",
+            "search",
+            "--ivf-partitions",
+            "16",
+            "--ivf-probes",
+            "4",
+            "--ivf-iterations",
+            "8",
+            "--profile-seconds",
+            "1",
+        ],
+    ] {
+        assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
+    }
+}
