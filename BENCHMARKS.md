@@ -510,3 +510,40 @@ cargo bench --locked --bench baseline -- --scenario search --backend local \
 python3 tools/benchmarks.py archive target/topk.json
 python3 tools/benchmarks.py compare BEFORE.json AFTER.json --check-counters
 ```
+
+## Short algorithm comparison (IVF-Flat)
+
+```sh
+python3 tools/ann_benchmark.py --output target/ann
+# Tiny correctness-only CI run:
+python3 tools/ann_benchmark.py --smoke --output target/ann-smoke
+# Retain raw runs and regenerate benchmarks/ANN.md:
+python3 tools/ann_benchmark.py --output target/ann-recorded --archive
+```
+
+The quick workload uses 512 rows × 64 dimensions, k=10, seed 42, 24 independent
+queries and three timed batches. It compares exact search with 16 IVF partitions,
+eight training iterations, and 1/4/16 probes, twice per setting with reversed
+order on the second pass. Uniform and clustered datasets expose different recall
+trade-offs. Clustered inputs use 16 fixed centers plus uniform noise scaled by
+0.1; this deliberately favorable distribution is not representative embeddings.
+The smoke workload is 48 × 8 with 4 partitions, 8 queries and two batches.
+Existing search, commit, recovery and compaction defaults/history are unchanged.
+
+Each invocation uses the ordinary LocalStore harness and a fresh durable setup.
+Only warm queries are timed; explicit index build time is reported separately.
+Every saved exact answer is checked by an independent Python scalar oracle.
+Full-probe answers must equal exact; repeats must preserve answers, candidate
+counts and storage counters. No arbitrary latency or partial-probe recall gates
+are imposed. `tools/benchmarks.py compare A.json B.json --check-counters` also
+reports ANN build time, recall and distance counts; changes in deterministic
+quality/work counts require review, while build/query timings are informational.
+Different probe counts are different workloads, not automatic regression pairs.
+
+Raw reports retain commit/source/environment, seed/input hashes, exact and ANN
+IDs, per-query recall and centroid/vector evaluations, all timing samples, CPU,
+process-lifetime peak RSS and backend metrics. RSS includes setup and the index;
+it is not isolated index memory. Dataset setup dominates wall-clock benchmark
+runtime and is excluded from query timings. The small quick workload is for
+seeing trade-offs; use the harness flags for larger datasets before choosing
+production parameters. Latest compact results: [ANN.md](benchmarks/ANN.md).

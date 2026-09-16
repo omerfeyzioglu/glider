@@ -130,8 +130,18 @@ fn ns(start: Instant) -> f64 {
 fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let counts = Rc::new(Cell::new(Counts::default()));
     let (mut db, observer) = open(namespace, o.config(), &counts)?;
-    let data = vectors(o.seed, o.rows, o.dimensions);
-    let queries = vectors(o.seed ^ 0xd1b54a32d192ed03, o.queries, o.dimensions);
+    let mut data = vectors(o.seed, o.rows, o.dimensions);
+    let mut queries = vectors(o.seed ^ 0xd1b54a32d192ed03, o.queries, o.dimensions);
+    if o.distribution == "clustered" {
+        let centers = vectors(o.seed ^ 0xa0761d6478bd642f, 16, o.dimensions);
+        for points in [&mut data, &mut queries] {
+            for (i, point) in points.iter_mut().enumerate() {
+                for (v, center) in point.iter_mut().zip(&centers[i % centers.len()]) {
+                    *v = *center + *v * 0.1;
+                }
+            }
+        }
+    }
     let data_hash = fingerprint(&data);
     let query_hash = fingerprint(&queries);
     for (id, vector) in data.into_iter().enumerate() {
@@ -147,6 +157,38 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
                 .map(|hits| hits.into_iter().map(|hit| hit.id).collect())
         })
         .collect::<glider::Result<_>>()?;
+    let ann = if o.ivf_partitions > 0 {
+        let start = Instant::now();
+        db.build_ivf(glider::ivf::IvfConfig {
+            partitions: o.ivf_partitions,
+            iterations: o.ivf_iterations,
+            seed: o.seed,
+        })?;
+        let build_ns = ns(start);
+        let mut answers = Vec::new();
+        let mut evaluations = Vec::new();
+        let mut recalls = Vec::new();
+        for (query, exact) in queries.iter().zip(&oracle) {
+            let hits = db.search_ivf(query, o.k, o.ivf_probes)?;
+            let ids: Vec<_> = hits.neighbors.iter().map(|h| h.id).collect();
+            if o.ivf_probes >= o.ivf_partitions.min(o.rows) && ids != *exact {
+                return Err("full-probe IVF differs from exact oracle".into());
+            }
+            recalls.push(
+                ids.iter().filter(|id| exact.contains(id)).count() as f64 / exact.len() as f64,
+            );
+            evaluations.push(
+                json!({"centroid": hits.centroid_distances, "vector": hits.vector_distances}),
+            );
+            answers.push(ids);
+        }
+        Some(
+            json!({"algorithm": "ivf-flat-v1", "build_ns": build_ns, "returned_neighbor_ids": answers,
+            "recall_at_k": recalls, "distance_evaluations": evaluations}),
+        )
+    } else {
+        None
+    };
     if o.profile_seconds > 0 {
         // Profilers attach only after durable setup and the oracle warmup.
         // Diagnostic reports must not be used as unprofiled latency baselines.
@@ -171,7 +213,11 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         let start = Instant::now();
         for query in &queries {
             let query_start = Instant::now();
-            black_box(db.search(black_box(query), o.k)?);
+            if o.ivf_partitions > 0 {
+                black_box(db.search_ivf(black_box(query), o.k, o.ivf_probes)?);
+            } else {
+                black_box(db.search(black_box(query), o.k)?);
+            }
             query_samples.push(ns(query_start));
         }
         samples.push(ns(start));
@@ -191,6 +237,9 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         "build_store_calls": build_counts,
         "timing": timing(&samples, o.queries), "measured_store_calls": measured,
         "inventory": namespace.inventory()?});
+    if let Some(ann) = ann {
+        result["ann"] = ann;
+    }
     backend::attach_http(&mut result, "build_http_requests", build_http);
     backend::attach_http(&mut result, "measured_http_requests", measured_http);
     namespace.annotate(&mut result);
@@ -500,6 +549,9 @@ fn main() -> Result<()> {
         "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
         "footprint_scope": "Logical objects, physical files, and summed file lengths; not allocated blocks or device bytes written",
         "config": options, "environment": environment, "results": results});
+    if options.distribution == "clustered" {
+        report["generator"] = json!("splitmix64-16-centers-plus-uniform-noise-0.1-f32-v1");
+    }
     if options.backend == Backend::S3 {
         report["http_counter_scope"] = json!("HTTP client attempts during the measured workload; includes every LIST page and request-body envelope bytes; excludes inventory and setup. Transport errors exclude later response-body consumption errors.");
         report["footprint_scope"] = json!("Native object count and summed object lengths from an untimed listing; client/server physical file footprint unavailable");

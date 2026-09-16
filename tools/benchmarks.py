@@ -169,6 +169,15 @@ def normalize(run, raw_file, raw_hash, run_index):
                 ("recovery/replay", result, metrics(result.get("database_replay"), counts, http=http), "database replay"),
             ]
         for scope, source, values, latency_scope in scopes:
+            if scenario == "search" and "ann" in result:
+                ann = result["ann"]
+                values["index_build_latency_ns"] = number(ann.get("build_ns"))
+                for name, samples in (
+                    ("recall_at_k", ann.get("recall_at_k", [])),
+                    ("vector_distances_per_query", [v["vector"] for v in ann.get("distance_evaluations", [])]),
+                    ("centroid_distances_per_query", [v["centroid"] for v in ann.get("distance_evaluations", [])]),
+                ):
+                    values[name] = sum(samples) / len(samples) if samples else None
             config = {k: v for k, v in run["config"].items() if k not in ("feature", "phase", "comparison_group", "root", "label")}
             inputs = {key: source.get(key) for key in ("dataset_seed", "query_seed", "dataset_sha256", "query_sha256")}
             if scope == "commit/final-footprint":
@@ -448,7 +457,7 @@ def compact_summary(rows, pairs, entries):
     for entry in entries:
         row = by_id[entry["row_id"]]
         config = row["workload"]["config"]
-        workload = "; ".join(f"{k}={config[k]}" for k in ("rows", "dimensions", "mutations", "operations", "queries", "samples", "seed", "checkpoint_at", "compact_at") if k in config)
+        workload = "; ".join(f"{k}={config[k]}" for k in ("rows", "dimensions", "mutations", "operations", "queries", "samples", "seed", "checkpoint_at", "compact_at", "distribution", "ivf_partitions", "ivf_probes", "ivf_iterations") if k in config)
         ref = f"[{row['raw_sha256'][:12]}:{row['run_index']}]({quote(row['raw_file'], safe='/')})"
         values = [entry["role"], f"{entry['backend']} / {entry['scope']}", ref,
                   (row["git_revision"] or "unknown")[:12], workload,
