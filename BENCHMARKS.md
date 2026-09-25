@@ -547,3 +547,28 @@ it is not isolated index memory. Dataset setup dominates wall-clock benchmark
 runtime and is excluded from query timings. The small quick workload is for
 seeing trade-offs; use the harness flags for larger datasets before choosing
 production parameters. Latest compact results: [ANN.md](benchmarks/ANN.md).
+
+## Filtered search quality (M7)
+
+```sh
+python3 tools/filter_benchmark.py --smoke --output target/filter-smoke
+python3 tools/filter_benchmark.py --output target/filter-quick --archive
+python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
+```
+
+The optional `--filter-every N` search workload marks every Nth document with
+`selected=true` and applies that equality filter to exact and IVF queries. The
+metadata assignment is independent of vector values, deliberately stressing
+partial-probe recall. Reports record the predicate, eligible count and a hash of
+selected IDs; the validator reconstructs vector inputs and filtered exact answers
+independently. Full probing must match the exact oracle. No timed query performs
+storage I/O.
+
+The filtered raw reports use a separate `benchmarks/filtering/` archive so they
+do not replace the general latest search baseline. The smoke workload uses
+48 rows × 8 dimensions, k=6, seed 42, eight queries,
+four partitions and 1/full probes. The short archived workload uses 512 rows ×
+64 dimensions, k=10, seed 42, 24 queries, 16 partitions, filter moduli 1/8/32
+and exact/1/4/full probes. It records recall and distance evaluations to guide
+filter-aware query decisions. Raw timing samples are diagnostic; these short
+synthetic runs establish no production latency or recall target.

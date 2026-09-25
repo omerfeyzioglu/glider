@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     env, fs,
     hint::black_box,
     io::{self, Write},
@@ -144,8 +145,18 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     }
     let data_hash = fingerprint(&data);
     let query_hash = fingerprint(&queries);
+    let mut selected_ids = Sha256::new();
     for (id, vector) in data.into_iter().enumerate() {
-        db.put(id as u64, vector)?;
+        if o.filter_every > 0 && id % o.filter_every == 0 {
+            selected_ids.update((id as u64).to_le_bytes());
+            db.put_with_metadata(
+                id as u64,
+                vector,
+                BTreeMap::from([("selected".into(), "true".into())]),
+            )?;
+        } else {
+            db.put(id as u64, vector)?;
+        }
     }
     let build_counts = counts.get();
     let build_http = observer.snapshot();
@@ -153,8 +164,12 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let oracle: Vec<Vec<u64>> = queries
         .iter()
         .map(|q| {
-            db.search(q, o.k)
-                .map(|hits| hits.into_iter().map(|hit| hit.id).collect())
+            if o.filter_every > 0 {
+                db.search_filtered(q, o.k, &[("selected", "true")])
+            } else {
+                db.search(q, o.k)
+            }
+            .map(|hits| hits.into_iter().map(|hit| hit.id).collect())
         })
         .collect::<glider::Result<_>>()?;
     let ann = if o.ivf_partitions > 0 {
@@ -169,7 +184,11 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         let mut evaluations = Vec::new();
         let mut recalls = Vec::new();
         for (query, exact) in queries.iter().zip(&oracle) {
-            let hits = db.search_ivf(query, o.k, o.ivf_probes)?;
+            let hits = if o.filter_every > 0 {
+                db.search_ivf_filtered(query, o.k, o.ivf_probes, &[("selected", "true")])?
+            } else {
+                db.search_ivf(query, o.k, o.ivf_probes)?
+            };
             let ids: Vec<_> = hits.neighbors.iter().map(|h| h.id).collect();
             if o.ivf_probes >= o.ivf_partitions.min(o.rows) && ids != *exact {
                 return Err("full-probe IVF differs from exact oracle".into());
@@ -196,7 +215,15 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         let start = Instant::now();
         while start.elapsed().as_secs_f64() < o.profile_seconds as f64 {
             for query in &queries {
-                black_box(db.search(black_box(query), o.k)?);
+                if o.filter_every > 0 {
+                    black_box(db.search_filtered(
+                        black_box(query),
+                        o.k,
+                        &[("selected", "true")],
+                    )?);
+                } else {
+                    black_box(db.search(black_box(query), o.k)?);
+                }
             }
         }
     }
@@ -214,9 +241,26 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         for query in &queries {
             let query_start = Instant::now();
             if o.ivf_partitions > 0 {
-                black_box(db.search_ivf(black_box(query), o.k, o.ivf_probes)?);
+                if o.filter_every > 0 {
+                    black_box(db.search_ivf_filtered(
+                        black_box(query),
+                        o.k,
+                        o.ivf_probes,
+                        &[("selected", "true")],
+                    )?);
+                } else {
+                    black_box(db.search_ivf(black_box(query), o.k, o.ivf_probes)?);
+                }
             } else {
-                black_box(db.search(black_box(query), o.k)?);
+                if o.filter_every > 0 {
+                    black_box(db.search_filtered(
+                        black_box(query),
+                        o.k,
+                        &[("selected", "true")],
+                    )?);
+                } else {
+                    black_box(db.search(black_box(query), o.k)?);
+                }
             }
             query_samples.push(ns(query_start));
         }
@@ -239,6 +283,13 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         "inventory": namespace.inventory()?});
     if let Some(ann) = ann {
         result["ann"] = ann;
+    }
+    if o.filter_every > 0 {
+        result["filter"] = json!({
+            "predicate": {"selected": "true"},
+            "eligible_documents": o.rows.div_ceil(o.filter_every),
+            "selected_ids_sha256": format!("{:x}", selected_ids.finalize()),
+        });
     }
     backend::attach_http(&mut result, "build_http_requests", build_http);
     backend::attach_http(&mut result, "measured_http_requests", measured_http);

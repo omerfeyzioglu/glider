@@ -1,6 +1,8 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,33 @@ from test_benchmarks import report
 
 
 class AnnComparison(unittest.TestCase):
+    def test_filtered_quality_validation_uses_original_ids_and_rejects_bad_counts(self):
+        document = fixture()
+        config, result = document['config'], document['results'][0]
+        config.update(filter_every=2, ivf_partitions=4, ivf_probes=4, ivf_iterations=8)
+        data, _ = ann.inputs(42, 20, 4, '')
+        queries, _ = ann.inputs(42, 5, 4, '', True)
+        exact = [[i for i in ann.oracle(data, q, 20) if i % 2 == 0][:3] for q in queries]
+        result['exact_neighbor_ids'] = exact
+        result['filter'] = {
+            'predicate': {'selected': 'true'}, 'eligible_documents': 10,
+            'selected_ids_sha256': hashlib.sha256(
+                b''.join(struct.pack('<Q', i) for i in range(0, 20, 2))).hexdigest(),
+        }
+        result['ann'] = dict(algorithm='ivf-flat-v1', build_ns=1,
+                             returned_neighbor_ids=copy.deepcopy(exact),
+                             recall_at_k=[1.] * 5,
+                             distance_evaluations=[dict(centroid=4, vector=10) for _ in range(5)])
+        ann.validate(document)
+        for change in ('fingerprint', 'oracle', 'answer', 'count'):
+            bad = copy.deepcopy(document)
+            if change == 'fingerprint': bad['results'][0]['filter']['selected_ids_sha256'] = 'wrong'
+            if change == 'oracle': bad['results'][0]['exact_neighbor_ids'][0].reverse()
+            if change == 'answer': bad['results'][0]['ann']['returned_neighbor_ids'][0] = [1]
+            if change == 'count': bad['results'][0]['ann']['distance_evaluations'][0]['vector'] = 20
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                ann.validate(bad)
+
     def test_quality_validation_rejects_wrong_recall_full_probe_and_io(self):
         d = fixture()
         d['config'].update(ivf_partitions=4, ivf_probes=4, ivf_iterations=8)

@@ -33,7 +33,22 @@ def validate(report):
     data, data_hash = inputs(c['seed'], c['rows'], c['dimensions'], distribution)
     queries, query_hash = inputs(c['seed'], c['queries'], c['dimensions'], distribution, True)
     assert r['dataset_sha256'] == data_hash and r['query_sha256'] == query_hash
-    exact = [oracle(data, q, c['k']) for q in queries]
+    filter_every = c.get('filter_every', 0)
+    eligible = c['rows'] if not filter_every else (c['rows'] - 1) // filter_every + 1
+    if filter_every:
+        selected = range(0, c['rows'], filter_every)
+        assert r['filter'] == {
+            'predicate': {'selected': 'true'},
+            'eligible_documents': eligible,
+            'selected_ids_sha256': hashlib.sha256(
+                b''.join(struct.pack('<Q', i) for i in selected)).hexdigest(),
+        }
+    else:
+        assert 'filter' not in r
+    exact = [
+        [i for i in oracle(data, q, c['rows']) if not filter_every or i % filter_every == 0][:c['k']]
+        for q in queries
+    ]
     assert r['exact_neighbor_ids'] == exact, f"seed={c['seed']}: exact oracle differs"
     assert all(v == 0 for v in r['measured_store_calls'].values())
     assert all(v == 0 for v in r.get('measured_http_requests', {}).values())
@@ -44,13 +59,14 @@ def validate(report):
         assert len(ann['returned_neighbor_ids']) == len(exact)
         assert len(ann['recall_at_k']) == len(exact) == len(ann['distance_evaluations'])
         for expected, ids, recall, counts in zip(exact, ann['returned_neighbor_ids'], ann['recall_at_k'], ann['distance_evaluations']):
-            assert len(ids) <= min(c['k'], c['rows']) and len(set(ids)) == len(ids)
+            assert len(ids) <= min(c['k'], eligible) and len(set(ids)) == len(ids)
             assert all(isinstance(i, int) and 0 <= i < c['rows'] for i in ids)
+            assert all(not filter_every or i % filter_every == 0 for i in ids)
             assert recall == len(set(ids) & set(expected)) / len(expected)
             assert counts['centroid'] == min(c['ivf_partitions'], c['rows'])
-            assert len(ids) <= counts['vector'] <= c['rows']
+            assert len(ids) <= counts['vector'] <= eligible
             if c['ivf_probes'] >= counts['centroid']:
-                assert ids == expected and counts['vector'] == c['rows']
+                assert ids == expected and counts['vector'] == eligible
     else:
         assert 'ann' not in r
 
