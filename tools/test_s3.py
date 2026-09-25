@@ -13,6 +13,9 @@ import urllib.request
 # The legacy Quay repository no longer permits anonymous pulls. This digest
 # contains MinIO RELEASE.2025-10-15T17-29-55Z and mc for isolated CI tests.
 IMAGE = "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9"
+AUTH_READY = ('mc alias set test http://127.0.0.1:9000 '
+              '"$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1 '
+              '&& mc ls test >/dev/null 2>&1')
 
 
 def run(*args, env=None, capture=False):
@@ -20,18 +23,24 @@ def run(*args, env=None, capture=False):
                           stdout=subprocess.PIPE if capture else None).stdout
 
 
-def ready(endpoint):
-    # Bounded service-start readiness polling, never retries database operations.
+def ready(endpoint, container):
+    # Health may turn green before S3 authentication works. Poll only startup
+    # readiness; database requests themselves are never retried here.
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(endpoint + "/minio/health/ready", timeout=1) as response:
-                if response.status == 200:
-                    return
+                healthy = response.status == 200
         except (urllib.error.URLError, TimeoutError, ConnectionError):
-            pass
+            healthy = False
+        if healthy:
+            probe = subprocess.run(["docker", "exec", container, "/bin/sh", "-c", AUTH_READY],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   check=False)
+            if probe.returncode == 0:
+                return
         time.sleep(0.1)
-    raise RuntimeError("MinIO did not become ready within 30 seconds")
+    raise RuntimeError("MinIO health and authenticated S3 listing did not become ready within 30 seconds")
 
 
 def main():
@@ -65,10 +74,8 @@ def main():
             "server", "/data", env=env, capture=True)
         port = run("docker", "port", name, "9000/tcp", capture=True).strip().split(":")[-1]
         endpoint = "http://127.0.0.1:" + port
-        ready(endpoint)
-        run("docker", "exec", name, "/bin/sh", "-c",
-            'mc alias set test http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc mb test/glider-test',
-            capture=True)
+        ready(endpoint, name)
+        run("docker", "exec", name, "mc", "mb", "test/glider-test", capture=True)
         env.update(AWS_ACCESS_KEY_ID=env["MINIO_ROOT_USER"],
                    AWS_SECRET_ACCESS_KEY=env["MINIO_ROOT_PASSWORD"],
                    GLIDER_S3_ENDPOINT=endpoint, GLIDER_S3_BUCKET="glider-test")
@@ -80,7 +87,7 @@ def main():
         # Docker may assign another ephemeral host port when starting again.
         port = run("docker", "port", name, "9000/tcp", capture=True).strip().split(":")[-1]
         env["GLIDER_S3_ENDPOINT"] = "http://127.0.0.1:" + port
-        ready(env["GLIDER_S3_ENDPOINT"])
+        ready(env["GLIDER_S3_ENDPOINT"], name)
         run(*args, "store::s3::tests::server_restart_verify", "--", "--ignored", env=env)
         if output:
             from benchmark_smoke import validate
