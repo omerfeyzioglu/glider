@@ -144,7 +144,13 @@ decisions and changed guarantees in `DESIGN.md`.
 
 ## M8 — Define the single-machine operating envelope
 
-Status: planned
+Status: complete for the initial 2,000-vector deployment envelope.
+
+The workload, numeric budgets, raw local/MinIO baselines and bottleneck list are
+in [benchmarks/M8.md](benchmarks/M8.md). The long mutation tail exceeds the
+restart budget, and sparse-filter IVF misses the stated quality budget; both
+are explicit inputs to M10–M12. Larger or real embedding collections require a
+new envelope rather than extrapolation from these synthetic measurements.
 
 Goal:
 Set measurable acceptance limits using workloads that resemble intended use,
