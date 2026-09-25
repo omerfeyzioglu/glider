@@ -38,7 +38,9 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Check generated benchmark summary
-        run: python3 tools/benchmarks.py summary --check
+        run: |
+          python3 tools/benchmarks.py summary --check
+          python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 
       - name: Check S3 feature
         run: |
@@ -60,6 +62,9 @@ jobs:
       - name: Validate short exact versus IVF comparison
         run: python3 tools/ann_benchmark.py --smoke --output target/ann-smoke
 
+      - name: Validate filtered exact versus IVF quality
+        run: python3 tools/filter_benchmark.py --smoke --output target/filter-smoke
+
       - name: Retain benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -72,4 +77,6 @@ jobs:
             target/search-s3-smoke/*.json
             target/ann-smoke/*.json
             target/ann-smoke/SUMMARY.md
+            target/filter-smoke/*.json
+            target/filter-smoke/SUMMARY.md
           if-no-files-found: ignore
