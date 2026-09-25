@@ -52,7 +52,7 @@ search engine:
 1. Durable authoritative state and deterministic exact search.
 2. S3-compatible object storage with the same correctness contract.
 3. Immutable segments and compaction for efficient persistence and recovery.
-4. Metadata filtering and query planning.
+4. Metadata filtering with exact default execution and explicit approximate search.
 5. Rebuildable ANN indexes, evaluated against exact search using recall, latency,
    throughput, and resource measurements.
 6. Further scaling mechanisms such as concurrency, sharding, and replication
@@ -247,5 +247,9 @@ Full IVF probing matches filtered exact search. Partial probing can return fewer
 than k matches. Adaptive probing scans at least the requested four partitions,
 then expands until it finds k matches or exhausts the index. It reports the
 number of partitions probed. A full scan is exact; an early stop can still miss
-nearer matches. Metadata and vectors share the mutation and snapshot durability
+nearer matches. `search_filtered` always takes the exact path, even with a
+built IVF index. Choose an IVF method only when approximate answers are acceptable;
+there is no automatic planner. The [filtered quality results](benchmarks/FILTERING.md)
+show why sparse filters can make partial probing both incomplete and inaccurate.
+Metadata and vectors share the mutation and snapshot durability
 boundary; existing version 1 databases open with empty metadata.

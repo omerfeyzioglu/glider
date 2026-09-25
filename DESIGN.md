@@ -62,7 +62,20 @@ Stopping after k candidates remains approximate and has no recall guarantee.
 Results also report the number of partitions actually probed. Expansion scores
 each center once and does no additional storage I/O.
 The index groups IDs by vector only; metadata is read from the acknowledged map.
-There is no metadata index or automatic exact-versus-IVF planner.
+Query execution is explicit: `search_filtered` is always exact, including when
+an IVF index is present; callers choose fixed or adaptive IVF methods when they
+accept approximate results. There is no metadata index or automatic
+exact-versus-IVF planner. The reproducible 512-row, 64-dimension, seed-42
+filtered workload in `benchmarks/FILTERING.md` supports this decision: with
+16 partitions and one match per 32 documents, exact search scores 16 eligible
+vectors, whereas four IVF probes perform 20.96 mean distance evaluations
+(including centers), achieve 37.08% mean recall@10 and return too few results
+for all 24 queries. Even with every document eligible, four probes achieve
+57.50% mean recall@10. Adaptive probing fills available result slots but does
+not bound recall loss. Those short synthetic runs do not establish a reliable
+latency threshold, selectivity model or acceptable recall target for silently
+selecting ANN. A future automatic planner needs a stated quality policy and
+representative measurements before it can change query behavior.
 
 Every successful put/delete or batch invalidates the index; queries then return
 an explicit error until rebuilt. Failed mutation publication leaves reads and the
