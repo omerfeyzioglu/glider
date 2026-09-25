@@ -126,15 +126,179 @@ The current policy leaves automatic exact-versus-IVF planning for later work:
 measured sparse-filter recall and result counts do not justify a hidden
 approximate choice. See `DESIGN.md` and `benchmarks/FILTERING.md`.
 
-## Later
+## Next: dependable single-machine object-storage search
 
-Only pursue when justified by requirements or measurements:
+The next milestones target one machine with one authoritative writer and an
+object store. They do not assume shared disk, POSIX locks, or multiple writers.
+The goal is a usable capacity envelope with explicit durability, recovery,
+accuracy, latency and resource limits, not feature parity with another engine.
 
-- caching
-- query planning
-- quantization
-- concurrency
-- sharding
-- replication
-- GPU execution
-- additional index families
+For each milestone, reproduce the relevant bottleneck first, retain a small
+baseline, make the change, and rerun only the affected workload and correctness
+checks. Record backend, data/query fingerprints, seed, configuration, code
+revision, requests/bytes, latency, CPU and peak memory where relevant. Keep CI
+focused on deterministic correctness and failure cases; do not turn every change
+into a full benchmark run. Insert or reorder a small milestone when a measured
+bottleneck or correctness failure changes the priority. Persist architectural
+decisions and changed guarantees in `DESIGN.md`.
+
+## M8 — Define the single-machine operating envelope
+
+Status: planned
+
+Goal:
+Set measurable acceptance limits using workloads that resemble intended use,
+so later optimizations have a target rather than an assumed benefit.
+
+Steps:
+- Define dataset size, dimensions, metadata cardinality/selectivity, update and
+  delete rate, query mix, k, and the memory and recovery budgets for an initial
+  deployment. Include a sparse-filter and a long mutation-tail case.
+- Capture targeted local and MinIO baselines for ingest, restart, exact and IVF
+  search. Separate warm and cold starts where the distinction is measurable;
+  include an actual S3-compatible service before claiming deployment behavior.
+- Record p50/p95/p99 latency from enough independent queries to interpret tails,
+  throughput, peak RSS, object count, GET/PUT/DELETE and bytes, and ANN recall@k
+  against the independent filtered exact oracle.
+
+Done when:
+- The workload, reproducible inputs and numeric acceptance budgets are recorded.
+- A bottleneck list identifies which cost is CPU, memory, listing/recovery,
+  remote requests/bytes, write amplification or ANN quality; no optimization is
+  selected from synthetic timing alone.
+
+## M9 — Harden ownership, failures and recovery
+
+Status: planned
+
+Goal:
+Make the single-writer operating model and every uncertain publication safe to
+run and diagnose on a real object store.
+
+Steps:
+- Exercise process termination, timeout, lost acknowledgement and restart at
+  batch, chunk, manifest, derived-index and compaction-cleanup boundaries. Check
+  that acknowledged state survives, incomplete state is invisible, and recovered
+  exact results match the logical oracle.
+- Test missing/corrupt selected objects, sequence gaps and poisoned handles on
+  both backends. State precisely which external object loss is detectable and
+  which requires a separate witness or backup; do not claim protection the
+  current object contract cannot provide.
+- Define and enforce the deployment's exclusive-writer ownership boundary.
+  Evaluate storage-safe fencing or a verifiable single-owner process contract
+  before allowing concurrent opens; filesystem locking cannot be the engine's
+  correctness mechanism.
+
+Done when:
+- Automated failure and reopen tests cover the chosen crash model, including
+  accidental double ownership, without partial results or silent divergence.
+- A written recovery procedure identifies the authoritative root and the
+  required action for uncertain writes and unrecoverable corruption.
+
+## M10 — Bound memory, recovery and write-side amplification
+
+Status: planned
+
+Goal:
+Keep opening, ingesting, checkpointing and compacting within the M8 resource
+budgets as live data, manifest entries and mutation history grow.
+
+Steps:
+- Measure each component separately: full-map loading, mutation-tail replay,
+  whole-namespace listing, manifest decoding, checkpoint serialization and
+  compaction's temporary coexistence of old and new objects.
+- Choose versioned, object-store-safe state/catalog and maintenance changes only
+  for measured limits. Bound or page manifest and tail state where needed; avoid
+  full-map clones in maintenance. Preserve the ability to detect invalid
+  selected roots and replay gaps.
+- Define explicit maintenance triggers and backpressure for long tails or too
+  many objects; an interrupted maintenance operation must remain resumable.
+
+Done when:
+- Peak memory, open time and object/request growth stay within the M8 budgets
+  at the target live size and update history, including after crash/restart.
+- New formats have versioned compatibility and crash tests; old namespaces open
+  or fail with an explicit migration path.
+
+## M11 — Make filtered exact queries selective on object storage
+
+Status: planned
+
+Goal:
+Avoid reading every vector chunk for a selective equality filter while keeping
+filtered exact search a no-false-negative correctness oracle.
+
+Steps:
+- Compare chunk summaries and a derived metadata posting layout on the M8
+  filter distributions. Select a layout by GET count, bytes, memory, write cost
+  and recovery behavior, then version and validate it.
+- Apply newer puts/deletes over the selected base consistently. A missing or
+  stale derived structure must never silently omit an eligible document;
+  fall back to a validated exact scan or return an explicit error.
+- Measure selective and nonselective predicates against the existing streaming
+  full scan. Arbitrary unfiltered exact kNN may still require every vector;
+  do not promise selective reads without a sound pruning rule.
+
+Done when:
+- Results and distance/ID ties match the independent filtered exact oracle
+  across updates, compaction, restart and injected failures.
+- Selective workloads meet their M8 request, byte, latency and memory budgets;
+  the nonselective path has no unjustified regression.
+
+## M12 — Search persisted ANN partitions without loading all vectors
+
+Status: planned
+
+Goal:
+Turn IVF from an in-memory candidate baseline into a useful object-store query
+path, while authoritative vectors remain recoverable without the derived index.
+
+Steps:
+- Test a versioned partition layout that fetches only probed candidates and
+  supports exact reranking and the M11 filter path. Compare alternatives before
+  fixing the layout; include index build, update and remote GET costs.
+- Tie each index generation to a committed mutation boundary. Define rebuild,
+  publication, invalidation and garbage collection so stale or partial indexes
+  cannot silently answer a newer query.
+- Evaluate recall@k and short-result rate by filter selectivity, alongside
+  p95 latency, requests/bytes, index-build time and peak RSS. Keep exact search
+  available and require an explicit approximate-quality policy before any
+  automatic planner.
+
+Done when:
+- Restart and failure tests prove indexes are derived and safe to discard or
+  rebuild; exact results remain correct without them.
+- The selected deployment workload meets its M8 ANN quality and resource
+  budgets, or the result is recorded and the exact path remains the supported
+  serving mode.
+
+## M13 — Single-machine serving and recovery operations
+
+Status: planned
+
+Goal:
+Run the selected workload continuously on one machine with predictable reads,
+maintenance, restart and restore behavior.
+
+Steps:
+- If concurrent readers and a writer are needed, add pinned committed views
+  and safe reclamation under the M9 ownership contract. Test visibility and
+  garbage collection with overlapping reads, writes and crashes; keep one
+  authoritative writer.
+- Provide bounded maintenance scheduling, observability for sequence, tail,
+  index freshness, storage errors and resource use, and actionable error paths.
+- Define and rehearse backup/restore of a committed root plus all referenced
+  objects on the chosen service. Test migration from supported old formats and
+  interruption during restore without claiming recovery from arbitrary loss.
+
+Done when:
+- A repeatable soak with reads, updates, maintenance and restarts stays inside
+  the M8 budgets and passes exact-oracle and durability checks.
+- Operators can identify the committed state, restore it, and explain the
+  system's documented failure and capacity limits.
+
+## Beyond the single-machine target
+
+Sharding, replication, consensus, multi-writer execution, GPU work,
+quantization and additional index families need separate requirements and
+measurements. They are not prerequisites for this roadmap.
