@@ -615,3 +615,6 @@ four partitions and 1/full probes. The short archived workload uses 512 rows ×
 and exact/1/4/full probes. It records recall and distance evaluations to guide
 filter-aware query decisions. Raw timing samples are diagnostic; these short
 synthetic runs establish no production latency or recall target.
+Accordingly, the M7 query policy keeps filtered exact search as the default and
+requires an explicit IVF call for approximate execution. These work counts and
+quality results do not justify an automatic selectivity threshold.

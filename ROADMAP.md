@@ -108,10 +108,10 @@ Done when:
 
 ## M7 — Filtering and query execution
 
-Status: in progress (durable string metadata and exact/IVF equality filtering;
+Status: complete (durable string metadata and exact/IVF equality filtering;
 reproducible filtered ANN quality evaluation; adaptive probe expansion fills
 available matches; read-only streaming exact search over chunked snapshots;
-exact-versus-IVF planning remains)
+exact default and explicit approximate execution policy)
 
 Goal:
 Support metadata filtering without silently destroying search correctness.
@@ -121,6 +121,10 @@ Done when:
 - filtered exact search provides a correctness baseline
 - ANN + filtering behavior is measured against that baseline
 - query execution decisions are justified by measurements
+
+The current policy leaves automatic exact-versus-IVF planning for later work:
+measured sparse-filter recall and result counts do not justify a hidden
+approximate choice. See `DESIGN.md` and `benchmarks/FILTERING.md`.
 
 ## Later
 
