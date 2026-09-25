@@ -41,8 +41,8 @@ Not in scope:
 
 ## M3 — Persistent immutable segments
 
-Status: complete (explicit checkpoint segments, safe tail replay, LocalStore/MinIO
-failure tests and archived recovery measurements)
+Status: complete (single-object and optional bounded-chunk checkpoints, safe tail
+replay, LocalStore/MinIO failure tests and archived legacy recovery measurements)
 
 Problem:
 Individual writes create one object each; atomic batches reduce that cost for
@@ -62,8 +62,9 @@ Done when:
 
 ## M4 — Compaction
 
-Status: complete (full-state consolidation, safe history reclamation, LocalStore/MinIO
-failure tests and archived amplification measurements)
+Status: complete (single-object and optional bounded-chunk consolidation, safe
+history reclamation, LocalStore/MinIO failure tests and archived legacy
+amplification measurements)
 
 Goal:
 Bound accumulation of immutable persistent state without changing logical

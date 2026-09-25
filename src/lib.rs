@@ -19,7 +19,8 @@
 pub mod ivf;
 pub mod store;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use store::ObjectStore;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -136,11 +137,35 @@ pub enum Mutation {
 struct Version {
     version: u32,
 }
+#[derive(Deserialize)]
+struct SnapshotHeader {
+    version: u32,
+    sequence: u64,
+    config: Config,
+}
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|e| Error::Corrupt(e.to_string()))
 }
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| Error::Invalid(e.to_string()))
+}
+struct CountBytes(usize);
+impl std::io::Write for CountBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("serialized size overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn encoded_len<T: Serialize>(value: &T) -> Result<usize> {
+    let mut counter = CountBytes(0);
+    serde_json::to_writer(&mut counter, value).map_err(|e| Error::Invalid(e.to_string()))?;
+    Ok(counter.0)
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,6 +183,31 @@ struct SegmentV1 {
     sequence: u64,
     config: Config,
     documents: Vec<(u64, Vec<f32>)>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotManifest {
+    version: u32,
+    sequence: u64,
+    config: Config,
+    max_chunk_bytes: usize,
+    chunks: Vec<ChunkRef>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChunkRef {
+    first_id: u64,
+    last_id: u64,
+    rows: usize,
+    sha256: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotChunk {
+    version: u32,
+    sequence: u64,
+    config: Config,
+    documents: Vec<(u64, Document)>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,6 +260,36 @@ fn numbered_sequence(object: &str, prefix: &str) -> Result<u64> {
 }
 fn compacted_key(sequence: u64) -> String {
     format!("compacted-{sequence:020}")
+}
+fn chunk_key(kind: &str, sequence: u64, max_bytes: usize, ordinal: usize) -> String {
+    format!("{kind}chunk-{sequence:020}-{max_bytes:020}-{ordinal:010}")
+}
+fn chunk_sequence(object: &str, kind: &str) -> Result<u64> {
+    let prefix = format!("{kind}chunk-");
+    let (number, rest) = object
+        .strip_prefix(&prefix)
+        .and_then(|suffix| suffix.split_once('-'))
+        .ok_or_else(|| Error::Corrupt(format!("invalid object key: {object}")))?;
+    let (limit, ordinal) = rest
+        .split_once('-')
+        .ok_or_else(|| Error::Corrupt(format!("invalid object key: {object}")))?;
+    let sequence = number
+        .parse::<u64>()
+        .map_err(|_| Error::Corrupt(format!("invalid object key: {object}")))?;
+    let max_bytes = limit
+        .parse::<usize>()
+        .map_err(|_| Error::Corrupt(format!("invalid object key: {object}")))?;
+    let index = ordinal
+        .parse::<usize>()
+        .map_err(|_| Error::Corrupt(format!("invalid object key: {object}")))?;
+    if object != chunk_key(kind, sequence, max_bytes, index)
+        || limit.len() != 20
+        || ordinal.len() != 10
+        || max_bytes == 0
+    {
+        return Err(Error::Corrupt(format!("invalid object key: {object}")));
+    }
+    Ok(sequence)
 }
 fn key(sequence: u64) -> String {
     format!("mutation-{sequence:020}")
@@ -275,6 +355,10 @@ impl<S: ObjectStore> Database<S> {
                 latest_compacted = Some(numbered_sequence(object, "compacted-")?);
             } else if object.starts_with("segment-") {
                 latest_segment = Some(numbered_sequence(object, "segment-")?);
+            } else if object.starts_with("compactedchunk-") {
+                chunk_sequence(object, "compacted")?;
+            } else if object.starts_with("segmentchunk-") {
+                chunk_sequence(object, "segment")?;
             } else if object.starts_with("ivf-") {
                 ivf::cache_sequence(object)?;
             } else {
@@ -302,6 +386,21 @@ impl<S: ObjectStore> Database<S> {
             if ivf::cache_sequence(object)? > last_mutation {
                 return Err(Error::Corrupt(format!(
                     "IVF cache extends beyond retained history: {object}"
+                )));
+            }
+        }
+        for object in keys
+            .iter()
+            .filter(|k| k.starts_with("segmentchunk-") || k.starts_with("compactedchunk-"))
+        {
+            let kind = if object.starts_with("segmentchunk-") {
+                "segment"
+            } else {
+                "compacted"
+            };
+            if chunk_sequence(object, kind)? > last_mutation {
+                return Err(Error::Corrupt(format!(
+                    "snapshot chunk extends beyond retained history: {object}"
                 )));
             }
         }
@@ -401,7 +500,11 @@ impl<S: ObjectStore> Database<S> {
             .store
             .get(object)?
             .ok_or_else(|| Error::Corrupt(format!("listed snapshot missing: {object}")))?;
-        let segment = match decode::<Version>(&bytes)?.version {
+        let version = decode::<Version>(&bytes)?.version;
+        if version == 3 {
+            return self.load_chunked_snapshot(object, sequence, &bytes);
+        }
+        let segment = match version {
             1 => {
                 let old: SegmentV1 = decode(&bytes)?;
                 Segment {
@@ -449,6 +552,71 @@ impl<S: ObjectStore> Database<S> {
         self.sequence = sequence;
         Ok(())
     }
+    fn load_chunked_snapshot(&mut self, object: &str, sequence: u64, bytes: &[u8]) -> Result<()> {
+        let manifest: SnapshotManifest = decode(bytes)?;
+        if manifest.version != 3
+            || manifest.sequence != sequence
+            || manifest.config != self.config
+            || manifest.max_chunk_bytes == 0
+        {
+            return Err(Error::Corrupt("invalid chunked snapshot identity".into()));
+        }
+        let kind = if object == compacted_key(sequence) {
+            "compacted"
+        } else if object == segment_key(sequence) {
+            "segment"
+        } else {
+            return Err(Error::Corrupt("invalid chunked snapshot key".into()));
+        };
+        let mut documents = BTreeMap::new();
+        let mut previous_id = None;
+        for (ordinal, reference) in manifest.chunks.iter().enumerate() {
+            if reference.rows == 0
+                || reference.first_id > reference.last_id
+                || previous_id.is_some_and(|previous| previous >= reference.first_id)
+            {
+                return Err(Error::Corrupt("invalid snapshot chunk range".into()));
+            }
+            let key = chunk_key(kind, sequence, manifest.max_chunk_bytes, ordinal);
+            let chunk_bytes = self
+                .store
+                .get(&key)?
+                .ok_or_else(|| Error::Corrupt(format!("snapshot chunk missing: {key}")))?;
+            if chunk_bytes.len() > manifest.max_chunk_bytes {
+                return Err(Error::Corrupt(format!("oversized snapshot chunk: {key}")));
+            }
+            if format!("{:x}", Sha256::digest(&chunk_bytes)) != reference.sha256 {
+                return Err(Error::Corrupt(format!(
+                    "snapshot chunk digest mismatch: {key}"
+                )));
+            }
+            let chunk: SnapshotChunk = decode(&chunk_bytes)?;
+            if chunk.version != 1
+                || chunk.sequence != sequence
+                || chunk.config != self.config
+                || chunk.documents.len() != reference.rows
+                || chunk.documents.first().map(|entry| entry.0) != Some(reference.first_id)
+                || chunk.documents.last().map(|entry| entry.0) != Some(reference.last_id)
+            {
+                return Err(Error::Corrupt(format!("invalid snapshot chunk: {key}")));
+            }
+            for (id, document) in chunk.documents {
+                if previous_id.is_some_and(|previous| previous >= id) {
+                    return Err(Error::Corrupt(
+                        "snapshot IDs must be strictly increasing".into(),
+                    ));
+                }
+                self.config
+                    .vector(&document.vector)
+                    .map_err(|e| Error::Corrupt(e.to_string()))?;
+                previous_id = Some(id);
+                documents.insert(id, document);
+            }
+        }
+        self.documents = documents;
+        self.sequence = sequence;
+        Ok(())
+    }
     fn snapshot_bytes(&self) -> Result<Vec<u8>> {
         encode(&Segment {
             version: 2,
@@ -461,29 +629,157 @@ impl<S: ObjectStore> Database<S> {
                 .collect(),
         })
     }
+    fn publish_chunked_snapshot(&mut self, kind: &str, max_bytes: usize) -> Result<()> {
+        let empty_size = encode(&SnapshotChunk {
+            version: 1,
+            sequence: self.sequence,
+            config: self.config,
+            documents: Vec::new(),
+        })?
+        .len();
+        if max_bytes < empty_size {
+            return Err(Error::Invalid(
+                "snapshot chunk byte limit is too small".into(),
+            ));
+        }
+        // Size the complete layout before writing anything. Each encoded row is
+        // measured independently, so this pass uses bounded temporary memory.
+        let mut ranges = Vec::new();
+        let mut first = None;
+        let mut last = 0;
+        let mut current_size = empty_size;
+        let mut count = 0;
+        for (&id, document) in &self.documents {
+            let row_size = encoded_len(&(id, document))?;
+            if empty_size
+                .checked_add(row_size)
+                .is_none_or(|size| size > max_bytes)
+            {
+                return Err(Error::Invalid(format!(
+                    "document {id} exceeds snapshot chunk byte limit"
+                )));
+            }
+            let next_size = current_size
+                .checked_add(row_size)
+                .and_then(|size| size.checked_add(usize::from(count > 0)));
+            if count > 0 && next_size.is_none_or(|size| size > max_bytes) {
+                ranges.push((first.expect("nonempty chunk"), last));
+                first = None;
+                current_size = empty_size;
+                count = 0;
+            }
+            first.get_or_insert(id);
+            last = id;
+            current_size = current_size + row_size + usize::from(count > 0);
+            count += 1;
+        }
+        if let Some(first) = first {
+            ranges.push((first, last));
+        }
+        if (ranges.len() as u128) > 10_000_000_000_u128 {
+            return Err(Error::Invalid("too many snapshot chunks".into()));
+        }
+
+        self.poisoned = true;
+        let listed = self.store.list()?;
+        let existing: BTreeSet<_> = listed.iter().cloned().collect();
+        if existing.len() != listed.len() {
+            return Err(Error::Corrupt(
+                "duplicate listed key during snapshot".into(),
+            ));
+        }
+        let mut references = Vec::with_capacity(ranges.len());
+        for (ordinal, (first_id, last_id)) in ranges.into_iter().enumerate() {
+            let documents: Vec<_> = self
+                .documents
+                .range(first_id..=last_id)
+                .map(|(&id, document)| (id, document.clone()))
+                .collect();
+            let rows = documents.len();
+            let bytes = encode(&SnapshotChunk {
+                version: 1,
+                sequence: self.sequence,
+                config: self.config,
+                documents,
+            })?;
+            if bytes.len() > max_bytes {
+                return Err(Error::Corrupt("chunk sizing disagreement".into()));
+            }
+            let key = chunk_key(kind, self.sequence, max_bytes, ordinal);
+            if existing.contains(&key) {
+                if self.store.get(&key)?.as_deref() != Some(bytes.as_slice()) {
+                    return Err(Error::Corrupt(format!("conflicting snapshot chunk: {key}")));
+                }
+            } else {
+                self.store.create(&key, &bytes)?;
+            }
+            references.push(ChunkRef {
+                first_id,
+                last_id,
+                rows,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            });
+        }
+        let manifest = SnapshotManifest {
+            version: 3,
+            sequence: self.sequence,
+            config: self.config,
+            max_chunk_bytes: max_bytes,
+            chunks: references,
+        };
+        let key = if kind == "compacted" {
+            compacted_key(self.sequence)
+        } else {
+            segment_key(self.sequence)
+        };
+        self.store.create(&key, &encode(&manifest)?)?;
+        Ok(())
+    }
     /// Consolidate live state into a durable snapshot, then reclaim covered logs
     /// and older snapshots. Success acknowledges publication and all listed
     /// removals. On any storage error/panic, reopen before further writes or
     /// maintenance; already removed objects were covered by a durable snapshot.
     /// A repeated call at the same sequence resumes cleanup without republishing.
     pub fn compact(&mut self) -> Result<()> {
+        self.compact_with(None)
+    }
+    /// Compact using version 3 snapshot chunks with a maximum encoded payload
+    /// size per chunk. The manifest is the single authoritative boundary.
+    pub fn compact_chunked(&mut self, max_chunk_bytes: usize) -> Result<()> {
+        self.compact_with(Some(max_chunk_bytes))
+    }
+    fn compact_with(&mut self, max_chunk_bytes: Option<usize>) -> Result<()> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
+        let new_legacy_snapshot =
+            self.compacted_sequence != Some(self.sequence) && max_chunk_bytes.is_none();
         if self.compacted_sequence != Some(self.sequence) {
-            let bytes = self.snapshot_bytes()?;
-            self.poisoned = true;
-            self.store.create(&compacted_key(self.sequence), &bytes)?;
+            if let Some(max_bytes) = max_chunk_bytes {
+                self.publish_chunked_snapshot("compacted", max_bytes)?;
+            } else {
+                let bytes = self.snapshot_bytes()?;
+                self.poisoned = true;
+                self.store.create(&compacted_key(self.sequence), &bytes)?;
+            }
             self.compacted_sequence = Some(self.sequence);
             self.checkpoint_sequence = Some(self.sequence);
         }
         self.poisoned = true;
+        let retained_chunks = if new_legacy_snapshot {
+            BTreeSet::new()
+        } else {
+            self.current_compacted_chunks()?
+        };
         // Build and validate the full deletion plan before removing anything.
         let mut keys = self.store.list()?;
         keys.sort();
         if keys.windows(2).any(|pair| pair[0] == pair[1])
             || !keys.iter().any(|k| k == "metadata")
             || !keys.contains(&compacted_key(self.sequence))
+            || retained_chunks
+                .iter()
+                .any(|key| keys.binary_search(key).is_err())
         {
             return Err(Error::Corrupt("invalid listing during compaction".into()));
         }
@@ -500,6 +796,22 @@ impl<S: ObjectStore> Database<S> {
                     )));
                 }
                 if sequence < self.sequence {
+                    obsolete.push(object);
+                }
+                continue;
+            }
+            if object.starts_with("segmentchunk-") || object.starts_with("compactedchunk-") {
+                let kind = if object.starts_with("segmentchunk-") {
+                    "segment"
+                } else {
+                    "compacted"
+                };
+                if chunk_sequence(&object, kind)? > self.sequence {
+                    return Err(Error::Corrupt(format!(
+                        "unexpected object during compaction: {object}"
+                    )));
+                }
+                if !retained_chunks.contains(&object) {
                     obsolete.push(object);
                 }
                 continue;
@@ -527,6 +839,53 @@ impl<S: ObjectStore> Database<S> {
         self.poisoned = false;
         Ok(())
     }
+    fn current_compacted_chunks(&self) -> Result<BTreeSet<String>> {
+        let key = compacted_key(self.sequence);
+        let bytes = self
+            .store
+            .get(&key)?
+            .ok_or_else(|| Error::Corrupt(format!("compaction snapshot missing: {key}")))?;
+        match decode::<Version>(&bytes)?.version {
+            1 | 2 => {
+                let header: SnapshotHeader = decode(&bytes)?;
+                if !matches!(header.version, 1 | 2)
+                    || header.sequence != self.sequence
+                    || header.config != self.config
+                {
+                    return Err(Error::Corrupt("invalid compacted snapshot".into()));
+                }
+                return Ok(BTreeSet::new());
+            }
+            3 => {}
+            _ => return Err(Error::Corrupt("unsupported compacted snapshot".into())),
+        }
+        let manifest: SnapshotManifest = decode(&bytes)?;
+        if manifest.version != 3
+            || manifest.sequence != self.sequence
+            || manifest.config != self.config
+            || manifest.max_chunk_bytes == 0
+        {
+            return Err(Error::Corrupt("invalid compacted manifest".into()));
+        }
+        let mut keys = BTreeSet::new();
+        let mut previous_id = None;
+        for (ordinal, reference) in manifest.chunks.iter().enumerate() {
+            if reference.rows == 0
+                || reference.first_id > reference.last_id
+                || previous_id.is_some_and(|previous| previous >= reference.first_id)
+            {
+                return Err(Error::Corrupt("invalid compacted chunk range".into()));
+            }
+            previous_id = Some(reference.last_id);
+            keys.insert(chunk_key(
+                "compacted",
+                self.sequence,
+                manifest.max_chunk_bytes,
+                ordinal,
+            ));
+        }
+        Ok(keys)
+    }
     /// Persist a complete immutable snapshot at the current mutation sequence.
     /// Success means durable publication; errors/panics poison further writes and
     /// checkpoints until reopen. Reads retain their acknowledged state. Existing
@@ -542,6 +901,21 @@ impl<S: ObjectStore> Database<S> {
         let bytes = self.snapshot_bytes()?;
         self.poisoned = true;
         self.store.create(&segment_key(self.sequence), &bytes)?;
+        self.checkpoint_sequence = Some(self.sequence);
+        self.poisoned = false;
+        Ok(())
+    }
+    /// Persist the current state as bounded immutable chunks plus one version 3
+    /// manifest. Chunks alone are not authoritative; an uncertain outcome
+    /// requires reopening before another durable operation.
+    pub fn checkpoint_chunked(&mut self, max_chunk_bytes: usize) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        if self.checkpoint_sequence == Some(self.sequence) {
+            return Ok(());
+        }
+        self.publish_chunked_snapshot("segment", max_chunk_bytes)?;
         self.checkpoint_sequence = Some(self.sequence);
         self.poisoned = false;
         Ok(())
