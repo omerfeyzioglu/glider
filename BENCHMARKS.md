@@ -566,6 +566,31 @@ index step on a warm local filesystem; it does not measure total restart time,
 remote object-store latency, or production-scale ANN quality. MinIO integration
 separately verifies one GET and no PUT on a cache hit.
 
+## Streaming exact reader memory (local, targeted)
+
+The baseline `Database::open` materializes all base vectors. The streaming
+reader hypothesis is lower resident memory with the same exact result, at the
+cost of reading all chunks for each exact query. Reproduce with a fresh path:
+
+```sh
+cargo build --release --locked --example streaming_memory
+target/release/examples/streaming_memory prepare target/streaming-memory-new
+/usr/bin/time -l target/release/examples/streaming_memory full target/streaming-memory-new
+/usr/bin/time -l target/release/examples/streaming_memory streaming target/streaming-memory-new
+```
+
+The workload has 20,000 rows × 64 dimensions, deterministic LCG seed 42,
+squared Euclidean, one batch and 128 KiB chunked compaction on LocalStore. Each
+fresh process opens the namespace and runs one exact top-10 query of all 0.5
+components. On 2026-09-25, Apple M4, macOS arm64, rustc 1.98.1, release build,
+three alternating samples per mode showed peak RSS of 10,059,776 / 10,125,312 /
+10,158,080 bytes for the full reader and 2,654,208 / 2,605,056 / 2,621,440
+bytes for streaming. Both reported top ID 2672. Process elapsed times were
+135 / 128 / 128 ms and 202 / 198 / 201 ms respectively. These are warm local
+observations of process-lifetime RSS and open plus one query, not a remote
+latency or cold-cache claim. Integration tests compare complete exact results
+and count one GET per chunk for a streaming query on MinIO.
+
 ## Filtered search quality (M7)
 
 ```sh

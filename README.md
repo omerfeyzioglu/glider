@@ -170,6 +170,21 @@ chunks. The full live map still resides in memory.
 Older binaries that only read snapshot versions 1 and 2 cannot open a namespace
 after a chunked snapshot is published.
 
+For read-only exact queries without retaining all base vectors in RAM, open a
+streaming reader after publishing a chunked snapshot:
+
+```rust,ignore
+use glider::{store::LocalStore, streaming::StreamingDatabase};
+let reader = StreamingDatabase::open(LocalStore::open(&path)?, config)?;
+let nearest = reader.search(&query, 10)?;
+```
+
+It includes newer mutations, supports exact metadata filtering and reads each
+base chunk on every search. This mode requires version 3 roots, keeps the
+mutation tail and manifest in memory, and is subject to the same exclusive
+namespace ownership rule. It is useful when base-vector RAM matters more than
+remote read latency.
+
 ## Compaction (M4)
 
 Call `db.compact()?` to publish a full snapshot and reclaim covered mutations and
