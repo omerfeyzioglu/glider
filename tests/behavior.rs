@@ -182,7 +182,7 @@ fn ambiguous_writes_require_recovery() {
 #[test]
 fn recovery_rejects_invalid_authoritative_objects() {
     for bad in [
-        r#"{"version":2,"sequence":1,"mutation":{"type":"delete","id":1}}"#,
+        r#"{"version":3,"sequence":1,"mutation":{"type":"delete","id":1}}"#,
         r#"{"version":1,"sequence":2,"mutation":{"type":"delete","id":1}}"#,
         r#"{"version":1,"sequence":1,"mutation":{"type":"put","id":1,"vector":[1]}}"#,
         "broken",

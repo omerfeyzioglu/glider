@@ -10,7 +10,9 @@ import time
 import urllib.error
 import urllib.request
 
-IMAGE = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+# The legacy Quay repository no longer permits anonymous pulls. This digest
+# contains MinIO RELEASE.2025-10-15T17-29-55Z and mc for isolated CI tests.
+IMAGE = "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9"
 
 
 def run(*args, env=None, capture=False):

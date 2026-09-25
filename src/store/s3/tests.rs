@@ -1,7 +1,7 @@
 use super::*;
 use crate::{Config, Database, Metric};
 use object_store::client::{HttpErrorKind, HttpResponseBody};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 fn config() -> Config {
     Config {
@@ -186,6 +186,66 @@ fn minio_builder() -> AmazonS3Builder {
 }
 fn minio(namespace: &str) -> S3Store {
     S3Store::open(minio_builder(), namespace).unwrap()
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_metadata_filtering_survives_compaction_and_restart() {
+    let namespace = "metadata-filtering";
+    let store = minio(namespace);
+    let metrics = store.metrics();
+    let mut db = Database::open(store, config()).unwrap();
+    db.put_with_metadata(
+        1,
+        vec![1., 0.],
+        BTreeMap::from([("team".into(), "red".into())]),
+    )
+    .unwrap();
+    db.put_with_metadata(
+        2,
+        vec![0., 1.],
+        BTreeMap::from([("team".into(), "blue".into())]),
+    )
+    .unwrap();
+    db.build_ivf(crate::ivf::IvfConfig {
+        partitions: 2,
+        iterations: 2,
+        seed: 7,
+    })
+    .unwrap();
+    let before = metrics.snapshot();
+    let exact = db
+        .search_filtered(&[0., 0.], 10, &[("team", "red")])
+        .unwrap();
+    assert_eq!(exact.iter().map(|n| n.id).collect::<Vec<_>>(), vec![1]);
+    assert_eq!(
+        db.search_ivf_filtered(&[0., 0.], 10, 2, &[("team", "red")])
+            .unwrap()
+            .neighbors,
+        exact
+    );
+    assert_eq!(metrics.snapshot(), before);
+    db.checkpoint().unwrap();
+    db.compact().unwrap();
+    drop(db);
+
+    let db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(
+        db.get_metadata(1).unwrap().get("team").map(String::as_str),
+        Some("red")
+    );
+    assert_eq!(
+        db.get_metadata(2).unwrap().get("team").map(String::as_str),
+        Some("blue")
+    );
+    assert_eq!(
+        db.search_filtered(&[0., 0.], 10, &[("team", "red")])
+            .unwrap()
+            .iter()
+            .map(|n| n.id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
 }
 
 #[test]
