@@ -145,6 +145,117 @@ fn exact_and_ivf_filtering_agree_with_full_probe_for_both_metrics() {
 }
 
 #[test]
+fn adaptive_filtered_ivf_fills_k_and_never_loses_exact_recall() {
+    const SEED: u64 = 42;
+    const PARTITIONS: usize = 8;
+    for metric in [Metric::SquaredEuclidean, Metric::Manhattan] {
+        let mut db = Database::open(Memory::default(), config(metric)).unwrap();
+        for id in 0..128 {
+            let metadata = if id % 16 == 0 {
+                fields(&[
+                    ("selected", "yes"),
+                    ("group", if id % 32 == 0 { "a" } else { "b" }),
+                ])
+            } else {
+                fields(&[])
+            };
+            db.put_with_metadata(id, vec![id as f32, 0.], metadata)
+                .unwrap();
+        }
+        db.build_ivf(IvfConfig {
+            partitions: PARTITIONS,
+            iterations: 5,
+            seed: SEED,
+        })
+        .unwrap();
+        for query in [[0., 0.], [63., 0.], [127., 0.]] {
+            for filter in [
+                vec![("selected", "yes")],
+                vec![("selected", "yes"), ("group", "a")],
+                vec![("selected", "missing")],
+            ] {
+                let all = db.search_filtered(&query, usize::MAX, &filter).unwrap();
+                for k in [0, 1, 5, 20] {
+                    let exact = db.search_filtered(&query, k, &filter).unwrap();
+                    let fixed = db.search_ivf_filtered(&query, k, 1, &filter).unwrap();
+                    let adaptive = db
+                        .search_ivf_filtered_adaptive(&query, k, 1, &filter)
+                        .unwrap();
+                    assert_eq!(
+                        adaptive.neighbors.len(),
+                        k.min(all.len()),
+                        "seed={SEED} metric={metric:?} query={query:?} filter={filter:?} k={k}"
+                    );
+                    assert!(adaptive.partitions_probed >= fixed.partitions_probed);
+                    assert!(adaptive.partitions_probed <= PARTITIONS);
+                    assert_eq!(fixed.partitions_probed, usize::from(k > 0));
+                    assert!(adaptive.vector_distances >= fixed.vector_distances);
+                    let recall_at_k = |hits: &[glider::Neighbor]| {
+                        if exact.is_empty() {
+                            1.0
+                        } else {
+                            hits.iter().filter(|hit| exact.contains(hit)).count() as f64
+                                / exact.len() as f64
+                        }
+                    };
+                    assert!(
+                        recall_at_k(&adaptive.neighbors) >= recall_at_k(&fixed.neighbors),
+                        "seed={SEED} metric={metric:?} query={query:?} filter={filter:?} k={k}"
+                    );
+                    let positions: Vec<_> = adaptive
+                        .neighbors
+                        .iter()
+                        .map(|hit| all.iter().position(|candidate| candidate == hit).unwrap())
+                        .collect();
+                    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+                    if adaptive.partitions_probed == PARTITIONS {
+                        assert_eq!(adaptive.neighbors, exact);
+                    }
+                    let repeat = db
+                        .search_ivf_filtered_adaptive(&query, k, 1, &filter)
+                        .unwrap();
+                    assert_eq!(repeat.neighbors, adaptive.neighbors);
+                    assert_eq!(repeat.partitions_probed, adaptive.partitions_probed);
+                }
+            }
+        }
+        let query = [0., 0.];
+        let filter = &[("selected", "yes")];
+        let one = db
+            .search_ivf_filtered_adaptive(&query, 1, 1, filter)
+            .unwrap();
+        assert_eq!(one.partitions_probed, 1);
+        assert_eq!(one.neighbors.len(), 1);
+        let minimum_three = db
+            .search_ivf_filtered_adaptive(&query, 1, 3, filter)
+            .unwrap();
+        assert_eq!(minimum_three.partitions_probed, 3);
+        let fixed = db.search_ivf_filtered(&query, 5, 1, filter).unwrap();
+        let adaptive = db
+            .search_ivf_filtered_adaptive(&query, 5, 1, filter)
+            .unwrap();
+        assert!(fixed.neighbors.len() < 5, "seed={SEED} metric={metric:?}");
+        assert_eq!(adaptive.neighbors.len(), 5);
+        assert!(adaptive.partitions_probed > fixed.partitions_probed);
+        let exact = db.search_filtered(&query, 5, filter).unwrap();
+        let recall_count =
+            |hits: &[glider::Neighbor]| hits.iter().filter(|hit| exact.contains(hit)).count();
+        assert!(recall_count(&adaptive.neighbors) > recall_count(&fixed.neighbors));
+        let full = db
+            .search_ivf_filtered_adaptive(&query, 5, PARTITIONS + 1, filter)
+            .unwrap();
+        assert_eq!(full.partitions_probed, PARTITIONS);
+        assert_eq!(
+            full.neighbors,
+            db.search_filtered(&query, 5, filter).unwrap()
+        );
+        assert!(db
+            .search_ivf_filtered_adaptive(&query, 5, 0, filter)
+            .is_err());
+    }
+}
+
+#[test]
 fn metadata_survives_snapshots_compaction_and_restart() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("db");

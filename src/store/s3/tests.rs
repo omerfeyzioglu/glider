@@ -224,6 +224,11 @@ fn minio_metadata_filtering_survives_compaction_and_restart() {
             .neighbors,
         exact
     );
+    let adaptive = db
+        .search_ivf_filtered_adaptive(&[0., 0.], 10, 1, &[("team", "red")])
+        .unwrap();
+    assert_eq!(adaptive.neighbors, exact);
+    assert_eq!(adaptive.partitions_probed, 2);
     assert_eq!(metrics.snapshot(), before);
     db.checkpoint().unwrap();
     db.compact().unwrap();
