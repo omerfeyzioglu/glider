@@ -1,0 +1,200 @@
+{
+  "comparison_group": "m8-tail",
+  "config": {
+    "comparison_group": "m8-tail",
+    "dimensions": 64,
+    "feature": "m8-envelope",
+    "k": 10,
+    "label": "Apple M4 local APFS; desktop load uncontrolled",
+    "mutations": 2000,
+    "operations": 200,
+    "phase": "baseline",
+    "queries": 100,
+    "root": "/Users/omer/Desktop/vecturbo/target",
+    "rows": 200,
+    "samples": 3,
+    "scenario": "recovery",
+    "seed": 42
+  },
+  "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
+  "environment": {
+    "architecture": "aarch64",
+    "argv": [
+      "/Users/omer/Desktop/vecturbo/target/release/deps/baseline-77e45983b80229b5",
+      "--scenario",
+      "recovery",
+      "--rows",
+      "200",
+      "--mutations",
+      "2000",
+      "--samples",
+      "3",
+      "--comparison-group",
+      "m8-tail",
+      "--backend",
+      "local",
+      "--dimensions",
+      "64",
+      "--seed",
+      "42",
+      "--feature",
+      "m8-envelope",
+      "--phase",
+      "baseline",
+      "--root",
+      "target",
+      "--label",
+      "Apple M4 local APFS; desktop load uncontrolled",
+      "--bench"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_encoded_rustflags": null,
+    "cpu": "Apple M4",
+    "debug_assertions": false,
+    "filesystem_mount": "Filesystem   1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5   482797652 171881572 285174828    38%    /System/Volumes/Data",
+    "git_revision": "8791ebcfaae4af118118c1251704797c2e406aa6",
+    "git_status": "",
+    "logical_parallelism": 10,
+    "memory": "17179869184",
+    "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+    "profile": "bench",
+    "profile_environment": {},
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "rustflags": null,
+    "source_sha256": "2a0f200f46f8127c1ded70b4c89ea67f3c52de3ea99eedcd7b4abdf95f895376",
+    "unix_seconds": 1790363675
+  },
+  "feature": "m8-envelope",
+  "footprint_scope": "Logical objects, physical files, and summed file lengths; not allocated blocks or device bytes written",
+  "generator": "splitmix64-high24-uniform-f32-v1",
+  "git_revision": "8791ebcfaae4af118118c1251704797c2e406aa6",
+  "measurement_protocol": "local-v2-individual-query-timers-rusage",
+  "metric": "squared_euclidean",
+  "phase": "baseline",
+  "results": [
+    {
+      "backend": "local",
+      "build_store_calls": {
+        "create_calls": 2001,
+        "create_payload_bytes": 1600084,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 1
+      },
+      "cache": "warm OS cache; no eviction",
+      "database_replay": {
+        "max_sample_ns": 103368500.0,
+        "mean_ns_per_operation": 97018139.0,
+        "min_sample_ns": 93078833.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 10.30735087590167,
+        "p50_amortized_ns_per_operation": 94607084.0,
+        "p50_sample_ns": 94607084.0,
+        "p95_sample_ns": 103368500.0,
+        "p99_sample_ns": 103368500.0,
+        "raw_sample_ns": [
+          93078833.0,
+          94607084.0,
+          103368500.0
+        ],
+        "sample_count": 3
+      },
+      "dataset_seed": 42,
+      "dataset_sha256": "96b1fcaa7997a42638f229ccc7e689e4899a8b0bbd9eccd0eb40a278873decf5",
+      "history": "round-robin puts",
+      "inventory": {
+        "file_length_bytes": 1712140,
+        "logical_objects": 2001,
+        "physical_files": 4002
+      },
+      "live_documents": 200,
+      "local_store_open": {
+        "max_sample_ns": 80899917.0,
+        "mean_ns_per_operation": 77977597.66666667,
+        "min_sample_ns": 74793334.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 12.8241960501878,
+        "p50_amortized_ns_per_operation": 78239542.0,
+        "p50_sample_ns": 78239542.0,
+        "p95_sample_ns": 80899917.0,
+        "p99_sample_ns": 80899917.0,
+        "raw_sample_ns": [
+          80899917.0,
+          74793334.0,
+          78239542.0
+        ],
+        "sample_count": 3
+      },
+      "measured_store_calls_per_sample": [
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2001,
+          "get_payload_bytes": 1600084,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2001,
+          "get_payload_bytes": 1600084,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2001,
+          "get_payload_bytes": 1600084,
+          "list_calls": 1
+        }
+      ],
+      "mutation_history": 2000,
+      "query_seed": null,
+      "query_sha256": null,
+      "resources": {
+        "cpu_scope": "sum of open windows excluding validation and destruction",
+        "process_max_rss_bytes": 3686400,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 3653632,
+            "system_cpu_ns": 140350000,
+            "user_cpu_ns": 25955000
+          },
+          {
+            "process_max_rss_bytes": 3670016,
+            "system_cpu_ns": 142844000,
+            "user_cpu_ns": 26418000
+          },
+          {
+            "process_max_rss_bytes": 3686400,
+            "system_cpu_ns": 152961000,
+            "user_cpu_ns": 27634000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 436155000,
+        "user_cpu_ns": 80007000
+      },
+      "scenario": "recovery",
+      "total_open": {
+        "max_sample_ns": 181608208.0,
+        "mean_ns_per_operation": 174996014.0,
+        "min_sample_ns": 169400709.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 5.714415872352384,
+        "p50_amortized_ns_per_operation": 173979125.0,
+        "p50_sample_ns": 173979125.0,
+        "p95_sample_ns": 181608208.0,
+        "p99_sample_ns": 181608208.0,
+        "raw_sample_ns": [
+          173979125.0,
+          169400709.0,
+          181608208.0
+        ],
+        "sample_count": 3
+      },
+      "warmup_reopens": 1
+    }
+  ],
+  "schema_version": 2
+}

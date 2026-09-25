@@ -1,0 +1,256 @@
+{
+  "comparison_group": "m8-tail",
+  "config": {
+    "backend": "s3",
+    "comparison_group": "m8-tail",
+    "dimensions": 64,
+    "feature": "m8-envelope",
+    "k": 10,
+    "label": "Apple M4 client; local Docker MinIO; desktop load uncontrolled",
+    "mutations": 2000,
+    "operations": 200,
+    "phase": "baseline",
+    "queries": 100,
+    "root": "/Users/omer/Desktop/vecturbo/target",
+    "rows": 200,
+    "samples": 3,
+    "scenario": "recovery",
+    "seed": 42
+  },
+  "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
+  "environment": {
+    "architecture": "aarch64",
+    "argv": [
+      "/Users/omer/Desktop/vecturbo/target/release/deps/baseline-eeaf3323d0724dc1",
+      "--scenario",
+      "recovery",
+      "--rows",
+      "200",
+      "--mutations",
+      "2000",
+      "--samples",
+      "3",
+      "--comparison-group",
+      "m8-tail",
+      "--backend",
+      "s3",
+      "--dimensions",
+      "64",
+      "--seed",
+      "42",
+      "--feature",
+      "m8-envelope",
+      "--phase",
+      "baseline",
+      "--root",
+      "target",
+      "--label",
+      "Apple M4 client; local Docker MinIO; desktop load uncontrolled",
+      "--bench"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_encoded_rustflags": null,
+    "cpu": "Apple M4",
+    "debug_assertions": false,
+    "filesystem_mount": "Filesystem   1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5   482797652 171926936 285129464    38%    /System/Volumes/Data",
+    "git_revision": "8791ebcfaae4af118118c1251704797c2e406aa6",
+    "git_status": "",
+    "logical_parallelism": 10,
+    "memory": "17179869184",
+    "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+    "profile": "bench",
+    "profile_environment": {},
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "rustflags": null,
+    "s3": {
+      "addressing": "path",
+      "automatic_retries": 0,
+      "bucket": "glider-test",
+      "endpoint": "http://127.0.0.1:56688",
+      "namespace_prefix": "m8-envelope",
+      "region": "us-east-1",
+      "request_timeout_seconds": 30,
+      "service_label": "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9; local Docker MinIO"
+    },
+    "source_sha256": "2a0f200f46f8127c1ded70b4c89ea67f3c52de3ea99eedcd7b4abdf95f895376",
+    "unix_seconds": 1790363747
+  },
+  "feature": "m8-envelope",
+  "footprint_scope": "Native object count and summed object lengths from an untimed listing; client/server physical file footprint unavailable",
+  "generator": "splitmix64-high24-uniform-f32-v1",
+  "git_revision": "8791ebcfaae4af118118c1251704797c2e406aa6",
+  "http_counter_scope": "HTTP client attempts during the measured workload; includes every LIST page and request-body envelope bytes; excludes inventory and setup. Transport errors exclude later response-body consumption errors.",
+  "measurement_protocol": "s3-v1-individual-query-timers-rusage",
+  "metric": "squared_euclidean",
+  "phase": "baseline",
+  "results": [
+    {
+      "backend": "s3",
+      "build_http_requests": {
+        "delete": 0,
+        "get": 1,
+        "http_errors": 1,
+        "list": 1,
+        "other": 0,
+        "put": 2001,
+        "request_body_bytes": 1696132,
+        "transport_errors": 0
+      },
+      "build_store_calls": {
+        "create_calls": 2001,
+        "create_payload_bytes": 1600084,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 1
+      },
+      "cache": "remote reopen after one warmup; server cache uncontrolled",
+      "database_replay": {
+        "max_sample_ns": 928398292.0,
+        "mean_ns_per_operation": 886190486.3333334,
+        "min_sample_ns": 802559542.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 1.1284255647310777,
+        "p50_amortized_ns_per_operation": 927613625.0,
+        "p50_sample_ns": 927613625.0,
+        "p95_sample_ns": 928398292.0,
+        "p99_sample_ns": 928398292.0,
+        "raw_sample_ns": [
+          927613625.0,
+          928398292.0,
+          802559542.0
+        ],
+        "sample_count": 3
+      },
+      "dataset_seed": 42,
+      "dataset_sha256": "96b1fcaa7997a42638f229ccc7e689e4899a8b0bbd9eccd0eb40a278873decf5",
+      "history": "round-robin puts",
+      "http_requests_per_sample": [
+        {
+          "delete": 0,
+          "get": 2001,
+          "http_errors": 0,
+          "list": 3,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "delete": 0,
+          "get": 2001,
+          "http_errors": 0,
+          "list": 3,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        },
+        {
+          "delete": 0,
+          "get": 2001,
+          "http_errors": 0,
+          "list": 3,
+          "other": 0,
+          "put": 0,
+          "request_body_bytes": 0,
+          "transport_errors": 0
+        }
+      ],
+      "inventory": {
+        "file_length_bytes": null,
+        "logical_objects": 2001,
+        "object_length_bytes": 1696132,
+        "physical_files": null
+      },
+      "live_documents": 200,
+      "measured_store_calls_per_sample": [
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2001,
+          "get_payload_bytes": 1600084,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2001,
+          "get_payload_bytes": 1600084,
+          "list_calls": 1
+        },
+        {
+          "create_calls": 0,
+          "create_payload_bytes": 0,
+          "get_calls": 2001,
+          "get_payload_bytes": 1600084,
+          "list_calls": 1
+        }
+      ],
+      "mutation_history": 2000,
+      "namespace": "m8-envelope/glider-recovery-G2GgAw",
+      "query_seed": null,
+      "query_sha256": null,
+      "resources": {
+        "cpu_scope": "sum of open windows excluding validation and destruction",
+        "process_max_rss_bytes": 12877824,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 12828672,
+            "system_cpu_ns": 78927000,
+            "user_cpu_ns": 197602000
+          },
+          {
+            "process_max_rss_bytes": 12861440,
+            "system_cpu_ns": 78764000,
+            "user_cpu_ns": 197897000
+          },
+          {
+            "process_max_rss_bytes": 12877824,
+            "system_cpu_ns": 42785000,
+            "user_cpu_ns": 86742000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 200476000,
+        "user_cpu_ns": 482241000
+      },
+      "scenario": "recovery",
+      "store_open": {
+        "max_sample_ns": 76083.0,
+        "mean_ns_per_operation": 53569.333333333336,
+        "min_sample_ns": 34542.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 18667.396769295865,
+        "p50_amortized_ns_per_operation": 50083.0,
+        "p50_sample_ns": 50083.0,
+        "p95_sample_ns": 76083.0,
+        "p99_sample_ns": 76083.0,
+        "raw_sample_ns": [
+          76083.0,
+          34542.0,
+          50083.0
+        ],
+        "sample_count": 3
+      },
+      "total_open": {
+        "max_sample_ns": 928433042.0,
+        "mean_ns_per_operation": 886244333.3333334,
+        "min_sample_ns": 802609833.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 1.128357003128934,
+        "p50_amortized_ns_per_operation": 927690125.0,
+        "p50_sample_ns": 927690125.0,
+        "p95_sample_ns": 928433042.0,
+        "p99_sample_ns": 928433042.0,
+        "raw_sample_ns": [
+          927690125.0,
+          928433042.0,
+          802609833.0
+        ],
+        "sample_count": 3
+      },
+      "warmup_reopens": 1
+    }
+  ],
+  "schema_version": 3
+}
