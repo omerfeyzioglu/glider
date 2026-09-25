@@ -30,7 +30,7 @@ def summary(documents):
                         zip(ann['returned_neighbor_ids'], result['exact_neighbor_ids']))
         else:
             algorithm, recall, distance, short = 'exact', 1.0, eligible, 0
-        lines.append(f"| {config['filter_every']} | {algorithm} | {eligible} | {recall * 100:.2f} | {distance:.2f} | {short}/{config['queries']} | [{name}]({name}) |")
+        lines.append(f"| {config['filter_every']} | {algorithm} | {eligible} | {recall * 100:.2f} | {distance:.2f} | {short}/{config['queries']} | [raw]({name}) |")
     config = documents[0][1]['config']
     lines += [
         '',
@@ -69,9 +69,10 @@ def run(output, smoke=False, archive=False):
             path = output / name
             path.write_text(raw)
             if archive:
-                subprocess.run(['python3', 'tools/benchmarks.py', 'archive', str(path)],
+                subprocess.run(['python3', 'tools/benchmarks.py', 'archive', str(path),
+                                '--archive', 'benchmarks/filtering'],
                                check=True, stdout=subprocess.DEVNULL)
-                name = 'runs/' + hashlib.sha256(raw.encode()).hexdigest() + '.json'
+                name = 'filtering/runs/' + hashlib.sha256(raw.encode()).hexdigest() + '.json'
             documents.append((name, document))
     report = summary(documents)
     (Path('benchmarks/FILTERING.md') if archive else output / 'SUMMARY.md').write_text(report)

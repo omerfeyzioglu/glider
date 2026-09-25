@@ -553,6 +553,7 @@ production parameters. Latest compact results: [ANN.md](benchmarks/ANN.md).
 ```sh
 python3 tools/filter_benchmark.py --smoke --output target/filter-smoke
 python3 tools/filter_benchmark.py --output target/filter-quick --archive
+python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 ```
 
 The optional `--filter-every N` search workload marks every Nth document with
@@ -563,7 +564,9 @@ selected IDs; the validator reconstructs vector inputs and filtered exact answer
 independently. Full probing must match the exact oracle. No timed query performs
 storage I/O.
 
-The smoke workload uses 48 rows × 8 dimensions, k=6, seed 42, eight queries,
+The filtered raw reports use a separate `benchmarks/filtering/` archive so they
+do not replace the general latest search baseline. The smoke workload uses
+48 rows × 8 dimensions, k=6, seed 42, eight queries,
 four partitions and 1/full probes. The short archived workload uses 512 rows ×
 64 dimensions, k=10, seed 42, 24 queries, 16 partitions, filter moduli 1/8/32
 and exact/1/4/full probes. It records recall and distance evaluations to guide

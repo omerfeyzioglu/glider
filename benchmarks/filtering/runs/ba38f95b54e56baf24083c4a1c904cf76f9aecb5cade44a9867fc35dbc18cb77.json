@@ -1,0 +1,927 @@
+{
+  "comparison_group": "filter-quick-v1",
+  "config": {
+    "comparison_group": "filter-quick-v1",
+    "dimensions": 64,
+    "feature": "metadata-filtering",
+    "filter_every": 1,
+    "ivf_iterations": 8,
+    "ivf_partitions": 16,
+    "ivf_probes": 16,
+    "k": 10,
+    "label": "synthetic filter quality; desktop load and power uncontrolled",
+    "mutations": 5000,
+    "operations": 200,
+    "phase": "baseline",
+    "queries": 24,
+    "root": "/Users/omer/Desktop/vecturbo/target",
+    "rows": 512,
+    "samples": 2,
+    "scenario": "search",
+    "seed": 42
+  },
+  "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
+  "environment": {
+    "architecture": "aarch64",
+    "argv": [
+      "/Users/omer/Desktop/vecturbo/target/release/deps/baseline-77e45983b80229b5",
+      "--scenario",
+      "search",
+      "--rows",
+      "512",
+      "--dimensions",
+      "64",
+      "--queries",
+      "24",
+      "--samples",
+      "2",
+      "--k",
+      "10",
+      "--seed",
+      "42",
+      "--filter-every",
+      "1",
+      "--root",
+      "target",
+      "--feature",
+      "metadata-filtering",
+      "--phase",
+      "baseline",
+      "--comparison-group",
+      "filter-quick-v1",
+      "--label",
+      "synthetic filter quality; desktop load and power uncontrolled",
+      "--ivf-partitions",
+      "16",
+      "--ivf-probes",
+      "16",
+      "--ivf-iterations",
+      "8",
+      "--bench"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_encoded_rustflags": null,
+    "cpu": "Apple M4",
+    "debug_assertions": false,
+    "filesystem_mount": "Filesystem   1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5   482797652 170114692 287984628    38%    /System/Volumes/Data",
+    "git_revision": "edbdf3e4149871a1da314912045c2044527462ee",
+    "git_status": "M benchmarks/SUMMARY.md\n M benchmarks/latest.json\n?? benchmarks/runs/91511b6e8308d0c9e57f79a9a836352ab546f4c4537b1046c698488661ae9204.json\n?? benchmarks/runs/b8ed600d639c509ea6ac03885226637b11d492cb4386e3983eda333817fbf5c1.json\n?? benchmarks/runs/e358622d8cd1cf3db757b86af64061ebfa1054c020a340efa0f5c5fdc937bc9f.json",
+    "logical_parallelism": 10,
+    "memory": "17179869184",
+    "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+    "profile": "bench",
+    "profile_environment": {},
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "rustflags": null,
+    "source_sha256": "ea4f77a09848ca8352d08e003ef443fccfc09dc0bd24aec8518f8e3dae0b056b",
+    "unix_seconds": 1790331732
+  },
+  "feature": "metadata-filtering",
+  "footprint_scope": "Logical objects, physical files, and summed file lengths; not allocated blocks or device bytes written",
+  "generator": "splitmix64-high24-uniform-f32-v1",
+  "git_revision": "edbdf3e4149871a1da314912045c2044527462ee",
+  "measurement_protocol": "local-v2-individual-query-timers-rusage",
+  "metric": "squared_euclidean",
+  "phase": "baseline",
+  "results": [
+    {
+      "ann": {
+        "algorithm": "ivf-flat-v1",
+        "build_ns": 2040500.0,
+        "distance_evaluations": [
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          },
+          {
+            "centroid": 16,
+            "vector": 512
+          }
+        ],
+        "recall_at_k": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "returned_neighbor_ids": [
+          [
+            285,
+            59,
+            54,
+            173,
+            411,
+            508,
+            22,
+            309,
+            56,
+            274
+          ],
+          [
+            143,
+            359,
+            479,
+            361,
+            60,
+            310,
+            507,
+            287,
+            355,
+            466
+          ],
+          [
+            60,
+            158,
+            142,
+            139,
+            176,
+            133,
+            511,
+            242,
+            88,
+            426
+          ],
+          [
+            266,
+            367,
+            39,
+            395,
+            305,
+            510,
+            89,
+            365,
+            126,
+            209
+          ],
+          [
+            380,
+            430,
+            18,
+            258,
+            501,
+            201,
+            89,
+            463,
+            107,
+            33
+          ],
+          [
+            215,
+            107,
+            237,
+            138,
+            121,
+            390,
+            278,
+            307,
+            16,
+            201
+          ],
+          [
+            236,
+            216,
+            94,
+            499,
+            356,
+            125,
+            322,
+            345,
+            447,
+            486
+          ],
+          [
+            70,
+            325,
+            201,
+            56,
+            509,
+            50,
+            446,
+            274,
+            181,
+            306
+          ],
+          [
+            38,
+            297,
+            286,
+            191,
+            476,
+            495,
+            418,
+            106,
+            444,
+            468
+          ],
+          [
+            79,
+            191,
+            504,
+            60,
+            402,
+            196,
+            39,
+            365,
+            64,
+            341
+          ],
+          [
+            276,
+            436,
+            34,
+            211,
+            127,
+            197,
+            406,
+            118,
+            57,
+            148
+          ],
+          [
+            148,
+            406,
+            57,
+            86,
+            409,
+            376,
+            239,
+            469,
+            40,
+            38
+          ],
+          [
+            356,
+            146,
+            112,
+            127,
+            509,
+            34,
+            118,
+            341,
+            352,
+            408
+          ],
+          [
+            508,
+            495,
+            89,
+            7,
+            343,
+            57,
+            176,
+            60,
+            149,
+            356
+          ],
+          [
+            499,
+            72,
+            20,
+            91,
+            42,
+            183,
+            162,
+            5,
+            344,
+            486
+          ],
+          [
+            508,
+            12,
+            384,
+            121,
+            377,
+            444,
+            25,
+            132,
+            48,
+            426
+          ],
+          [
+            72,
+            126,
+            285,
+            367,
+            477,
+            224,
+            302,
+            343,
+            329,
+            173
+          ],
+          [
+            55,
+            41,
+            262,
+            205,
+            25,
+            437,
+            313,
+            138,
+            397,
+            20
+          ],
+          [
+            434,
+            140,
+            486,
+            201,
+            462,
+            273,
+            333,
+            118,
+            105,
+            191
+          ],
+          [
+            91,
+            462,
+            486,
+            499,
+            497,
+            142,
+            225,
+            353,
+            426,
+            301
+          ],
+          [
+            413,
+            418,
+            134,
+            89,
+            84,
+            380,
+            499,
+            286,
+            444,
+            101
+          ],
+          [
+            418,
+            311,
+            85,
+            231,
+            388,
+            505,
+            125,
+            136,
+            260,
+            20
+          ],
+          [
+            21,
+            473,
+            279,
+            86,
+            371,
+            112,
+            67,
+            125,
+            99,
+            324
+          ],
+          [
+            85,
+            84,
+            104,
+            459,
+            341,
+            121,
+            328,
+            434,
+            280,
+            504
+          ]
+        ]
+      },
+      "backend": "local",
+      "build_store_calls": {
+        "create_calls": 513,
+        "create_payload_bytes": 418259,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 1
+      },
+      "cache": "warm in-memory query pass",
+      "dataset_seed": 42,
+      "dataset_sha256": "192de6cc60817f3be1407273660aee9aca43488cbd5a09dd292755559c689a06",
+      "exact_neighbor_ids": [
+        [
+          285,
+          59,
+          54,
+          173,
+          411,
+          508,
+          22,
+          309,
+          56,
+          274
+        ],
+        [
+          143,
+          359,
+          479,
+          361,
+          60,
+          310,
+          507,
+          287,
+          355,
+          466
+        ],
+        [
+          60,
+          158,
+          142,
+          139,
+          176,
+          133,
+          511,
+          242,
+          88,
+          426
+        ],
+        [
+          266,
+          367,
+          39,
+          395,
+          305,
+          510,
+          89,
+          365,
+          126,
+          209
+        ],
+        [
+          380,
+          430,
+          18,
+          258,
+          501,
+          201,
+          89,
+          463,
+          107,
+          33
+        ],
+        [
+          215,
+          107,
+          237,
+          138,
+          121,
+          390,
+          278,
+          307,
+          16,
+          201
+        ],
+        [
+          236,
+          216,
+          94,
+          499,
+          356,
+          125,
+          322,
+          345,
+          447,
+          486
+        ],
+        [
+          70,
+          325,
+          201,
+          56,
+          509,
+          50,
+          446,
+          274,
+          181,
+          306
+        ],
+        [
+          38,
+          297,
+          286,
+          191,
+          476,
+          495,
+          418,
+          106,
+          444,
+          468
+        ],
+        [
+          79,
+          191,
+          504,
+          60,
+          402,
+          196,
+          39,
+          365,
+          64,
+          341
+        ],
+        [
+          276,
+          436,
+          34,
+          211,
+          127,
+          197,
+          406,
+          118,
+          57,
+          148
+        ],
+        [
+          148,
+          406,
+          57,
+          86,
+          409,
+          376,
+          239,
+          469,
+          40,
+          38
+        ],
+        [
+          356,
+          146,
+          112,
+          127,
+          509,
+          34,
+          118,
+          341,
+          352,
+          408
+        ],
+        [
+          508,
+          495,
+          89,
+          7,
+          343,
+          57,
+          176,
+          60,
+          149,
+          356
+        ],
+        [
+          499,
+          72,
+          20,
+          91,
+          42,
+          183,
+          162,
+          5,
+          344,
+          486
+        ],
+        [
+          508,
+          12,
+          384,
+          121,
+          377,
+          444,
+          25,
+          132,
+          48,
+          426
+        ],
+        [
+          72,
+          126,
+          285,
+          367,
+          477,
+          224,
+          302,
+          343,
+          329,
+          173
+        ],
+        [
+          55,
+          41,
+          262,
+          205,
+          25,
+          437,
+          313,
+          138,
+          397,
+          20
+        ],
+        [
+          434,
+          140,
+          486,
+          201,
+          462,
+          273,
+          333,
+          118,
+          105,
+          191
+        ],
+        [
+          91,
+          462,
+          486,
+          499,
+          497,
+          142,
+          225,
+          353,
+          426,
+          301
+        ],
+        [
+          413,
+          418,
+          134,
+          89,
+          84,
+          380,
+          499,
+          286,
+          444,
+          101
+        ],
+        [
+          418,
+          311,
+          85,
+          231,
+          388,
+          505,
+          125,
+          136,
+          260,
+          20
+        ],
+        [
+          21,
+          473,
+          279,
+          86,
+          371,
+          112,
+          67,
+          125,
+          99,
+          324
+        ],
+        [
+          85,
+          84,
+          104,
+          459,
+          341,
+          121,
+          328,
+          434,
+          280,
+          504
+        ]
+      ],
+      "filter": {
+        "eligible_documents": 512,
+        "predicate": {
+          "selected": "true"
+        },
+        "selected_ids_sha256": "5738153ec97595b1c1e4dc027f7b7fb4534f19ed2ce9f9ee712e6d34a384cde7"
+      },
+      "inventory": {
+        "file_length_bytes": 446987,
+        "logical_objects": 513,
+        "physical_files": 1026
+      },
+      "live_documents": 512,
+      "measured_store_calls": {
+        "create_calls": 0,
+        "create_payload_bytes": 0,
+        "get_calls": 0,
+        "get_payload_bytes": 0,
+        "list_calls": 0
+      },
+      "mutation_history": 512,
+      "query_latency": {
+        "max_sample_ns": 19125.0,
+        "mean_ns_per_operation": 18340.270833333332,
+        "min_sample_ns": 17875.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 54524.82185718359,
+        "p50_amortized_ns_per_operation": 18333.0,
+        "p50_sample_ns": 18333.0,
+        "p95_sample_ns": 18917.0,
+        "p99_sample_ns": 19125.0,
+        "raw_sample_ns": [
+          19125.0,
+          18542.0,
+          19083.0,
+          18542.0,
+          18459.0,
+          18292.0,
+          18583.0,
+          18917.0,
+          18459.0,
+          18750.0,
+          18292.0,
+          18583.0,
+          18250.0,
+          18459.0,
+          18333.0,
+          18625.0,
+          18167.0,
+          18208.0,
+          18250.0,
+          17916.0,
+          18459.0,
+          18459.0,
+          18375.0,
+          18416.0,
+          18041.0,
+          18083.0,
+          18292.0,
+          18458.0,
+          18333.0,
+          18042.0,
+          18167.0,
+          18458.0,
+          18417.0,
+          18458.0,
+          18000.0,
+          18583.0,
+          17958.0,
+          18125.0,
+          18167.0,
+          18000.0,
+          18083.0,
+          18417.0,
+          18208.0,
+          17875.0,
+          18167.0,
+          18166.0,
+          18375.0,
+          17916.0
+        ],
+        "sample_count": 48
+      },
+      "query_seed": 15111065706836454697,
+      "query_sha256": "65fd52aecd9f4ead8b736ae99c4a7c5b97ca0cc0aa06491ffdde6070558b2edd",
+      "resources": {
+        "cpu_scope": "query loops including timer and loop overhead",
+        "process_max_rss_bytes": 3522560,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 3522560,
+            "system_cpu_ns": 1000,
+            "user_cpu_ns": 882000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 1000,
+        "user_cpu_ns": 882000
+      },
+      "scenario": "search",
+      "timing": {
+        "max_sample_ns": 444250.0,
+        "mean_ns_per_operation": 18369.791666666668,
+        "min_sample_ns": 437500.0,
+        "operations_per_sample": 24,
+        "operations_per_timed_second": 54437.198752480865,
+        "p50_amortized_ns_per_operation": 18229.166666666668,
+        "p50_sample_ns": 437500.0,
+        "p95_sample_ns": 444250.0,
+        "p99_sample_ns": 444250.0,
+        "raw_sample_ns": [
+          444250.0,
+          437500.0
+        ],
+        "sample_count": 2
+      },
+      "warmup_queries": 24
+    }
+  ],
+  "schema_version": 2
+}

@@ -1,0 +1,806 @@
+{
+  "comparison_group": "filter-quick-v1",
+  "config": {
+    "comparison_group": "filter-quick-v1",
+    "dimensions": 64,
+    "feature": "metadata-filtering",
+    "filter_every": 32,
+    "ivf_iterations": 8,
+    "ivf_partitions": 16,
+    "ivf_probes": 4,
+    "k": 10,
+    "label": "synthetic filter quality; desktop load and power uncontrolled",
+    "mutations": 5000,
+    "operations": 200,
+    "phase": "baseline",
+    "queries": 24,
+    "root": "/Users/omer/Desktop/vecturbo/target",
+    "rows": 512,
+    "samples": 2,
+    "scenario": "search",
+    "seed": 42
+  },
+  "counter_scope": "Engine-to-store calls and payload bytes only; excludes backend-internal I/O and inventory",
+  "environment": {
+    "architecture": "aarch64",
+    "argv": [
+      "/Users/omer/Desktop/vecturbo/target/release/deps/baseline-77e45983b80229b5",
+      "--scenario",
+      "search",
+      "--rows",
+      "512",
+      "--dimensions",
+      "64",
+      "--queries",
+      "24",
+      "--samples",
+      "2",
+      "--k",
+      "10",
+      "--seed",
+      "42",
+      "--filter-every",
+      "32",
+      "--root",
+      "target",
+      "--feature",
+      "metadata-filtering",
+      "--phase",
+      "baseline",
+      "--comparison-group",
+      "filter-quick-v1",
+      "--label",
+      "synthetic filter quality; desktop load and power uncontrolled",
+      "--ivf-partitions",
+      "16",
+      "--ivf-probes",
+      "4",
+      "--ivf-iterations",
+      "8",
+      "--bench"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_encoded_rustflags": null,
+    "cpu": "Apple M4",
+    "debug_assertions": false,
+    "filesystem_mount": "Filesystem   1024-blocks      Used Available Capacity  Mounted on\n/dev/disk3s5   482797652 170123732 287975588    38%    /System/Volumes/Data",
+    "git_revision": "edbdf3e4149871a1da314912045c2044527462ee",
+    "git_status": "M benchmarks/SUMMARY.md\n M benchmarks/latest.json\n?? benchmarks/runs/15599eae350314173e3fbead67b8633969f14c421165e2abc01f79a98b82f073.json\n?? benchmarks/runs/47b6b400239422de9a709bdb088a59001d3c9893c1c05439e894bf0e1ce9b2fe.json\n?? benchmarks/runs/7e79550a5b8c36c98ff003b1d1d7ff4e71c44a06cc8a4340267622e3105c0830.json\n?? benchmarks/runs/91511b6e8308d0c9e57f79a9a836352ab546f4c4537b1046c698488661ae9204.json\n?? benchmarks/runs/b8ed600d639c509ea6ac03885226637b11d492cb4386e3983eda333817fbf5c1.json\n?? benchmarks/runs/ba38f95b54e56baf24083c4a1c904cf76f9aecb5cade44a9867fc35dbc18cb77.json\n?? benchmarks/runs/c2572bbc2b003a943e89f7a501489270595d1d220b9b05ce15d7f806204aaa6e.json\n?? benchmarks/runs/cf27dd8480e2009349f0b7808793ba48dc3251cc9f275a9dac435a0fd01b7411.json\n?? benchmarks/runs/e32c14c230be070b4adfd415bbfe3e60619904e87f760aae86b13efd5d872f5c.json\n?? benchmarks/runs/e358622d8cd1cf3db757b86af64061ebfa1054c020a340efa0f5c5fdc937bc9f.json",
+    "logical_parallelism": 10,
+    "memory": "17179869184",
+    "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+    "profile": "bench",
+    "profile_environment": {},
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "rustflags": null,
+    "source_sha256": "ea4f77a09848ca8352d08e003ef443fccfc09dc0bd24aec8518f8e3dae0b056b",
+    "unix_seconds": 1790331781
+  },
+  "feature": "metadata-filtering",
+  "footprint_scope": "Logical objects, physical files, and summed file lengths; not allocated blocks or device bytes written",
+  "generator": "splitmix64-high24-uniform-f32-v1",
+  "git_revision": "edbdf3e4149871a1da314912045c2044527462ee",
+  "measurement_protocol": "local-v2-individual-query-timers-rusage",
+  "metric": "squared_euclidean",
+  "phase": "baseline",
+  "results": [
+    {
+      "ann": {
+        "algorithm": "ivf-flat-v1",
+        "build_ns": 7008291.0,
+        "distance_evaluations": [
+          {
+            "centroid": 16,
+            "vector": 5
+          },
+          {
+            "centroid": 16,
+            "vector": 6
+          },
+          {
+            "centroid": 16,
+            "vector": 6
+          },
+          {
+            "centroid": 16,
+            "vector": 5
+          },
+          {
+            "centroid": 16,
+            "vector": 5
+          },
+          {
+            "centroid": 16,
+            "vector": 6
+          },
+          {
+            "centroid": 16,
+            "vector": 4
+          },
+          {
+            "centroid": 16,
+            "vector": 5
+          },
+          {
+            "centroid": 16,
+            "vector": 5
+          },
+          {
+            "centroid": 16,
+            "vector": 4
+          },
+          {
+            "centroid": 16,
+            "vector": 3
+          },
+          {
+            "centroid": 16,
+            "vector": 4
+          },
+          {
+            "centroid": 16,
+            "vector": 4
+          },
+          {
+            "centroid": 16,
+            "vector": 4
+          },
+          {
+            "centroid": 16,
+            "vector": 5
+          },
+          {
+            "centroid": 16,
+            "vector": 7
+          },
+          {
+            "centroid": 16,
+            "vector": 3
+          },
+          {
+            "centroid": 16,
+            "vector": 7
+          },
+          {
+            "centroid": 16,
+            "vector": 4
+          },
+          {
+            "centroid": 16,
+            "vector": 6
+          },
+          {
+            "centroid": 16,
+            "vector": 5
+          },
+          {
+            "centroid": 16,
+            "vector": 7
+          },
+          {
+            "centroid": 16,
+            "vector": 3
+          },
+          {
+            "centroid": 16,
+            "vector": 6
+          }
+        ],
+        "recall_at_k": [
+          0.5,
+          0.5,
+          0.4,
+          0.5,
+          0.4,
+          0.6,
+          0.2,
+          0.4,
+          0.2,
+          0.2,
+          0.2,
+          0.3,
+          0.3,
+          0.4,
+          0.5,
+          0.4,
+          0.2,
+          0.5,
+          0.3,
+          0.6,
+          0.2,
+          0.4,
+          0.3,
+          0.4
+        ],
+        "returned_neighbor_ids": [
+          [
+            224,
+            32,
+            64,
+            288,
+            480
+          ],
+          [
+            320,
+            96,
+            160,
+            288,
+            32,
+            480
+          ],
+          [
+            288,
+            160,
+            256,
+            320,
+            480,
+            96
+          ],
+          [
+            64,
+            224,
+            288,
+            480,
+            320
+          ],
+          [
+            448,
+            416,
+            384,
+            256,
+            192
+          ],
+          [
+            192,
+            320,
+            352,
+            32,
+            448,
+            416
+          ],
+          [
+            224,
+            320,
+            64,
+            256
+          ],
+          [
+            256,
+            96,
+            288,
+            160,
+            480
+          ],
+          [
+            96,
+            288,
+            0,
+            160,
+            480
+          ],
+          [
+            96,
+            320,
+            160,
+            0
+          ],
+          [
+            0,
+            352,
+            320
+          ],
+          [
+            192,
+            320,
+            416,
+            448
+          ],
+          [
+            352,
+            160,
+            0,
+            96
+          ],
+          [
+            224,
+            256,
+            0,
+            64
+          ],
+          [
+            288,
+            128,
+            480,
+            320,
+            256
+          ],
+          [
+            224,
+            288,
+            64,
+            96,
+            320,
+            480,
+            160
+          ],
+          [
+            288,
+            256,
+            480
+          ],
+          [
+            288,
+            448,
+            96,
+            480,
+            192,
+            416,
+            160
+          ],
+          [
+            160,
+            256,
+            96,
+            320
+          ],
+          [
+            288,
+            96,
+            160,
+            32,
+            320,
+            480
+          ],
+          [
+            128,
+            448,
+            320,
+            192,
+            416
+          ],
+          [
+            160,
+            352,
+            448,
+            416,
+            96,
+            320,
+            192
+          ],
+          [
+            32,
+            384,
+            352
+          ],
+          [
+            416,
+            192,
+            448,
+            32,
+            288,
+            480
+          ]
+        ]
+      },
+      "backend": "local",
+      "build_store_calls": {
+        "create_calls": 513,
+        "create_payload_bytes": 409827,
+        "get_calls": 1,
+        "get_payload_bytes": 0,
+        "list_calls": 1
+      },
+      "cache": "warm in-memory query pass",
+      "dataset_seed": 42,
+      "dataset_sha256": "192de6cc60817f3be1407273660aee9aca43488cbd5a09dd292755559c689a06",
+      "exact_neighbor_ids": [
+        [
+          224,
+          32,
+          256,
+          320,
+          64,
+          288,
+          192,
+          384,
+          480,
+          0
+        ],
+        [
+          320,
+          64,
+          96,
+          160,
+          288,
+          224,
+          32,
+          448,
+          128,
+          384
+        ],
+        [
+          192,
+          288,
+          160,
+          256,
+          0,
+          384,
+          64,
+          448,
+          320,
+          32
+        ],
+        [
+          64,
+          224,
+          288,
+          160,
+          96,
+          480,
+          192,
+          320,
+          352,
+          128
+        ],
+        [
+          448,
+          480,
+          416,
+          160,
+          384,
+          0,
+          256,
+          64,
+          128,
+          96
+        ],
+        [
+          64,
+          192,
+          320,
+          352,
+          32,
+          448,
+          256,
+          160,
+          384,
+          416
+        ],
+        [
+          224,
+          160,
+          0,
+          320,
+          128,
+          480,
+          352,
+          288,
+          96,
+          416
+        ],
+        [
+          256,
+          224,
+          96,
+          192,
+          288,
+          384,
+          128,
+          160,
+          448,
+          32
+        ],
+        [
+          224,
+          128,
+          352,
+          256,
+          384,
+          96,
+          320,
+          64,
+          32,
+          288
+        ],
+        [
+          64,
+          96,
+          224,
+          320,
+          256,
+          288,
+          448,
+          480,
+          192,
+          128
+        ],
+        [
+          0,
+          160,
+          352,
+          192,
+          480,
+          416,
+          128,
+          64,
+          448,
+          224
+        ],
+        [
+          192,
+          128,
+          320,
+          64,
+          384,
+          352,
+          224,
+          416,
+          256,
+          96
+        ],
+        [
+          352,
+          416,
+          160,
+          448,
+          0,
+          480,
+          64,
+          224,
+          128,
+          32
+        ],
+        [
+          224,
+          256,
+          0,
+          160,
+          32,
+          64,
+          320,
+          288,
+          192,
+          96
+        ],
+        [
+          288,
+          448,
+          128,
+          384,
+          480,
+          160,
+          320,
+          256,
+          224,
+          0
+        ],
+        [
+          384,
+          224,
+          128,
+          288,
+          64,
+          32,
+          256,
+          352,
+          192,
+          96
+        ],
+        [
+          224,
+          128,
+          288,
+          64,
+          0,
+          352,
+          192,
+          160,
+          256,
+          384
+        ],
+        [
+          288,
+          384,
+          32,
+          224,
+          448,
+          64,
+          96,
+          480,
+          192,
+          352
+        ],
+        [
+          384,
+          160,
+          256,
+          32,
+          192,
+          416,
+          352,
+          448,
+          480,
+          96
+        ],
+        [
+          288,
+          224,
+          96,
+          448,
+          256,
+          192,
+          160,
+          32,
+          320,
+          480
+        ],
+        [
+          64,
+          352,
+          128,
+          384,
+          0,
+          256,
+          448,
+          160,
+          32,
+          288
+        ],
+        [
+          32,
+          160,
+          352,
+          128,
+          0,
+          64,
+          448,
+          416,
+          384,
+          480
+        ],
+        [
+          480,
+          416,
+          320,
+          64,
+          32,
+          384,
+          352,
+          192,
+          160,
+          288
+        ],
+        [
+          416,
+          224,
+          96,
+          64,
+          192,
+          448,
+          256,
+          352,
+          32,
+          320
+        ]
+      ],
+      "filter": {
+        "eligible_documents": 16,
+        "predicate": {
+          "selected": "true"
+        },
+        "selected_ids_sha256": "f1111f671ff075eb26afa90db749badec38b0923a7f11051b186d431e9e5dd56"
+      },
+      "inventory": {
+        "file_length_bytes": 438555,
+        "logical_objects": 513,
+        "physical_files": 1026
+      },
+      "live_documents": 512,
+      "measured_store_calls": {
+        "create_calls": 0,
+        "create_payload_bytes": 0,
+        "get_calls": 0,
+        "get_payload_bytes": 0,
+        "list_calls": 0
+      },
+      "mutation_history": 512,
+      "query_latency": {
+        "max_sample_ns": 8166.0,
+        "mean_ns_per_operation": 6225.645833333333,
+        "min_sample_ns": 4709.0,
+        "operations_per_sample": 1,
+        "operations_per_timed_second": 160625.90561220222,
+        "p50_amortized_ns_per_operation": 6292.0,
+        "p50_sample_ns": 6292.0,
+        "p95_sample_ns": 7416.0,
+        "p99_sample_ns": 8166.0,
+        "raw_sample_ns": [
+          7084.0,
+          8166.0,
+          7958.0,
+          6292.0,
+          6292.0,
+          7416.0,
+          5833.0,
+          6625.0,
+          6500.0,
+          6750.0,
+          6083.0,
+          5750.0,
+          5958.0,
+          5500.0,
+          7125.0,
+          6583.0,
+          5167.0,
+          6375.0,
+          6708.0,
+          7208.0,
+          6417.0,
+          7292.0,
+          4958.0,
+          5666.0,
+          4833.0,
+          7083.0,
+          7250.0,
+          5500.0,
+          5250.0,
+          6666.0,
+          5375.0,
+          6083.0,
+          5916.0,
+          6333.0,
+          5750.0,
+          5334.0,
+          5709.0,
+          4834.0,
+          6667.0,
+          6541.0,
+          4958.0,
+          6125.0,
+          6458.0,
+          6958.0,
+          6000.0,
+          7209.0,
+          4709.0,
+          5584.0
+        ],
+        "sample_count": 48
+      },
+      "query_seed": 15111065706836454697,
+      "query_sha256": "65fd52aecd9f4ead8b736ae99c4a7c5b97ca0cc0aa06491ffdde6070558b2edd",
+      "resources": {
+        "cpu_scope": "query loops including timer and loop overhead",
+        "process_max_rss_bytes": 2916352,
+        "raw_samples": [
+          {
+            "process_max_rss_bytes": 2916352,
+            "system_cpu_ns": 2000,
+            "user_cpu_ns": 303000
+          }
+        ],
+        "rss_scope": "process lifetime high-water mark including setup and earlier scenarios",
+        "system_cpu_ns": 2000,
+        "user_cpu_ns": 303000
+      },
+      "scenario": "search",
+      "timing": {
+        "max_sample_ns": 157125.0,
+        "mean_ns_per_operation": 6284.729166666667,
+        "min_sample_ns": 144542.0,
+        "operations_per_sample": 24,
+        "operations_per_timed_second": 159115.84628083283,
+        "p50_amortized_ns_per_operation": 6022.583333333333,
+        "p50_sample_ns": 144542.0,
+        "p95_sample_ns": 157125.0,
+        "p99_sample_ns": 157125.0,
+        "raw_sample_ns": [
+          157125.0,
+          144542.0
+        ],
+        "sample_count": 2
+      },
+      "warmup_queries": 24
+    }
+  ],
+  "schema_version": 2
+}
