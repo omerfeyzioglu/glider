@@ -50,8 +50,15 @@ include centroid and vector distance counts. The exact `search` API is unchanged
 `search_ivf_filtered` applies the same metadata predicate to probed candidates
 before exact scoring. Full probing equals filtered exact search; partial probing
 may return fewer than k filtered matches. It counts only scored matching vectors.
+`search_ivf_filtered_adaptive(query, k, min_probes, filter)` scans at least the
+nearest `min_probes` partitions, then expands in center-distance order until it
+has k filtered matches or has scanned every partition. It returns `min(k, matches)`
+results; if fewer than k matches exist, full probing makes the result exact.
+Stopping after k candidates remains approximate and has no recall guarantee.
+Results also report the number of partitions actually probed. Expansion scores
+each center once and does no additional storage I/O.
 The index groups IDs by vector only; metadata is read from the acknowledged map.
-There is no metadata index or adaptive probe selection.
+There is no metadata index or automatic exact-versus-IVF planner.
 
 Every successful put/delete invalidates the index; queries then return an explicit
 error until rebuilt. Failed publication leaves both reads and the index at the
@@ -356,7 +363,7 @@ also erase the only remaining state without a detectable gap. Detecting such ext
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-Persisted ANN indexes, metadata indexes, adaptive filter-aware ANN probing,
+Persisted ANN indexes, metadata indexes, automatic exact-versus-IVF planning,
 sharding, replication, distributed
 consensus, multi-node execution, quantization, networking, SQL compatibility,
 authentication/authorization, production hardening, and GPU execution are outside

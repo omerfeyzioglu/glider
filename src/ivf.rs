@@ -13,6 +13,8 @@ pub struct IvfSearch {
     pub neighbors: Vec<Neighbor>,
     pub centroid_distances: usize,
     pub vector_distances: usize,
+    /// Number of partition posting lists scanned; zero for k=0 or an empty index.
+    pub partitions_probed: usize,
 }
 
 pub(crate) struct Index {
@@ -123,6 +125,31 @@ impl<S: ObjectStore> Database<S> {
         probes: usize,
         filter: &[(&str, &str)],
     ) -> Result<IvfSearch> {
+        self.search_ivf_filtered_impl(query, k, probes, filter, false)
+    }
+
+    /// Probe at least `min_probes` nearest partitions, then continue until k
+    /// filtered matches are found or every partition has been scanned. This
+    /// avoids short result sets when at least k matches exist, but remains ANN:
+    /// stopping early does not guarantee the exact nearest k. Full probing does.
+    pub fn search_ivf_filtered_adaptive(
+        &self,
+        query: &[f32],
+        k: usize,
+        min_probes: usize,
+        filter: &[(&str, &str)],
+    ) -> Result<IvfSearch> {
+        self.search_ivf_filtered_impl(query, k, min_probes, filter, true)
+    }
+
+    fn search_ivf_filtered_impl(
+        &self,
+        query: &[f32],
+        k: usize,
+        probes: usize,
+        filter: &[(&str, &str)],
+        fill_k: bool,
+    ) -> Result<IvfSearch> {
         self.config.vector(query)?;
         if probes == 0 {
             return Err(Error::Invalid("IVF probes must be positive".into()));
@@ -134,6 +161,7 @@ impl<S: ObjectStore> Database<S> {
             neighbors: Vec::new(),
             centroid_distances: 0,
             vector_distances: 0,
+            partitions_probed: 0,
         };
         if k == 0 || index.centers.is_empty() {
             return Ok(output);
@@ -146,7 +174,11 @@ impl<S: ObjectStore> Database<S> {
             .collect();
         output.centroid_distances = ranked.len();
         ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-        for (partition, _) in ranked.into_iter().take(probes) {
+        for (partition, _) in ranked {
+            if output.partitions_probed >= probes && (!fill_k || output.neighbors.len() >= k) {
+                break;
+            }
+            output.partitions_probed += 1;
             for id in &index.postings[partition] {
                 let document = &self.documents[id];
                 if !matches_filter(&document.metadata, filter) {
