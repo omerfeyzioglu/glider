@@ -60,8 +60,8 @@ each center once and does no additional storage I/O.
 The index groups IDs by vector only; metadata is read from the acknowledged map.
 There is no metadata index or automatic exact-versus-IVF planner.
 
-Every successful put/delete invalidates the index; queries then return an explicit
-error until rebuilt. Failed publication leaves both reads and the index at the
+Every successful put/delete or batch invalidates the index; queries then return
+an explicit error until rebuilt. Failed publication leaves both reads and the index at the
 last acknowledged state, including on a poisoned handle. Recovery starts without
 an index. Checkpoint/compaction preserve it because they do not change live state.
 Building and querying the index perform no storage I/O, change no persisted format
