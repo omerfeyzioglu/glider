@@ -17,6 +17,7 @@
 //! # Ok::<(), glider::Error>(())
 //! ```
 pub mod ivf;
+pub mod ownership;
 pub mod store;
 pub mod streaming;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,8 @@ pub enum Error {
     Corrupt(String),
     #[error("object already exists: {0}")]
     Exists(String),
+    #[error("storage namespace already has an owner: {0}")]
+    Busy(String),
     #[error("write outcome uncertain; reopen storage and the database before writing again")]
     RecoveryRequired,
 }
@@ -618,6 +621,9 @@ impl<S: ObjectStore> Database<S> {
             db.sequence = next;
         }
         Ok(db)
+    }
+    pub(crate) fn into_store(self) -> S {
+        self.store
     }
     fn load_snapshot(&mut self, object: &str, sequence: u64) -> Result<()> {
         let bytes = self
