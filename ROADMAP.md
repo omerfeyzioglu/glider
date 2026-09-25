@@ -107,7 +107,7 @@ Done when:
 ## M7 — Filtering and query execution
 
 Status: in progress (durable string metadata and exact/IVF equality filtering;
-filter-aware planning and measured ANN trade-offs remain)
+reproducible filtered ANN quality evaluation; filter-aware planning remains)
 
 Goal:
 Support metadata filtering without silently destroying search correctness.

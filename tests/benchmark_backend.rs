@@ -271,3 +271,25 @@ fn ivf_options_are_explicit_and_preserve_defaults() {
         assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
     }
 }
+
+#[test]
+fn filtered_search_workload_requires_explicit_positive_modulus() {
+    let default = Options::parse_from(Vec::<String>::new()).unwrap().unwrap();
+    assert!(serde_json::to_value(default)
+        .unwrap()
+        .get("filter_every")
+        .is_none());
+    let filtered =
+        Options::parse_from(["--scenario", "search", "--filter-every", "8"].map(String::from))
+            .unwrap()
+            .unwrap();
+    assert_eq!(serde_json::to_value(filtered).unwrap()["filter_every"], 8);
+    for args in [
+        vec!["--filter-every", "8"],
+        vec!["--scenario", "recovery", "--filter-every", "8"],
+        vec!["--scenario", "search", "--filter-every", "0"],
+        vec!["--scenario", "search", "--filter-every", "-1"],
+    ] {
+        assert!(Options::parse_from(args.into_iter().map(String::from)).is_err());
+    }
+}
