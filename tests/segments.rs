@@ -155,7 +155,7 @@ fn checkpointed_store() -> Memory {
 #[test]
 fn invalid_latest_segment_is_not_hidden_by_fallback_to_an_older_snapshot_or_log() {
     let invalid = [
-        json!({"version":2,"sequence":2,"config":config(),"documents":[]}),
+        json!({"version":3,"sequence":2,"config":config(),"documents":[]}),
         json!({"version":1,"sequence":1,"config":config(),"documents":[]}),
         json!({"version":1,"sequence":2,"config":{"dimensions":1,"metric":"manhattan"},"documents":[]}),
         json!({"version":1,"sequence":2,"config":config(),"documents":[[1,[1.,2.]],[1,[3.,4.]]]}),

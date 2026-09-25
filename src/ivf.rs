@@ -1,5 +1,5 @@
 //! Rebuildable IVF-Flat: full-precision vectors, deterministic partition training.
-use crate::{store::ObjectStore, Database, Error, Metric, Neighbor, Result};
+use crate::{matches_filter, store::ObjectStore, Database, Error, Metric, Neighbor, Result};
 
 #[derive(Debug, Clone, Copy)]
 pub struct IvfConfig {
@@ -50,11 +50,14 @@ impl<S: ObjectStore> Database<S> {
             let mut nearest = vec![f64::INFINITY; points.len()];
             let mut used = vec![false; points.len()];
             for _ in 0..count {
-                centers.push(points[selected].1.clone());
+                centers.push(points[selected].1.vector.clone());
                 used[selected] = true;
                 for (i, (_, point)) in points.iter().enumerate() {
-                    nearest[i] = nearest[i]
-                        .min(self.config.metric.score(point, &centers[centers.len() - 1]));
+                    nearest[i] = nearest[i].min(
+                        self.config
+                            .metric
+                            .score(&point.vector, &centers[centers.len() - 1]),
+                    );
                 }
                 selected = (0..points.len())
                     .filter(|&i| !used[i])
@@ -68,7 +71,7 @@ impl<S: ObjectStore> Database<S> {
                 group.clear();
             }
             for (i, (_, point)) in points.iter().enumerate() {
-                groups[closest(self.config.metric, point, &centers)].push(i);
+                groups[closest(self.config.metric, &point.vector, &centers)].push(i);
             }
             for (center, members) in centers.iter_mut().zip(&groups) {
                 // Empty partitions keep their center. No division by zero or lost rows.
@@ -80,13 +83,13 @@ impl<S: ObjectStore> Database<S> {
                         Metric::SquaredEuclidean => {
                             (members
                                 .iter()
-                                .map(|&i| f64::from(points[i].1[d]))
+                                .map(|&i| f64::from(points[i].1.vector[d]))
                                 .sum::<f64>()
                                 / members.len() as f64) as f32
                         }
                         Metric::Manhattan => {
                             let mut values: Vec<_> =
-                                members.iter().map(|&i| points[i].1[d]).collect();
+                                members.iter().map(|&i| points[i].1.vector[d]).collect();
                             let middle = values.len() / 2;
                             *values.select_nth_unstable_by(middle, f32::total_cmp).1
                         }
@@ -97,7 +100,7 @@ impl<S: ObjectStore> Database<S> {
         let mut postings = vec![Vec::new(); count];
         // Assignment must use the final updated centers, not the previous iteration.
         for (&id, point) in points {
-            postings[closest(self.config.metric, point, &centers)].push(id);
+            postings[closest(self.config.metric, &point.vector, &centers)].push(id);
         }
         self.ivf = Some(Index { centers, postings });
         Ok(())
@@ -107,6 +110,19 @@ impl<S: ObjectStore> Database<S> {
     /// Probing all partitions matches exact search, including distance/ID ties.
     /// Zero probes and a missing/invalidated index are explicit input errors.
     pub fn search_ivf(&self, query: &[f32], k: usize, probes: usize) -> Result<IvfSearch> {
+        self.search_ivf_filtered(query, k, probes, &[])
+    }
+
+    /// Search probed partitions among documents matching every metadata pair.
+    /// Full probing equals filtered exact search. Partial probing can return fewer
+    /// than k matches; vector_distances counts only scored matching documents.
+    pub fn search_ivf_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        probes: usize,
+        filter: &[(&str, &str)],
+    ) -> Result<IvfSearch> {
         self.config.vector(query)?;
         if probes == 0 {
             return Err(Error::Invalid("IVF probes must be positive".into()));
@@ -132,9 +148,13 @@ impl<S: ObjectStore> Database<S> {
         ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         for (partition, _) in ranked.into_iter().take(probes) {
             for id in &index.postings[partition] {
+                let document = &self.documents[id];
+                if !matches_filter(&document.metadata, filter) {
+                    continue;
+                }
                 output.neighbors.push(Neighbor {
                     id: *id,
-                    distance: self.config.metric.score(query, &self.documents[id]),
+                    distance: self.config.metric.score(query, &document.vector),
                 });
                 output.vector_distances += 1;
             }

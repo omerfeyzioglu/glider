@@ -193,7 +193,7 @@ fn only_valid_compaction_roots_allow_gaps_and_tail_gaps_still_fail() {
             "bad-version" => {
                 let mut value: serde_json::Value =
                     serde_json::from_slice(&s.objects[&root]).unwrap();
-                value["version"] = serde_json::json!(2);
+                value["version"] = serde_json::json!(3);
                 s.objects.insert(root, serde_json::to_vec(&value).unwrap());
             }
             "tail-gap" => {

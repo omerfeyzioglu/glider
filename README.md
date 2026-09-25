@@ -173,3 +173,23 @@ for training and lifecycle semantics.
 
 Run the short comparison with `python3 tools/ann_benchmark.py --output target/ann`.
 See [BENCHMARKS.md](BENCHMARKS.md) and [the latest ANN comparison](benchmarks/ANN.md).
+
+## Metadata equality filtering
+
+Attach a complete string-to-string metadata map to each document. A normal
+`put` replaces any previous metadata with an empty map. Filter pairs are combined
+with AND; a missing key does not match. Empty filters behave like ordinary search.
+
+```rust,ignore
+use glider::ivf::IvfConfig;
+use std::collections::BTreeMap;
+let metadata = BTreeMap::from([("team".to_string(), "red".to_string())]);
+db.put_with_metadata(42, vec![1.0, 2.0], metadata)?;
+let exact = db.search_filtered(&[1.0, 2.0], 10, &[("team", "red")])?;
+db.build_ivf(IvfConfig { partitions: 16, iterations: 8, seed: 42 })?;
+let approximate = db.search_ivf_filtered(&[1.0, 2.0], 10, 4, &[("team", "red")])?;
+```
+
+Full IVF probing matches filtered exact search. Partial probing can return fewer
+than k matches. Metadata and vectors share the mutation and snapshot durability
+boundary; existing version 1 databases open with empty metadata.

@@ -11,7 +11,7 @@ Architecture evolves from requirements and measurements, not anticipated scale.
 The Rust library implements this path:
 
 ```text
-Database API (put / get / delete / exact search)
+Database API (put / get / delete / exact and filtered search)
     -> in-memory document map + immutable checkpoints + mutation log / recovery
     -> ObjectStore abstraction
     -> local development backend or S3-compatible backend
@@ -26,9 +26,13 @@ durable log. The in-memory map is derived. Reads observe that map, and successfu
 writes become visible after durable storage.
 
 Document IDs are u64. Vectors have one positive, persisted dimension and finite
-f32 components. The persisted metric enum supports squared Euclidean and Manhattan
+f32 components. Each live document also has a map of UTF-8 string keys to string
+values. The persisted metric enum supports squared Euclidean and Manhattan
 distance, accumulated in f64. Exact search scans all live documents, sorts by
-ascending distance then ID, and returns at most k results.
+ascending distance then ID, and returns at most k results. Filtered exact search
+requires every specified key/value equality to hold; missing keys do not match.
+An empty filter includes every document. A put replaces both the vector and the
+complete metadata map; a delete removes both.
 
 ## Derived IVF-Flat candidate index
 
@@ -43,6 +47,11 @@ deterministic; partitions are capped at the live row count.
 and orders candidates by exact distance then ID. It can miss true neighbors and
 return fewer than k results; probing all partitions equals exact search. Results
 include centroid and vector distance counts. The exact `search` API is unchanged.
+`search_ivf_filtered` applies the same metadata predicate to probed candidates
+before exact scoring. Full probing equals filtered exact search; partial probing
+may return fewer than k filtered matches. It counts only scored matching vectors.
+The index groups IDs by vector only; metadata is read from the acknowledged map.
+There is no metadata index or adaptive probe selection.
 
 Every successful put/delete invalidates the index; queries then return an explicit
 error until rebuilt. Failed publication leaves both reads and the index at the
@@ -58,7 +67,7 @@ workloads demonstrate that rebuilding is too costly. This prototype rebuilds
 synchronously in O(iterations × rows × partitions × dimensions) assignment work;
 Manhattan median updates add selection work. Training uses O(rows + partitions ×
 dimensions) auxiliary state. It does not provide online index maintenance,
-persisted ANN partitions, filtering, or a guaranteed recall/latency target.
+persisted ANN partitions, or a guaranteed recall/latency target.
 
 ## Future / target architecture
 
@@ -156,8 +165,11 @@ complete-object publication.
 
 `metadata` is the first durable object: UTF-8 JSON containing format version 1
 and the configuration. Each mutation is one immutable UTF-8 JSON object containing
-format version 1, its sequence, and a put or delete operation. Its key is
-`mutation-` followed by a contiguous 20-digit decimal sequence starting at 1.
+its format version, sequence, and a put or delete operation. Version 1 puts contain
+an ID and vector; version 2 puts also require a string-to-string `metadata` map.
+New writes use version 2; recovery accepts both versions and treats version 1
+metadata as empty. The mutation key is `mutation-` followed by a contiguous
+20-digit decimal sequence starting at 1.
 Schema changes require explicit format-version handling.
 
 Immutable numbered objects avoid append operations unavailable in object stores.
@@ -184,10 +196,13 @@ internal sequence gaps, and mutation objects without metadata fail recovery.
 
 `Database::checkpoint()` publishes the complete live state at the current mutation
 sequence as one immutable `segment-` object with a 20-digit sequence suffix.
-Its version-1 JSON contains version, sequence, configuration and a strictly
-ID-sorted array of `(id, vector)` entries. The existing backend envelope protects
-its bytes. Deletes are represented by absence; the sequence boundary prevents
-older puts from resurrecting deleted IDs. An empty sequence-zero checkpoint is valid.
+Version 1 JSON contains version, sequence, configuration and a strictly ID-sorted
+array of `(id, vector)` entries. Version 2 contains `(id, {vector, metadata})`
+entries, with metadata a required string-to-string map. New snapshots use version
+2, and recovery accepts version 1 snapshots with empty metadata. The existing
+backend envelope protects its bytes. Deletes are represented by absence; the
+sequence boundary prevents older puts from resurrecting deleted IDs. An empty
+sequence-zero checkpoint is valid.
 
 A complete single-object snapshot uses native object publication. A separate
 manifest or mutable head would add another uncertain publication boundary without
@@ -221,7 +236,7 @@ an unwitnessed tail.
 ## Compaction (M4)
 
 `Database::compact()` publishes the complete current live state as
-`compacted-` plus its 20-digit mutation sequence, using the same version-1 snapshot
+`compacted-` plus its 20-digit mutation sequence, using the same versioned snapshot
 payload as an ordinary segment. Only this distinct snapshot kind authorizes
 reclamation. After durable publication, compaction lists and validates the cleanup
 plan, then removes covered mutations, covered ordinary segments and older
@@ -341,7 +356,8 @@ also erase the only remaining state without a detectable gap. Detecting such ext
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-Persisted ANN indexes, filtering, sharding, replication, distributed
+Persisted ANN indexes, metadata indexes, adaptive filter-aware ANN probing,
+sharding, replication, distributed
 consensus, multi-node execution, quantization, networking, SQL compatibility,
 authentication/authorization, production hardening, and GPU execution are outside
 the current implementation. These are not permanent restrictions; additions

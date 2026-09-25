@@ -98,11 +98,35 @@ struct Record {
     sequence: u64,
     mutation: Mutation,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordV1 {
+    version: u32,
+    sequence: u64,
+    mutation: MutationV1,
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum MutationV1 {
+    Put { id: u64, vector: Vec<f32> },
+    Delete { id: u64 },
+}
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Mutation {
-    Put { id: u64, vector: Vec<f32> },
-    Delete { id: u64 },
+    Put {
+        id: u64,
+        vector: Vec<f32>,
+        #[serde(deserialize_with = "deserialize_metadata")]
+        metadata: BTreeMap<String, String>,
+    },
+    Delete {
+        id: u64,
+    },
+}
+#[derive(Deserialize)]
+struct Version {
+    version: u32,
 }
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|e| Error::Corrupt(e.to_string()))
@@ -117,7 +141,52 @@ struct Segment {
     sequence: u64,
     config: Config,
     // A sorted array, not a JSON map: duplicate IDs must be rejected on decode.
+    documents: Vec<(u64, Document)>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SegmentV1 {
+    version: u32,
+    sequence: u64,
+    config: Config,
     documents: Vec<(u64, Vec<f32>)>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Document {
+    vector: Vec<f32>,
+    #[serde(deserialize_with = "deserialize_metadata")]
+    metadata: BTreeMap<String, String>,
+}
+
+fn deserialize_metadata<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueMetadata;
+    impl<'de> serde::de::Visitor<'de> for UniqueMetadata {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string-to-string metadata map with unique keys")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut metadata = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if metadata.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate metadata key"));
+                }
+            }
+            Ok(metadata)
+        }
+    }
+    deserializer.deserialize_map(UniqueMetadata)
 }
 fn segment_key(sequence: u64) -> String {
     format!("segment-{sequence:020}")
@@ -143,7 +212,7 @@ fn key(sequence: u64) -> String {
 pub struct Database<S> {
     store: S,
     config: Config,
-    documents: BTreeMap<u64, Vec<f32>>,
+    documents: BTreeMap<u64, Document>,
     sequence: u64,
     poisoned: bool,
     checkpoint_sequence: Option<u64>,
@@ -260,11 +329,32 @@ impl<S: ObjectStore> Database<S> {
                 .store
                 .get(&object)?
                 .ok_or_else(|| Error::Corrupt(format!("listed object missing: {object}")))?;
-            let record: Record = decode(&bytes)?;
-            if record.version != 1 || record.sequence != next {
-                return Err(Error::Corrupt(format!(
-                    "invalid record version or sequence: {object}"
-                )));
+            let record = match decode::<Version>(&bytes)?.version {
+                1 => {
+                    let old: RecordV1 = decode(&bytes)?;
+                    let mutation = match old.mutation {
+                        MutationV1::Put { id, vector } => Mutation::Put {
+                            id,
+                            vector,
+                            metadata: BTreeMap::new(),
+                        },
+                        MutationV1::Delete { id } => Mutation::Delete { id },
+                    };
+                    Record {
+                        version: old.version,
+                        sequence: old.sequence,
+                        mutation,
+                    }
+                }
+                2 => decode::<Record>(&bytes)?,
+                _ => {
+                    return Err(Error::Corrupt(format!(
+                        "unsupported record version: {object}"
+                    )))
+                }
+            };
+            if record.sequence != next {
+                return Err(Error::Corrupt(format!("invalid record sequence: {object}")));
             }
             if let Mutation::Put { vector, .. } = &record.mutation {
                 config
@@ -281,25 +371,49 @@ impl<S: ObjectStore> Database<S> {
             .store
             .get(object)?
             .ok_or_else(|| Error::Corrupt(format!("listed snapshot missing: {object}")))?;
-        let segment: Segment = decode(&bytes)?;
-        if segment.version != 1 || segment.sequence != sequence || segment.config != self.config {
+        let segment = match decode::<Version>(&bytes)?.version {
+            1 => {
+                let old: SegmentV1 = decode(&bytes)?;
+                Segment {
+                    version: old.version,
+                    sequence: old.sequence,
+                    config: old.config,
+                    documents: old
+                        .documents
+                        .into_iter()
+                        .map(|(id, vector)| {
+                            (
+                                id,
+                                Document {
+                                    vector,
+                                    metadata: BTreeMap::new(),
+                                },
+                            )
+                        })
+                        .collect(),
+                }
+            }
+            2 => decode::<Segment>(&bytes)?,
+            _ => return Err(Error::Corrupt("unsupported snapshot version".into())),
+        };
+        if segment.sequence != sequence || segment.config != self.config {
             return Err(Error::Corrupt(
                 "invalid snapshot version, sequence or configuration".into(),
             ));
         }
         let mut documents = BTreeMap::new();
         let mut previous_id = None;
-        for (id, vector) in segment.documents {
+        for (id, document) in segment.documents {
             if previous_id.is_some_and(|previous| previous >= id) {
                 return Err(Error::Corrupt(
                     "snapshot IDs must be strictly increasing".into(),
                 ));
             }
             self.config
-                .vector(&vector)
+                .vector(&document.vector)
                 .map_err(|e| Error::Corrupt(e.to_string()))?;
             previous_id = Some(id);
-            documents.insert(id, vector);
+            documents.insert(id, document);
         }
         self.documents = documents;
         self.sequence = sequence;
@@ -307,13 +421,13 @@ impl<S: ObjectStore> Database<S> {
     }
     fn snapshot_bytes(&self) -> Result<Vec<u8>> {
         encode(&Segment {
-            version: 1,
+            version: 2,
             sequence: self.sequence,
             config: self.config,
             documents: self
                 .documents
                 .iter()
-                .map(|(&id, v)| (id, v.clone()))
+                .map(|(&id, document)| (id, document.clone()))
                 .collect(),
         })
     }
@@ -394,17 +508,46 @@ impl<S: ObjectStore> Database<S> {
         self.config
     }
     pub fn get(&self, id: u64) -> Option<&[f32]> {
-        self.documents.get(&id).map(Vec::as_slice)
+        self.documents
+            .get(&id)
+            .map(|document| document.vector.as_slice())
+    }
+    /// Return the acknowledged metadata for a live document.
+    pub fn get_metadata(&self, id: u64) -> Option<&BTreeMap<String, String>> {
+        self.documents.get(&id).map(|document| &document.metadata)
     }
     pub fn put(&mut self, id: u64, vector: Vec<f32>) -> Result<()> {
+        self.put_with_metadata(id, vector, BTreeMap::new())
+    }
+    /// Replace a document's vector and metadata in one durable mutation.
+    pub fn put_with_metadata(
+        &mut self,
+        id: u64,
+        vector: Vec<f32>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<()> {
         self.config.vector(&vector)?;
-        self.commit(Mutation::Put { id, vector })
+        self.commit(Mutation::Put {
+            id,
+            vector,
+            metadata,
+        })
     }
     /// Deleting an absent ID is an idempotent logical operation, still logged.
     pub fn delete(&mut self, id: u64) -> Result<()> {
         self.commit(Mutation::Delete { id })
     }
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<Neighbor>> {
+        self.search_filtered(query, k, &[])
+    }
+    /// Exact top-k among documents matching every metadata key/value pair.
+    /// Missing keys do not match. An empty filter includes every document.
+    pub fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+    ) -> Result<Vec<Neighbor>> {
         self.config.vector(query)?;
         if k == 0 {
             return Ok(Vec::new());
@@ -412,9 +555,10 @@ impl<S: ObjectStore> Database<S> {
         let mut results: Vec<_> = self
             .documents
             .iter()
-            .map(|(&id, vector)| Neighbor {
+            .filter(|(_, document)| matches_filter(&document.metadata, filter))
+            .map(|(&id, document)| Neighbor {
                 id,
-                distance: self.config.metric.score(query, vector),
+                distance: self.config.metric.score(query, &document.vector),
             })
             .collect();
         let order =
@@ -436,7 +580,7 @@ impl<S: ObjectStore> Database<S> {
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("mutation sequence exhausted".into()))?;
         let record = Record {
-            version: 1,
+            version: 2,
             sequence,
             mutation,
         };
@@ -452,12 +596,22 @@ impl<S: ObjectStore> Database<S> {
     fn apply(&mut self, mutation: Mutation) {
         self.ivf = None;
         match mutation {
-            Mutation::Put { id, vector } => {
-                self.documents.insert(id, vector);
+            Mutation::Put {
+                id,
+                vector,
+                metadata,
+            } => {
+                self.documents.insert(id, Document { vector, metadata });
             }
             Mutation::Delete { id } => {
                 self.documents.remove(&id);
             }
         }
     }
+}
+
+fn matches_filter(metadata: &BTreeMap<String, String>, filter: &[(&str, &str)]) -> bool {
+    filter
+        .iter()
+        .all(|&(key, value)| metadata.get(key).is_some_and(|found| found == value))
 }

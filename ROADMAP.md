@@ -91,6 +91,9 @@ Done when:
 
 ## M6 — Approximate nearest-neighbor index
 
+Status: complete (rebuildable IVF-Flat, exact-oracle recall comparison and
+archived synthetic measurements; no persisted index or recall target)
+
 Goal:
 Reduce vector-search cost while explicitly measuring quality loss.
 
@@ -102,6 +105,9 @@ Done when:
 - persistence and restart behavior are defined
 
 ## M7 — Filtering and query execution
+
+Status: in progress (durable string metadata and exact/IVF equality filtering;
+filter-aware planning and measured ANN trade-offs remain)
 
 Goal:
 Support metadata filtering without silently destroying search correctness.
