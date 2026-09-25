@@ -43,10 +43,12 @@ impl ObjectStore for Memory {
     }
 }
 
+type PendingPut = Rc<RefCell<Option<(String, Vec<u8>)>>>;
+
 struct TimedOutPut {
     inner: Memory,
     armed: Rc<Cell<bool>>,
-    pending: Rc<RefCell<Option<(String, Vec<u8>)>>>,
+    pending: PendingPut,
 }
 
 impl ObjectStore for TimedOutPut {
