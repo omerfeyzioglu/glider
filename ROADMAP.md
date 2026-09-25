@@ -45,8 +45,9 @@ Status: complete (explicit checkpoint segments, safe tail replay, LocalStore/Min
 failure tests and archived recovery measurements)
 
 Problem:
-One object per mutation causes object count and full-replay recovery cost to grow
-with mutation history.
+Individual writes create one object each; atomic batches reduce that cost for
+grouped writes, but object count and full-replay recovery still grow with the
+number of published write groups.
 
 Goal:
 Introduce immutable persistent state that reduces dependence on replaying the

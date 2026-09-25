@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Config, Database, Metric};
+use crate::{Config, Database, Metric, Mutation};
 use object_store::client::{HttpErrorKind, HttpResponseBody};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -250,6 +250,48 @@ fn minio_metadata_filtering_survives_compaction_and_restart() {
             .map(|n| n.id)
             .collect::<Vec<_>>(),
         vec![1]
+    );
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_batch_uses_one_put_and_recovers_all_operations() {
+    let namespace = "batched-mutations";
+    let store = minio(namespace);
+    let metrics = store.metrics();
+    let mut db = Database::open(store, config()).unwrap();
+    let before = metrics.snapshot();
+    db.apply_batch(vec![
+        Mutation::Put {
+            id: 1,
+            vector: vec![1., 0.],
+            metadata: BTreeMap::from([("team".into(), "red".into())]),
+        },
+        Mutation::Put {
+            id: 2,
+            vector: vec![0., 1.],
+            metadata: BTreeMap::from([("team".into(), "blue".into())]),
+        },
+        Mutation::Delete { id: 1 },
+        Mutation::Put {
+            id: 1,
+            vector: vec![0., 0.],
+            metadata: BTreeMap::from([("team".into(), "green".into())]),
+        },
+    ])
+    .unwrap();
+    let after = metrics.snapshot();
+    assert_eq!(after.put - before.put, 1);
+    assert_eq!(after.get - before.get, 0);
+    assert_eq!(after.list - before.list, 0);
+    assert_eq!(db.get(1), Some([0., 0.].as_slice()));
+    drop(db);
+    let db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.get(1), Some([0., 0.].as_slice()));
+    assert_eq!(db.get(2), Some([0., 1.].as_slice()));
+    assert_eq!(
+        db.get_metadata(1).unwrap().get("team").map(String::as_str),
+        Some("green")
     );
 }
 

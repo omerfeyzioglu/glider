@@ -130,6 +130,30 @@ no object requests. MinIO recovery measurements are archived in
 [benchmarks/SUMMARY.md](benchmarks/SUMMARY.md); a cloud-provider latency baseline
 has not been established.
 
+## Atomic batch writes
+
+Use a batch to publish several ordered operations with one object-store PUT:
+
+```rust,ignore
+use glider::Mutation;
+use std::collections::BTreeMap;
+db.apply_batch(vec![
+    Mutation::Put {
+        id: 1,
+        vector: vec![1.0, 2.0],
+        metadata: BTreeMap::from([("team".into(), "red".into())]),
+    },
+    Mutation::Delete { id: 2 },
+])?;
+```
+
+A successful call acknowledges every operation together. Operations on the same
+ID run in order. Empty batches and invalid vectors are rejected before writing.
+If publication fails or its result is uncertain, reopen before writing again;
+recovery finds either the complete batch or none of it. The caller chooses a
+batch size that fits one request and memory. Single `put` and `delete` calls keep
+their existing behavior and log format.
+
 ## Recovery checkpoints (M3)
 
 Call `db.checkpoint()?` to persist the current live state as one immutable segment.
