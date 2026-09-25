@@ -161,10 +161,19 @@ fn uncertain_writes_and_panics_keep_last_acknowledged_index_then_rebuild_on_reco
         store.fault.set(fault);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.put(2, vec![0., 0.])));
         assert_eq!(db.search_ivf(&[0., 0.], 10, 2).unwrap().neighbors, before);
+        assert_eq!(
+            db.search_ivf_filtered_adaptive(&[0., 0.], 10, 1, &[])
+                .unwrap()
+                .neighbors,
+            before
+        );
         assert!(matches!(db.delete(1), Err(Error::RecoveryRequired)));
         drop(db);
         let mut db = Database::open(store, config(Metric::SquaredEuclidean)).unwrap();
         assert!(db.search_ivf(&[0., 0.], 10, 2).is_err());
+        assert!(db
+            .search_ivf_filtered_adaptive(&[0., 0.], 10, 1, &[])
+            .is_err());
         db.build_ivf(options(2)).unwrap();
         assert_eq!(
             db.search_ivf(&[0., 0.], 10, 2).unwrap().neighbors,
