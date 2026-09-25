@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     ownership::{claims, clear_stale_claim, OwnedDatabase},
+    recovery::stage_isolated_namespace,
     streaming::StreamingDatabase,
     Config, Database, Metric, Mutation,
 };
@@ -34,6 +35,34 @@ fn minio_owner_claim_survives_drop_and_requires_explicit_cleanup() {
     assert_eq!(db.get(1), Some([1., 2.].as_slice()));
     db.close().unwrap();
     assert!(claims(&minio(namespace)).unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_isolated_staging_keeps_later_old_prefix_writes_out() {
+    let old = "takeover-source";
+    let new = "takeover-destination";
+    let mut db = OwnedDatabase::open(minio(old), config()).unwrap();
+    db.put(1, vec![1., 0.]).unwrap();
+    drop(db);
+    stage_isolated_namespace(&minio(old), minio(new), config()).unwrap();
+    let mut new_db = OwnedDatabase::open(minio(new), config()).unwrap();
+    assert_eq!(new_db.get(1), Some([1., 0.].as_slice()));
+
+    let mut old_store = minio(old);
+    let owner = claims(&old_store).unwrap();
+    clear_stale_claim(&mut old_store, &owner[0]).unwrap();
+    let mut old_db = OwnedDatabase::open(minio(old), config()).unwrap();
+    old_db.put(2, vec![2., 0.]).unwrap();
+    old_db.close().unwrap();
+    assert_eq!(new_db.get(2), None);
+    new_db.put(3, vec![3., 0.]).unwrap();
+    new_db.close().unwrap();
+    let db = OwnedDatabase::open(minio(new), config()).unwrap();
+    assert_eq!(db.get(1), Some([1., 0.].as_slice()));
+    assert_eq!(db.get(2), None);
+    assert_eq!(db.get(3), Some([3., 0.].as_slice()));
+    db.close().unwrap();
 }
 fn builder() -> AmazonS3Builder {
     AmazonS3Builder::new()
@@ -503,6 +532,8 @@ fn minio_replay_pagination_and_namespace_isolation() {
 enum Cut {
     Before,
     After,
+    TimeoutBefore,
+    TimeoutAfter,
     DeleteBefore,
     DeleteAfter,
 }
@@ -537,14 +568,31 @@ impl HttpService for FaultService {
                 None
             }
         };
-        if matches!(cut, Some(Cut::Before | Cut::DeleteBefore)) {
-            return Err(disconnected());
+        if matches!(
+            cut,
+            Some(Cut::Before | Cut::DeleteBefore | Cut::TimeoutBefore)
+        ) {
+            return Err(if matches!(cut, Some(Cut::TimeoutBefore)) {
+                HttpError::new(
+                    HttpErrorKind::Request,
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "injected timeout"),
+                )
+            } else {
+                disconnected()
+            });
         }
         let result = self.inner.execute(request).await?;
-        if matches!(cut, Some(Cut::After | Cut::DeleteAfter)) {
+        if matches!(cut, Some(Cut::After | Cut::DeleteAfter | Cut::TimeoutAfter)) {
             assert!(result.status().is_success());
             result.into_body().bytes().await?;
-            return Err(disconnected()); // server published; client never sees success
+            return Err(if matches!(cut, Some(Cut::TimeoutAfter)) {
+                HttpError::new(
+                    HttpErrorKind::Request,
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "injected timeout"),
+                )
+            } else {
+                disconnected() // server published; client never sees success
+            });
         }
         Ok(result)
     }
@@ -591,6 +639,46 @@ fn minio_uncertain_writes_and_initialization() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_batch_timeout_before_or_after_publication_is_atomic() {
+    for (suffix, cut, committed) in [
+        ("before", Cut::TimeoutBefore, false),
+        ("after", Cut::TimeoutAfter, true),
+    ] {
+        let namespace = format!("batch-timeout-{suffix}");
+        let fault = Fault::default();
+        let store = S3Store::with_connector(minio_builder(), &namespace, fault.clone()).unwrap();
+        let metrics = store.metrics();
+        let mut db = Database::open(store, config()).unwrap();
+        db.put(0, vec![0., 0.]).unwrap();
+        let before = metrics.snapshot();
+        *fault.0.lock().unwrap() = Some(cut);
+        assert!(db
+            .apply_batch(vec![
+                Mutation::Delete { id: 0 },
+                Mutation::Put {
+                    id: 1,
+                    vector: vec![1., 0.],
+                    metadata: Default::default(),
+                },
+            ])
+            .is_err());
+        assert_eq!(metrics.snapshot().put - before.put, 1);
+        assert_eq!(db.get(0), Some([0., 0.].as_slice()));
+        assert_eq!(db.get(1), None);
+        assert!(matches!(
+            db.put(2, vec![2., 0.]),
+            Err(Error::RecoveryRequired)
+        ));
+        drop(db);
+        let db = Database::open(minio(&namespace), config()).unwrap();
+        assert_eq!(db.get(0).is_none(), committed);
+        assert_eq!(db.get(1).is_some(), committed);
+        assert_eq!(db.search(&[0., 0.], 10).unwrap().len(), 1);
+    }
+}
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_immutability_and_corruption() {
@@ -632,6 +720,59 @@ fn minio_immutability_and_corruption() {
     )
     .unwrap();
     assert!(Database::open(store, config()).is_err());
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_rejects_selected_root_chunk_and_tail_damage() {
+    let namespace = "missing-selected-chunk";
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    for id in 0..8 {
+        db.put(id, vec![id as f32, 0.]).unwrap();
+    }
+    db.compact_chunked(240).unwrap();
+    drop(db);
+    let mut store = minio(namespace);
+    let chunk = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|key| key.starts_with("compactedchunk-"))
+        .unwrap();
+    store.remove(&chunk).unwrap();
+    assert!(matches!(
+        Database::open(minio(namespace), config()),
+        Err(Error::Corrupt(_))
+    ));
+
+    let namespace = "corrupt-selected-root";
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    db.put(1, vec![1., 2.]).unwrap();
+    db.checkpoint().unwrap();
+    drop(db);
+    let store = minio(namespace);
+    let path = store.path("segment-00000000000000000001").unwrap();
+    store
+        .run(store.remote.put(&path, b"broken".to_vec().into()))
+        .unwrap();
+    assert!(matches!(
+        Database::open(minio(namespace), config()),
+        Err(Error::Corrupt(_))
+    ));
+
+    let namespace = "missing-tail-middle";
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    for id in 0..3 {
+        db.put(id, vec![id as f32, 0.]).unwrap();
+    }
+    drop(db);
+    minio(namespace)
+        .remove("mutation-00000000000000000002")
+        .unwrap();
+    assert!(matches!(
+        Database::open(minio(namespace), config()),
+        Err(Error::Corrupt(_))
+    ));
 }
 #[test]
 #[ignore = "child process only"]

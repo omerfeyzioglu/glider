@@ -84,11 +84,14 @@ The backend requires strongly consistent GET/LIST and conditional PUT support.
 
 For a deployed single writer, use `ownership::OwnedDatabase::open` in place of
 `Database::open`, then call `close()` on graceful shutdown. A process exit leaves
-an owner claim; the next writer receives a busy error. After verifying the old
-process is stopped, inspect `ownership::claims(&store)` and pass the exact key to
-`ownership::clear_stale_claim(&mut store, key)`. An enrolled namespace rejects
-raw `Database::open`. Stop all legacy writers before first enrolling an existing
-namespace. See `DESIGN.md` for uncertain outcomes and limitations.
+an owner claim; the next writer receives a busy error. Inspect it with
+`ownership::claims(&store)`. Clear an exact stale key only after proving the old
+process is stopped and its outstanding requests have quiesced. An enrolled
+namespace rejects raw `Database::open`; stop all legacy writers before first
+enrolling an existing namespace. After a crash or uncertain S3 write, use a
+fresh prefix as described in [the recovery procedure](docs/RECOVERY.md); a
+timed-out old request may still arrive after process exit. See `DESIGN.md` for
+the full guarantees.
 
 ```rust,no_run
 use glider::{Config, Metric, ownership::OwnedDatabase, store::s3::{AmazonS3Builder, S3Store}};

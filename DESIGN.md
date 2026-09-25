@@ -286,15 +286,38 @@ may have removed the claim, so inspect on a new store before takeover. Unique
 claim keys are never reused, preventing a delayed DELETE from removing a later
 owner's claim. The immutable root is never removed by normal maintenance.
 
-After a crash, an operator must first prove the former process cannot write,
-then inspect and explicitly remove its exact stale claim key. There is no timed
-lease or automatic takeover. Existing namespaces can enroll only after all
-legacy writer processes are stopped: an already-open older binary cannot be
-fenced retroactively. Older binaries reject the new key kinds. The wrapper hides
-ownership keys from database recovery and compaction; raw
-`Database::open` rejects an enrolled namespace. An external deletion of an
-active claim violates the object-store contract and can permit another owner;
-backup and operator controls are required for arbitrary object loss.
+After a crash, an operator must first prove the former process cannot issue new
+requests. Its already-issued timed-out PUT may still finish later. Clearing the
+claim and reopening the same prefix then permits a stale in-memory view: a late
+mutation can become durable after the new owner's initial listing. Therefore an
+uncertain write, forced exit or crash uses a fresh, unadvertised destination
+prefix and `stage_isolated_namespace` for takeover unless the chosen service can
+prove every old request has quiesced. The old prefix remains quarantined. A
+graceful successful `close` permits same-prefix reopen. Claims may be inspected
+and explicitly cleared for a verified stopped process, but a claim alone does
+not fence its earlier in-flight requests. There is no timed lease or automatic
+takeover. Existing namespaces can enroll only after all legacy writer processes
+are stopped: an already-open older binary cannot be fenced retroactively. Older
+binaries reject the new key kinds. The wrapper hides ownership keys from
+database recovery and compaction; raw `Database::open` rejects an enrolled
+namespace. An external deletion of an active claim violates the object-store
+contract and can permit another owner; backup and operator controls are required
+for arbitrary object loss.
+
+`stage_isolated_namespace` freezes one strongly consistent source listing and
+copies its complete objects, except ownership control objects, to a fresh empty
+prefix. It creates `metadata` last. Before metadata, nonempty interrupted copies
+cannot open as a database; after metadata, the full selected set has been
+published. It then opens and validates the destination's selected roots, chunks
+and contiguous tail. A successful return acknowledges a validated staged copy,
+not a mutation in the old namespace. Errors or crashes leave an unpromoted
+destination that must not be reused; the operator repeats into another prefix.
+The new prefix is exposed to clients only after validation and an owned claim.
+Late old-prefix PUTs or DELETEs cannot change it because prefixes do not overlap.
+An unacknowledged old mutation may be included or excluded according to the
+frozen listing. This does not repair loss of an acknowledged source object and
+does not replace a backup. The exact operating procedure is in
+`docs/RECOVERY.md`.
 
 This chooses immutable claims over a mutable lease: lease expiry cannot safely
 fence a delayed writer with the current object-store operations. A process-only
