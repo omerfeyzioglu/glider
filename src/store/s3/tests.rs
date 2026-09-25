@@ -190,6 +190,54 @@ fn minio(namespace: &str) -> S3Store {
 
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_ivf_cache_reuses_one_immutable_object_after_restart() {
+    let namespace = "ivf-cache";
+    let options = crate::ivf::IvfConfig {
+        partitions: 3,
+        iterations: 4,
+        seed: 42,
+    };
+    let store = minio(namespace);
+    let metrics = store.metrics();
+    let mut db = Database::open(store, config()).unwrap();
+    for id in 0..12 {
+        db.put(id, vec![(id % 4) as f32, (id / 4) as f32]).unwrap();
+    }
+    db.checkpoint().unwrap();
+    let before = metrics.snapshot();
+    db.load_or_build_ivf(options).unwrap();
+    let after = metrics.snapshot();
+    assert_eq!(after.get - before.get, 1);
+    assert_eq!(after.put - before.put, 1);
+    assert_eq!(
+        db.search_ivf(&[1., 1.], 12, 3).unwrap().neighbors,
+        db.search(&[1., 1.], 12).unwrap()
+    );
+    drop(db);
+
+    let store = minio(namespace);
+    let metrics = store.metrics();
+    let mut db = Database::open(store, config()).unwrap();
+    let before = metrics.snapshot();
+    db.load_or_build_ivf(options).unwrap();
+    let after = metrics.snapshot();
+    assert_eq!(after.get - before.get, 1);
+    assert_eq!(after.put - before.put, 0);
+    assert_eq!(
+        db.search_ivf(&[1., 1.], 12, 3).unwrap().neighbors,
+        db.search(&[1., 1.], 12).unwrap()
+    );
+    db.put(12, vec![1., 1.]).unwrap();
+    db.compact().unwrap();
+    assert!(!minio(namespace)
+        .list()
+        .unwrap()
+        .iter()
+        .any(|k| k.starts_with("ivf-")));
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_metadata_filtering_survives_compaction_and_restart() {
     let namespace = "metadata-filtering";
     let store = minio(namespace);

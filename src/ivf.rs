@@ -1,7 +1,13 @@
 //! Rebuildable IVF-Flat: full-precision vectors, deterministic partition training.
-use crate::{matches_filter, store::ObjectStore, Database, Error, Metric, Neighbor, Result};
+use crate::{
+    matches_filter, store::ObjectStore, Config, Database, Error, Metric, Neighbor, Result,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IvfConfig {
     pub partitions: usize,
     pub iterations: usize,
@@ -17,9 +23,84 @@ pub struct IvfSearch {
     pub partitions_probed: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Index {
     centers: Vec<Vec<f32>>,
     postings: Vec<Vec<u64>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedIndex {
+    version: u32,
+    sequence: u64,
+    config: Config,
+    options: IvfConfig,
+    index: Index,
+}
+
+#[derive(Serialize)]
+struct PersistedIndexRef<'a> {
+    version: u32,
+    sequence: u64,
+    config: Config,
+    options: IvfConfig,
+    index: &'a Index,
+}
+
+fn cache_key(sequence: u64, config: Config, options: IvfConfig) -> Result<String> {
+    let identity =
+        serde_json::to_vec(&(1_u32, config, options)).map_err(|e| Error::Invalid(e.to_string()))?;
+    Ok(format!("ivf-{sequence:020}-{:x}", Sha256::digest(identity)))
+}
+
+pub(crate) fn cache_sequence(key: &str) -> Result<u64> {
+    let (number, digest) = key
+        .strip_prefix("ivf-")
+        .and_then(|suffix| suffix.split_once('-'))
+        .ok_or_else(|| Error::Corrupt(format!("invalid object key: {key}")))?;
+    let sequence = number
+        .parse::<u64>()
+        .map_err(|_| Error::Corrupt(format!("invalid object key: {key}")))?;
+    if number != format!("{sequence:020}")
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(Error::Corrupt(format!("invalid object key: {key}")));
+    }
+    Ok(sequence)
+}
+
+impl Index {
+    fn validate<S: ObjectStore>(&self, db: &Database<S>, options: IvfConfig) -> Result<()> {
+        let count = options.partitions.min(db.documents.len());
+        if self.centers.len() != count || self.postings.len() != count {
+            return Err(Error::Corrupt("invalid IVF partition count".into()));
+        }
+        for center in &self.centers {
+            db.config
+                .vector(center)
+                .map_err(|e| Error::Corrupt(e.to_string()))?;
+        }
+        let mut seen = BTreeSet::new();
+        for posting in &self.postings {
+            if posting.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(Error::Corrupt("IVF postings are not ordered".into()));
+            }
+            for id in posting {
+                if !db.documents.contains_key(id) || !seen.insert(*id) {
+                    return Err(Error::Corrupt("invalid IVF posting ID".into()));
+                }
+            }
+        }
+        if seen.len() != db.documents.len() {
+            return Err(Error::Corrupt("IVF postings omit documents".into()));
+        }
+        Ok(())
+    }
 }
 
 fn closest(metric: Metric, vector: &[f32], centers: &[Vec<f32>]) -> usize {
@@ -33,6 +114,48 @@ fn closest(metric: Metric, vector: &[f32], centers: &[Vec<f32>]) -> usize {
 }
 
 impl<S: ObjectStore> Database<S> {
+    /// Load a previously published index for this exact sequence and configuration,
+    /// or train and publish it as one immutable derived object. A successful call
+    /// makes the index searchable. A publication error leaves the trained index
+    /// readable on this handle but requires reopen before further durable writes.
+    pub fn load_or_build_ivf(&mut self, options: IvfConfig) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        if options.partitions == 0 || options.iterations == 0 {
+            return Err(Error::Invalid(
+                "IVF partitions and iterations must be positive".into(),
+            ));
+        }
+        let key = cache_key(self.sequence, self.config, options)?;
+        if let Some(bytes) = self.store.get(&key)? {
+            let saved: PersistedIndex = crate::decode(&bytes)?;
+            if saved.version != 1
+                || saved.sequence != self.sequence
+                || saved.config != self.config
+                || saved.options != options
+            {
+                return Err(Error::Corrupt("IVF cache identity mismatch".into()));
+            }
+            saved.index.validate(self, options)?;
+            self.ivf = Some(saved.index);
+            return Ok(());
+        }
+        self.build_ivf(options)?;
+        let index = self.ivf.as_ref().expect("build_ivf installed an index");
+        let bytes = crate::encode(&PersistedIndexRef {
+            version: 1,
+            sequence: self.sequence,
+            config: self.config,
+            options,
+            index,
+        })?;
+        self.poisoned = true;
+        self.store.create(&key, &bytes)?;
+        self.poisoned = false;
+        Ok(())
+    }
+
     /// Build from the acknowledged in-memory state. No storage I/O or durable change.
     /// Every successful put/delete invalidates this index; rebuild explicitly.
     /// Empty databases build an empty index. Partitions are capped at live rows.

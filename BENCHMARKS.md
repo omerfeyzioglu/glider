@@ -548,6 +548,24 @@ runtime and is excluded from query timings. The small quick workload is for
 seeing trade-offs; use the harness flags for larger datasets before choosing
 production parameters. Latest compact results: [ANN.md](benchmarks/ANN.md).
 
+## Persisted IVF cache load (local, targeted)
+
+The baseline retrains IVF after each reopen. Hypothesis: a versioned derived
+object keyed by mutation sequence and options removes repeat training work.
+`cargo run --release --locked --example ivf_cache_benchmark` creates 512
+deterministic 64-dimensional vectors (LCG seed 42), compacts them, then measures
+five warm `build_ivf` calls and five warm `load_or_build_ivf` cache hits after
+separate opens. Both timers exclude `Database::open`; full-probe answers are
+checked against exact search. Config: squared Euclidean, 16 partitions, eight
+iterations, IVF seed 42, LocalStore on a temporary directory.
+
+On 2026-09-25, Apple M4, macOS arm64, rustc 1.98.1, release build: sorted training
+samples were 2336, 2434, 2786, 3267, 4780 µs (median 2786 µs); sorted cache
+load samples were 111, 121, 126, 133, 152 µs (median 126 µs). This measures the
+index step on a warm local filesystem; it does not measure total restart time,
+remote object-store latency, or production-scale ANN quality. MinIO integration
+separately verifies one GET and no PUT on a cache hit.
+
 ## Filtered search quality (M7)
 
 ```sh

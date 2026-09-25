@@ -93,7 +93,7 @@ Done when:
 ## M6 — Approximate nearest-neighbor index
 
 Status: complete (rebuildable IVF-Flat, exact-oracle recall comparison and
-archived synthetic measurements; no persisted index or recall target)
+archived synthetic measurements; optional persisted derived cache, no recall target)
 
 Goal:
 Reduce vector-search cost while explicitly measuring quality loss.

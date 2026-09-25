@@ -61,11 +61,37 @@ The index groups IDs by vector only; metadata is read from the acknowledged map.
 There is no metadata index or automatic exact-versus-IVF planner.
 
 Every successful put/delete or batch invalidates the index; queries then return
-an explicit error until rebuilt. Failed publication leaves both reads and the index at the
-last acknowledged state, including on a poisoned handle. Recovery starts without
-an index. Checkpoint/compaction preserve it because they do not change live state.
-Building and querying the index perform no storage I/O, change no persisted format
-and introduce no acknowledgement or recovery boundary.
+an explicit error until rebuilt. Failed mutation publication leaves reads and the
+index at the last acknowledged state, including on a poisoned handle. Recovery
+starts without an in-memory index. Checkpoint/compaction preserve it because they
+do not change live state. `build_ivf` and IVF queries perform no storage I/O.
+
+`load_or_build_ivf(options)` explicitly reads a derived cache for the recovered
+mutation sequence and requested dimensions, metric, partitions, iterations and
+seed. On a hit, it validates the version, identity, finite centers and strictly
+ordered postings containing every live ID exactly once, then installs the index.
+On a miss, it trains the same index as `build_ivf` and publishes one immutable
+`ivf-{sequence:020}-{sha256(identity)}` object. Identity is the JSON encoding of
+`(cache version 1, database configuration, IVF options)`; the object is version 1
+JSON containing that identity, the sequence, centers and ID posting arrays. Store
+envelopes protect complete bytes. A structurally invalid cache returns an error;
+exact search and explicit in-memory rebuilding remain available. Database
+recovery only validates cache key syntax and its sequence boundary; malformed
+cache JSON cannot prevent recovery of authoritative vectors. Backend envelope
+corruption still fails storage recovery. No index is loaded without an explicit
+options choice.
+
+Successful cache publication acknowledges only the derived index, not a mutation.
+The authoritative document map and mutation sequence never change. A publication
+error or panic leaves the trained index readable on that handle but poisons writes
+and maintenance until reopen, since the cache object may have committed. Recovery
+can load a complete published cache or rebuild if publication did not complete.
+Later mutations make older caches stale; compaction removes caches from older
+sequences and retains caches at its current sequence. Distinct option sets can
+coexist. An immutable option-keyed object avoids a mutable index head and keeps
+the exclusive-owner publication model. The cache saves retraining; recovery still
+loads authoritative documents into memory, and queries still use them for exact
+candidate scoring and filtering.
 
 IVF is the first partitioned baseline, chosen for a small implementation and a
 layout suitable for later object-storage evaluation. HNSW would instead add graph
@@ -74,7 +100,7 @@ workloads demonstrate that rebuilding is too costly. This prototype rebuilds
 synchronously in O(iterations × rows × partitions × dimensions) assignment work;
 Manhattan median updates add selection work. Training uses O(rows + partitions ×
 dimensions) auxiliary state. It does not provide online index maintenance,
-persisted ANN partitions, or a guaranteed recall/latency target.
+independently searchable persisted partitions, or a guaranteed recall/latency target.
 
 ## Future / target architecture
 
@@ -380,9 +406,9 @@ also erase the only remaining state without a detectable gap. Detecting such ext
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-Persisted ANN indexes, metadata indexes, automatic exact-versus-IVF planning,
-sharding, replication, distributed
-consensus, multi-node execution, quantization, networking, SQL compatibility,
+Independently searchable persisted ANN partitions, metadata indexes, automatic
+exact-versus-IVF planning, sharding, replication, distributed consensus,
+multi-node execution, quantization, networking, SQL compatibility,
 authentication/authorization, production hardening, and GPU execution are outside
 the current implementation. These are not permanent restrictions; additions
 require justified design decisions and must preserve the invariants above.
