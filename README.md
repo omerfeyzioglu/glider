@@ -191,9 +191,12 @@ println!("{:?}", result.neighbors);
 These parameters are examples, not recommended settings for every dataset.
 Probing all partitions matches exact search; fewer probes can miss neighbors and
 return fewer than k results. Every successful put/delete invalidates the index;
-rebuild before the next IVF query. Reopening also requires rebuilding. Indexes
-are not persisted and do not change write durability. See [DESIGN.md](DESIGN.md)
-for training and lifecycle semantics.
+rebuild before the next IVF query. To save retraining across restarts, call
+`db.load_or_build_ivf(options)?` instead of `build_ivf`: the first call publishes
+an immutable index object, and subsequent opens load it for the same data version
+and options. Reopening alone does not load an index. Cache publication errors
+require reopening before further durable writes; exact search remains available.
+See [DESIGN.md](DESIGN.md) for training, validation and lifecycle semantics.
 
 Run the short comparison with `python3 tools/ann_benchmark.py --output target/ann`.
 See [BENCHMARKS.md](BENCHMARKS.md) and [the latest ANN comparison](benchmarks/ANN.md).

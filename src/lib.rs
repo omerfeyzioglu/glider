@@ -275,6 +275,8 @@ impl<S: ObjectStore> Database<S> {
                 latest_compacted = Some(numbered_sequence(object, "compacted-")?);
             } else if object.starts_with("segment-") {
                 latest_segment = Some(numbered_sequence(object, "segment-")?);
+            } else if object.starts_with("ivf-") {
+                ivf::cache_sequence(object)?;
             } else {
                 let sequence = numbered_sequence(object, "mutation-")?;
                 if sequence == 0 {
@@ -295,6 +297,13 @@ impl<S: ObjectStore> Database<S> {
                 return Err(Error::Corrupt(format!("log gap: {object}")));
             }
             last_mutation = sequence;
+        }
+        for object in keys.iter().filter(|k| k.starts_with("ivf-")) {
+            if ivf::cache_sequence(object)? > last_mutation {
+                return Err(Error::Corrupt(format!(
+                    "IVF cache extends beyond retained history: {object}"
+                )));
+            }
         }
         if latest_segment.is_some_and(|s| s > last_mutation) {
             return Err(Error::Corrupt(
@@ -481,6 +490,18 @@ impl<S: ObjectStore> Database<S> {
         let mut obsolete = Vec::new();
         for object in keys {
             if object == "metadata" {
+                continue;
+            }
+            if object.starts_with("ivf-") {
+                let sequence = ivf::cache_sequence(&object)?;
+                if sequence > self.sequence {
+                    return Err(Error::Corrupt(format!(
+                        "unexpected object during compaction: {object}"
+                    )));
+                }
+                if sequence < self.sequence {
+                    obsolete.push(object);
+                }
                 continue;
             }
             let (prefix, inclusive) = if object.starts_with("compacted-") {
