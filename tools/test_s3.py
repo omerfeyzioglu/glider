@@ -65,6 +65,7 @@ def main():
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
+    run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
         run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
@@ -89,6 +90,9 @@ def main():
         env["GLIDER_S3_ENDPOINT"] = "http://127.0.0.1:" + port
         ready(env["GLIDER_S3_ENDPOINT"], name)
         run(*args, "store::s3::tests::server_restart_verify", "--", "--ignored", env=env)
+        env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="failure-matrix")
+        run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix",
+            "s3_process_crash_matrix", "--", "--ignored", "--nocapture", env=env)
         if output:
             from benchmark_smoke import validate
             env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="benchmark-smoke",

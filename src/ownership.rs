@@ -27,6 +27,10 @@ fn valid_claim_key(key: &str) -> bool {
     })
 }
 
+pub(crate) fn is_control_key(key: &str) -> bool {
+    key == ROOT || valid_claim_key(key)
+}
+
 fn validate_root<S: ObjectStore>(store: &S) -> Result<()> {
     let bytes = store
         .get(ROOT)?
@@ -148,7 +152,7 @@ impl<S: ObjectStore> ObjectStore for OwnedStore<S> {
             .inner
             .list()?
             .into_iter()
-            .filter(|key| key != ROOT && !valid_claim_key(key))
+            .filter(|key| !is_control_key(key))
             .collect())
     }
     fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {

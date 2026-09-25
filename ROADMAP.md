@@ -175,7 +175,15 @@ Done when:
 
 ## M9 — Harden ownership, failures and recovery
 
-Status: planned
+Status: complete for the M8 single-machine envelope.
+
+The ownership boundary is in PR #30. LocalStore and MinIO process-exit tests
+cover batch, chunk, manifest, derived-index and compaction-cleanup boundaries;
+MinIO tests also cover deterministic request timeouts and selected-object damage.
+The authoritative-root and uncertain-write procedure is in
+[docs/RECOVERY.md](docs/RECOVERY.md). Same-prefix takeover after a crash is
+unsafe without proof that old requests have quiesced, so M9a stages a fresh
+prefix. Arbitrary external loss still requires backup or a separate witness.
 
 Goal:
 Make the single-writer operating model and every uncertain publication safe to
@@ -200,6 +208,17 @@ Done when:
   accidental double ownership, without partial results or silent divergence.
 - A written recovery procedure identifies the authoritative root and the
   required action for uncertain writes and unrecoverable corruption.
+
+### M9a — Isolate late requests during takeover
+
+Status: complete for the M8 single-machine envelope.
+
+A timed-out S3 PUT can publish after the old process exits. The owner claim
+prevents a second live writer but cannot fence a request already in flight.
+The recovery path must stage a frozen validated state in a fresh prefix, publish
+metadata last, and switch clients only after validation and a new owner claim.
+Test the stale-view counterexample, late old-prefix publication, interrupted
+staging and restart on LocalStore and MinIO. Do not reuse a failed destination.
 
 ## M10 — Bound memory, recovery and write-side amplification
 

@@ -18,6 +18,7 @@
 //! ```
 pub mod ivf;
 pub mod ownership;
+pub mod recovery;
 pub mod store;
 pub mod streaming;
 use serde::{Deserialize, Serialize};
