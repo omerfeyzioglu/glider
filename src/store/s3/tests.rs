@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Config, Database, Metric, Mutation};
+use crate::{streaming::StreamingDatabase, Config, Database, Metric, Mutation};
 use object_store::client::{HttpErrorKind, HttpResponseBody};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -186,6 +186,61 @@ fn minio_builder() -> AmazonS3Builder {
 }
 fn minio(namespace: &str) -> S3Store {
     S3Store::open(minio_builder(), namespace).unwrap()
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_streaming_exact_search_reads_snapshot_chunks_and_tail() {
+    let namespace = "streaming-exact";
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    for id in 0..17 {
+        db.put_with_metadata(
+            id,
+            vec![(id % 5) as f32, (id / 5) as f32],
+            BTreeMap::from([("group".into(), (id % 2).to_string())]),
+        )
+        .unwrap();
+    }
+    db.compact_chunked(240).unwrap();
+    db.apply_batch(vec![
+        Mutation::Delete { id: 2 },
+        Mutation::Put {
+            id: 30,
+            vector: vec![0., 0.],
+            metadata: BTreeMap::from([("group".into(), "0".into())]),
+        },
+    ])
+    .unwrap();
+    let expected = db
+        .search_filtered(&[0., 0.], 18, &[("group", "0")])
+        .unwrap();
+    drop(db);
+
+    let chunks = minio(namespace)
+        .list()
+        .unwrap()
+        .iter()
+        .filter(|key| key.starts_with("compactedchunk-"))
+        .count();
+    assert!(chunks > 1);
+    let store = minio(namespace);
+    let metrics = store.metrics();
+    let reader = StreamingDatabase::open(store, config()).unwrap();
+    let before = metrics.snapshot();
+    assert_eq!(
+        reader
+            .search_filtered(&[0., 0.], 18, &[("group", "0")])
+            .unwrap(),
+        expected
+    );
+    let after = metrics.snapshot();
+    assert_eq!(after.get - before.get, chunks as u64);
+    assert_eq!(after.put - before.put, 0);
+    assert_eq!(
+        reader.get_with_metadata(30).unwrap().unwrap().vector,
+        vec![0., 0.]
+    );
+    assert_eq!(metrics.snapshot().get, after.get); // tail lookup stays in memory
 }
 
 #[test]

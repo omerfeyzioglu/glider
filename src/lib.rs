@@ -18,6 +18,7 @@
 //! ```
 pub mod ivf;
 pub mod store;
+pub mod streaming;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -295,6 +296,267 @@ fn key(sequence: u64) -> String {
     format!("mutation-{sequence:020}")
 }
 
+fn parse_chunked_manifest(bytes: &[u8], sequence: u64, config: Config) -> Result<SnapshotManifest> {
+    let manifest: SnapshotManifest = decode(bytes)?;
+    if manifest.version != 3
+        || manifest.sequence != sequence
+        || manifest.config != config
+        || manifest.max_chunk_bytes == 0
+    {
+        return Err(Error::Corrupt("invalid chunked snapshot identity".into()));
+    }
+    let mut previous_id = None;
+    for reference in &manifest.chunks {
+        if reference.rows == 0
+            || reference.first_id > reference.last_id
+            || previous_id.is_some_and(|previous| previous >= reference.first_id)
+        {
+            return Err(Error::Corrupt("invalid snapshot chunk range".into()));
+        }
+        previous_id = Some(reference.last_id);
+    }
+    Ok(manifest)
+}
+
+fn read_snapshot_chunk<S: ObjectStore>(
+    store: &S,
+    config: Config,
+    kind: &str,
+    manifest: &SnapshotManifest,
+    ordinal: usize,
+) -> Result<SnapshotChunk> {
+    let reference = &manifest.chunks[ordinal];
+    let key = chunk_key(kind, manifest.sequence, manifest.max_chunk_bytes, ordinal);
+    let bytes = store
+        .get(&key)?
+        .ok_or_else(|| Error::Corrupt(format!("snapshot chunk missing: {key}")))?;
+    if bytes.len() > manifest.max_chunk_bytes {
+        return Err(Error::Corrupt(format!("oversized snapshot chunk: {key}")));
+    }
+    if format!("{:x}", Sha256::digest(&bytes)) != reference.sha256 {
+        return Err(Error::Corrupt(format!(
+            "snapshot chunk digest mismatch: {key}"
+        )));
+    }
+    let chunk: SnapshotChunk = decode(&bytes)?;
+    if chunk.version != 1
+        || chunk.sequence != manifest.sequence
+        || chunk.config != config
+        || chunk.documents.len() != reference.rows
+        || chunk.documents.first().map(|entry| entry.0) != Some(reference.first_id)
+        || chunk.documents.last().map(|entry| entry.0) != Some(reference.last_id)
+    {
+        return Err(Error::Corrupt(format!("invalid snapshot chunk: {key}")));
+    }
+    let mut previous_id = None;
+    for (id, document) in &chunk.documents {
+        if previous_id.is_some_and(|previous| previous >= *id) {
+            return Err(Error::Corrupt(
+                "snapshot IDs must be strictly increasing".into(),
+            ));
+        }
+        config
+            .vector(&document.vector)
+            .map_err(|e| Error::Corrupt(e.to_string()))?;
+        previous_id = Some(*id);
+    }
+    Ok(chunk)
+}
+
+fn scan_snapshot<S: ObjectStore>(
+    store: &S,
+    config: Config,
+    kind: &str,
+    manifest: &SnapshotManifest,
+    mut visit: impl FnMut(u64, Document) -> Result<()>,
+) -> Result<()> {
+    for ordinal in 0..manifest.chunks.len() {
+        let chunk = read_snapshot_chunk(store, config, kind, manifest, ordinal)?;
+        for (id, document) in chunk.documents {
+            visit(id, document)?;
+        }
+    }
+    Ok(())
+}
+
+struct Catalog {
+    keys: Vec<String>,
+    latest_segment: Option<u64>,
+    latest_compacted: Option<u64>,
+    checkpoint_sequence: Option<u64>,
+    last_mutation: u64,
+}
+
+fn inspect_namespace<S: ObjectStore>(
+    store: &mut S,
+    config: Config,
+    initialize: bool,
+) -> Result<Catalog> {
+    config.validate()?;
+    let mut keys = store.list()?;
+    match store.get("metadata")? {
+        Some(bytes) => {
+            let metadata: Metadata = decode(&bytes)?;
+            if metadata.version != 1 {
+                return Err(Error::Corrupt("unsupported metadata version".into()));
+            }
+            metadata
+                .config
+                .validate()
+                .map_err(|e| Error::Corrupt(e.to_string()))?;
+            if metadata.config != config {
+                return Err(Error::Invalid(
+                    "configuration differs from stored metadata".into(),
+                ));
+            }
+            if keys.iter().filter(|k| *k == "metadata").count() != 1 {
+                return Err(Error::Corrupt(
+                    "metadata missing or duplicated in listing".into(),
+                ));
+            }
+        }
+        None => {
+            if !keys.is_empty() {
+                return Err(Error::Corrupt("objects exist without metadata".into()));
+            }
+            if !initialize {
+                return Err(Error::Invalid(
+                    "streaming reader requires an initialized namespace".into(),
+                ));
+            }
+            store.create("metadata", &encode(&Metadata { version: 1, config })?)?;
+        }
+    }
+    keys.retain(|k| k != "metadata");
+    keys.sort();
+    let mut latest_segment = None;
+    let mut latest_compacted = None;
+    let mut previous = None;
+    for object in &keys {
+        if previous == Some(object) {
+            return Err(Error::Corrupt(format!("duplicate listed key: {object}")));
+        }
+        previous = Some(object);
+        if object.starts_with("compacted-") {
+            latest_compacted = Some(numbered_sequence(object, "compacted-")?);
+        } else if object.starts_with("segment-") {
+            latest_segment = Some(numbered_sequence(object, "segment-")?);
+        } else if object.starts_with("compactedchunk-") {
+            chunk_sequence(object, "compacted")?;
+        } else if object.starts_with("segmentchunk-") {
+            chunk_sequence(object, "segment")?;
+        } else if object.starts_with("ivf-") {
+            ivf::cache_sequence(object)?;
+        } else {
+            let sequence = numbered_sequence(object, "mutation-")?;
+            if sequence == 0 {
+                return Err(Error::Corrupt("mutation sequence zero".into()));
+            }
+        }
+    }
+    let floor = latest_compacted.unwrap_or(0);
+    let mut last_mutation = floor;
+    for object in keys.iter().filter(|k| k.starts_with("mutation-")) {
+        let sequence = numbered_sequence(object, "mutation-")?;
+        if sequence <= floor {
+            continue;
+        }
+        if last_mutation.checked_add(1) != Some(sequence) {
+            return Err(Error::Corrupt(format!("log gap: {object}")));
+        }
+        last_mutation = sequence;
+    }
+    for object in keys.iter().filter(|k| k.starts_with("ivf-")) {
+        if ivf::cache_sequence(object)? > last_mutation {
+            return Err(Error::Corrupt(format!(
+                "IVF cache extends beyond retained history: {object}"
+            )));
+        }
+    }
+    for object in keys
+        .iter()
+        .filter(|k| k.starts_with("segmentchunk-") || k.starts_with("compactedchunk-"))
+    {
+        let kind = if object.starts_with("segmentchunk-") {
+            "segment"
+        } else {
+            "compacted"
+        };
+        if chunk_sequence(object, kind)? > last_mutation {
+            return Err(Error::Corrupt(format!(
+                "snapshot chunk extends beyond retained history: {object}"
+            )));
+        }
+    }
+    if latest_segment.is_some_and(|s| s > last_mutation) {
+        return Err(Error::Corrupt(
+            "segment extends beyond retained history".into(),
+        ));
+    }
+    Ok(Catalog {
+        keys,
+        latest_segment,
+        latest_compacted,
+        checkpoint_sequence: latest_segment.max(latest_compacted),
+        last_mutation,
+    })
+}
+
+fn read_mutations<S: ObjectStore>(
+    store: &S,
+    object: &str,
+    next: u64,
+    config: Config,
+) -> Result<Vec<Mutation>> {
+    let bytes = store
+        .get(object)?
+        .ok_or_else(|| Error::Corrupt(format!("listed object missing: {object}")))?;
+    let (record_sequence, mutations) = match decode::<Version>(&bytes)?.version {
+        1 => {
+            let old: RecordV1 = decode(&bytes)?;
+            if old.version != 1 {
+                return Err(Error::Corrupt(format!("invalid record version: {object}")));
+            }
+            let mutation = match old.mutation {
+                MutationV1::Put { id, vector } => Mutation::Put {
+                    id,
+                    vector,
+                    metadata: BTreeMap::new(),
+                },
+                MutationV1::Delete { id } => Mutation::Delete { id },
+            };
+            (old.sequence, vec![mutation])
+        }
+        2 => {
+            let record: Record = decode(&bytes)?;
+            (record.sequence, vec![record.mutation])
+        }
+        3 => {
+            let record: BatchRecord = decode(&bytes)?;
+            if record.mutations.is_empty() {
+                return Err(Error::Corrupt(format!("empty batch record: {object}")));
+            }
+            (record.sequence, record.mutations)
+        }
+        _ => {
+            return Err(Error::Corrupt(format!(
+                "unsupported record version: {object}"
+            )))
+        }
+    };
+    if record_sequence != next {
+        return Err(Error::Corrupt(format!("invalid record sequence: {object}")));
+    }
+    for mutation in &mutations {
+        if let Mutation::Put { vector, .. } = mutation {
+            config
+                .vector(vector)
+                .map_err(|e| Error::Corrupt(e.to_string()))?;
+        }
+    }
+    Ok(mutations)
+}
+
 /// In-memory state is derived from immutable segments and durable mutation objects.
 /// Exclusive namespace ownership is a caller precondition, not a lock service.
 pub struct Database<S> {
@@ -310,106 +572,14 @@ pub struct Database<S> {
 impl<S: ObjectStore> Database<S> {
     /// Open/recover, or initialize an empty namespace. Config must match on restart.
     pub fn open(mut store: S, config: Config) -> Result<Self> {
-        config.validate()?;
-        let mut keys = store.list()?;
-        let metadata = store.get("metadata")?;
-        match metadata {
-            Some(bytes) => {
-                let metadata: Metadata = decode(&bytes)?;
-                if metadata.version != 1 {
-                    return Err(Error::Corrupt("unsupported metadata version".into()));
-                }
-                metadata
-                    .config
-                    .validate()
-                    .map_err(|e| Error::Corrupt(e.to_string()))?;
-                if metadata.config != config {
-                    return Err(Error::Invalid(
-                        "configuration differs from stored metadata".into(),
-                    ));
-                }
-                if keys.iter().filter(|k| *k == "metadata").count() != 1 {
-                    return Err(Error::Corrupt(
-                        "metadata missing or duplicated in listing".into(),
-                    ));
-                }
-            }
-            None => {
-                if !keys.is_empty() {
-                    return Err(Error::Corrupt("objects exist without metadata".into()));
-                }
-                store.create("metadata", &encode(&Metadata { version: 1, config })?)?;
-            }
-        }
-        keys.retain(|k| k != "metadata");
-        keys.sort();
-        let mut latest_segment = None;
-        let mut latest_compacted = None;
-        let mut previous = None;
-        for object in &keys {
-            if previous == Some(object) {
-                return Err(Error::Corrupt(format!("duplicate listed key: {object}")));
-            }
-            previous = Some(object);
-            if object.starts_with("compacted-") {
-                latest_compacted = Some(numbered_sequence(object, "compacted-")?);
-            } else if object.starts_with("segment-") {
-                latest_segment = Some(numbered_sequence(object, "segment-")?);
-            } else if object.starts_with("compactedchunk-") {
-                chunk_sequence(object, "compacted")?;
-            } else if object.starts_with("segmentchunk-") {
-                chunk_sequence(object, "segment")?;
-            } else if object.starts_with("ivf-") {
-                ivf::cache_sequence(object)?;
-            } else {
-                let sequence = numbered_sequence(object, "mutation-")?;
-                if sequence == 0 {
-                    return Err(Error::Corrupt("mutation sequence zero".into()));
-                }
-            }
-        }
-        // Only a compaction snapshot authorizes missing covered keys. Ordinary
-        // M3 snapshots retain their original complete-log validation semantics.
-        let floor = latest_compacted.unwrap_or(0);
-        let mut last_mutation = floor;
-        for object in keys.iter().filter(|k| k.starts_with("mutation-")) {
-            let sequence = numbered_sequence(object, "mutation-")?;
-            if sequence <= floor {
-                continue;
-            }
-            if last_mutation.checked_add(1) != Some(sequence) {
-                return Err(Error::Corrupt(format!("log gap: {object}")));
-            }
-            last_mutation = sequence;
-        }
-        for object in keys.iter().filter(|k| k.starts_with("ivf-")) {
-            if ivf::cache_sequence(object)? > last_mutation {
-                return Err(Error::Corrupt(format!(
-                    "IVF cache extends beyond retained history: {object}"
-                )));
-            }
-        }
-        for object in keys
-            .iter()
-            .filter(|k| k.starts_with("segmentchunk-") || k.starts_with("compactedchunk-"))
-        {
-            let kind = if object.starts_with("segmentchunk-") {
-                "segment"
-            } else {
-                "compacted"
-            };
-            if chunk_sequence(object, kind)? > last_mutation {
-                return Err(Error::Corrupt(format!(
-                    "snapshot chunk extends beyond retained history: {object}"
-                )));
-            }
-        }
-        if latest_segment.is_some_and(|s| s > last_mutation) {
-            return Err(Error::Corrupt(
-                "segment extends beyond retained history".into(),
-            ));
-        }
-        let checkpoint_sequence = latest_segment.max(latest_compacted);
+        let catalog = inspect_namespace(&mut store, config, true)?;
+        let Catalog {
+            keys,
+            latest_segment,
+            latest_compacted,
+            checkpoint_sequence,
+            ..
+        } = catalog;
         let mut db = Self {
             store,
             config,
@@ -441,53 +611,7 @@ impl<S: ObjectStore> Database<S> {
                     "unexpected object or log gap: {object}"
                 )));
             }
-            let bytes = db
-                .store
-                .get(&object)?
-                .ok_or_else(|| Error::Corrupt(format!("listed object missing: {object}")))?;
-            let (record_sequence, mutations) = match decode::<Version>(&bytes)?.version {
-                1 => {
-                    let old: RecordV1 = decode(&bytes)?;
-                    if old.version != 1 {
-                        return Err(Error::Corrupt(format!("invalid record version: {object}")));
-                    }
-                    let mutation = match old.mutation {
-                        MutationV1::Put { id, vector } => Mutation::Put {
-                            id,
-                            vector,
-                            metadata: BTreeMap::new(),
-                        },
-                        MutationV1::Delete { id } => Mutation::Delete { id },
-                    };
-                    (old.sequence, vec![mutation])
-                }
-                2 => {
-                    let record: Record = decode(&bytes)?;
-                    (record.sequence, vec![record.mutation])
-                }
-                3 => {
-                    let record: BatchRecord = decode(&bytes)?;
-                    if record.mutations.is_empty() {
-                        return Err(Error::Corrupt(format!("empty batch record: {object}")));
-                    }
-                    (record.sequence, record.mutations)
-                }
-                _ => {
-                    return Err(Error::Corrupt(format!(
-                        "unsupported record version: {object}"
-                    )))
-                }
-            };
-            if record_sequence != next {
-                return Err(Error::Corrupt(format!("invalid record sequence: {object}")));
-            }
-            for mutation in &mutations {
-                if let Mutation::Put { vector, .. } = mutation {
-                    config
-                        .vector(vector)
-                        .map_err(|e| Error::Corrupt(e.to_string()))?;
-                }
-            }
+            let mutations = read_mutations(&db.store, &object, next, config)?;
             for mutation in mutations {
                 db.apply(mutation);
             }
@@ -553,14 +677,7 @@ impl<S: ObjectStore> Database<S> {
         Ok(())
     }
     fn load_chunked_snapshot(&mut self, object: &str, sequence: u64, bytes: &[u8]) -> Result<()> {
-        let manifest: SnapshotManifest = decode(bytes)?;
-        if manifest.version != 3
-            || manifest.sequence != sequence
-            || manifest.config != self.config
-            || manifest.max_chunk_bytes == 0
-        {
-            return Err(Error::Corrupt("invalid chunked snapshot identity".into()));
-        }
+        let manifest = parse_chunked_manifest(bytes, sequence, self.config)?;
         let kind = if object == compacted_key(sequence) {
             "compacted"
         } else if object == segment_key(sequence) {
@@ -569,50 +686,10 @@ impl<S: ObjectStore> Database<S> {
             return Err(Error::Corrupt("invalid chunked snapshot key".into()));
         };
         let mut documents = BTreeMap::new();
-        let mut previous_id = None;
-        for (ordinal, reference) in manifest.chunks.iter().enumerate() {
-            if reference.rows == 0
-                || reference.first_id > reference.last_id
-                || previous_id.is_some_and(|previous| previous >= reference.first_id)
-            {
-                return Err(Error::Corrupt("invalid snapshot chunk range".into()));
-            }
-            let key = chunk_key(kind, sequence, manifest.max_chunk_bytes, ordinal);
-            let chunk_bytes = self
-                .store
-                .get(&key)?
-                .ok_or_else(|| Error::Corrupt(format!("snapshot chunk missing: {key}")))?;
-            if chunk_bytes.len() > manifest.max_chunk_bytes {
-                return Err(Error::Corrupt(format!("oversized snapshot chunk: {key}")));
-            }
-            if format!("{:x}", Sha256::digest(&chunk_bytes)) != reference.sha256 {
-                return Err(Error::Corrupt(format!(
-                    "snapshot chunk digest mismatch: {key}"
-                )));
-            }
-            let chunk: SnapshotChunk = decode(&chunk_bytes)?;
-            if chunk.version != 1
-                || chunk.sequence != sequence
-                || chunk.config != self.config
-                || chunk.documents.len() != reference.rows
-                || chunk.documents.first().map(|entry| entry.0) != Some(reference.first_id)
-                || chunk.documents.last().map(|entry| entry.0) != Some(reference.last_id)
-            {
-                return Err(Error::Corrupt(format!("invalid snapshot chunk: {key}")));
-            }
-            for (id, document) in chunk.documents {
-                if previous_id.is_some_and(|previous| previous >= id) {
-                    return Err(Error::Corrupt(
-                        "snapshot IDs must be strictly increasing".into(),
-                    ));
-                }
-                self.config
-                    .vector(&document.vector)
-                    .map_err(|e| Error::Corrupt(e.to_string()))?;
-                previous_id = Some(id);
-                documents.insert(id, document);
-            }
-        }
+        scan_snapshot(&self.store, self.config, kind, &manifest, |id, document| {
+            documents.insert(id, document);
+            Ok(())
+        })?;
         self.documents = documents;
         self.sequence = sequence;
         Ok(())

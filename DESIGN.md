@@ -17,6 +17,10 @@ Database API (put / get / delete / exact and filtered search)
     -> local development backend or S3-compatible backend
 ```
 
+For version 3 chunked snapshots, a separate read-only `StreamingDatabase` path
+keeps the selected manifest and newer mutations in memory and scans validated
+data chunks directly from the object store for exact queries.
+
 One mutable `Database` handle exclusively owns a storage namespace. The caller
 must prevent concurrent owners, including across processes; no locking or
 multi-writer protocol is provided. An owned object-store handle isolates the
@@ -326,6 +330,34 @@ without helping the exclusive owner. These APIs remain explicit; the database
 still materializes the full map in memory, scans the complete object listing on
 open, and stores one unbounded manifest. They do not yet support lazy partition
 reads or a bounded-memory database.
+
+### Streaming exact reads
+
+`StreamingDatabase::open(store, config)` requires an existing namespace whose
+selected compaction boundary and selected newer checkpoint, if any, use version
+3 chunked manifests. It performs the same key, metadata and contiguous-log
+checks as `Database::open`, validates each selected root and all referenced
+chunks, then replays newer version 1/2/3 mutations into an ID-keyed overlay.
+Legacy single-object roots are rejected for this mode; `compact_chunked` can
+migrate them. The view freezes at the recovered mutation sequence and uses the
+same exclusive namespace ownership precondition as the mutable database.
+
+`search` and `search_filtered` read and revalidate each base chunk in order,
+skip IDs replaced or deleted in the overlay, score matching base rows and live
+overlay rows, then return the exact distance/ID top-k. A bounded top-k heap
+avoids retaining all candidates. `get_with_metadata` first checks the overlay,
+then uses manifest ID ranges to read at most one base chunk and returns owned
+values. A missing or invalid referenced chunk makes the operation fail rather
+than return partial results. The reader makes no durable writes and cannot
+observe later mutations without reopening.
+
+This separates base-vector working memory from dataset size: ordinary searches
+retain a manifest, the latest uncheckpointed IDs, one decoded chunk and up to k
+neighbors, plus transient response/decoder allocations. The manifest and mutation
+tail are not bounded, nor is a request for k equal to the whole dataset. Opening
+validates all chunks and exact searches issue one GET per chunk, so this path
+trades RAM for remote reads and is not an ANN latency optimization. Physical
+partitioning and selective object reads remain future work.
 
 ## Compaction (M4)
 
