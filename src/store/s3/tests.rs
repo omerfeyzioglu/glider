@@ -1,5 +1,9 @@
 use super::*;
-use crate::{streaming::StreamingDatabase, Config, Database, Metric, Mutation};
+use crate::{
+    ownership::{claims, clear_stale_claim, OwnedDatabase},
+    streaming::StreamingDatabase,
+    Config, Database, Metric, Mutation,
+};
 use object_store::client::{HttpErrorKind, HttpResponseBody};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -8,6 +12,28 @@ fn config() -> Config {
         dimensions: 2,
         metric: Metric::SquaredEuclidean,
     }
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_owner_claim_survives_drop_and_requires_explicit_cleanup() {
+    let namespace = "exclusive-owner";
+    let mut first = OwnedDatabase::open(minio(namespace), config()).unwrap();
+    first.put(1, vec![1., 2.]).unwrap();
+    assert!(matches!(
+        OwnedDatabase::open(minio(namespace), config()),
+        Err(crate::Error::Busy(_))
+    ));
+    assert!(Database::open(minio(namespace), config()).is_err());
+    drop(first);
+    let mut store = minio(namespace);
+    let owner = claims(&store).unwrap();
+    assert_eq!(owner.len(), 1);
+    clear_stale_claim(&mut store, &owner[0]).unwrap();
+    let db = OwnedDatabase::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.get(1), Some([1., 2.].as_slice()));
+    db.close().unwrap();
+    assert!(claims(&minio(namespace)).unwrap().is_empty());
 }
 fn builder() -> AmazonS3Builder {
     AmazonS3Builder::new()

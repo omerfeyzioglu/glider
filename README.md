@@ -82,8 +82,16 @@ ownership of a namespace prefix. Use nonoverlapping prefixes. Configure credenti
 or standard AWS environment variables; do not place credentials in source files.
 The backend requires strongly consistent GET/LIST and conditional PUT support.
 
+For a deployed single writer, use `ownership::OwnedDatabase::open` in place of
+`Database::open`, then call `close()` on graceful shutdown. A process exit leaves
+an owner claim; the next writer receives a busy error. After verifying the old
+process is stopped, inspect `ownership::claims(&store)` and pass the exact key to
+`ownership::clear_stale_claim(&mut store, key)`. An enrolled namespace rejects
+raw `Database::open`. Stop all legacy writers before first enrolling an existing
+namespace. See `DESIGN.md` for uncertain outcomes and limitations.
+
 ```rust,no_run
-use glider::{Config, Database, Metric, store::s3::{AmazonS3Builder, S3Store}};
+use glider::{Config, Metric, ownership::OwnedDatabase, store::s3::{AmazonS3Builder, S3Store}};
 
 let builder = AmazonS3Builder::from_env()
     .with_bucket_name("my-glider-bucket")
@@ -92,11 +100,12 @@ let builder = AmazonS3Builder::from_env()
 // and .with_allow_http(true). Use HTTPS for remote deployments.
 let store = S3Store::open(builder, "vectors/example")?;
 let metrics = store.metrics();
-let mut db = Database::open(store, Config {
+let mut db = OwnedDatabase::open(store, Config {
     dimensions: 2, metric: Metric::SquaredEuclidean,
 })?;
 db.put(42, vec![1.0, 2.0])?;
 println!("{:?}", metrics.snapshot());
+db.close()?;
 # Ok::<(), glider::Error>(())
 ```
 

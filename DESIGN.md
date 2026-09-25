@@ -21,10 +21,12 @@ For version 3 chunked snapshots, a separate read-only `StreamingDatabase` path
 keeps the selected manifest and newer mutations in memory and scans validated
 data chunks directly from the object store for exact queries.
 
-One mutable `Database` handle exclusively owns a storage namespace. The caller
-must prevent concurrent owners, including across processes; no locking or
-multi-writer protocol is provided. An owned object-store handle isolates the
-engine from filesystem operations. The newest complete checkpoint and newer
+One mutable database handle exclusively owns a storage namespace. For a
+single-writer deployment, `OwnedDatabase` establishes an object-store claim
+before opening the database. Legacy `Database::open` on an unclaimed namespace
+still requires the caller to ensure exclusive ownership; a namespace enrolled
+in owned mode rejects raw opens. No multi-writer protocol is provided. An owned
+object-store handle isolates the engine from filesystem operations. The newest complete checkpoint and newer
 mutations are authoritative; without a checkpoint, recovery uses the complete
 durable log. The in-memory map is derived. Reads observe that map, and successful
 writes become visible after durable storage.
@@ -258,6 +260,47 @@ complete log objects in sequence, including completed writes that were not
 acknowledged. Requested configuration must exactly match metadata.
 Unknown fields, invalid records or vectors, unsupported versions, unexpected keys,
 internal sequence gaps, and mutation objects without metadata fail recovery.
+
+### Single-writer ownership boundary
+
+`OwnedDatabase::open` is the deployment writer entry point. It creates the
+immutable `owner-root-v1` control object if absent, then creates a unique
+`owner-v1-{32 lowercase hex digits}` claim using OS randomness and conditional
+create. The root payload is exactly version 1 JSON `{"version":1}`. A claim
+payload is version 1 JSON containing its token. The opener lists the complete
+namespace after publication and becomes active only if its claim is the sole
+listed claim. Concurrent openers may all fail, but cannot both become active:
+the opener publishing second sees the first claim, unless the first has already
+ended and durably removed it. These objects are control state, not vector state;
+the document checkpoint and mutation tail remain authoritative.
+
+The root's successful create acknowledges permanent enrollment in owned mode.
+An uncertain root create requires a fresh store. Successful claim publication
+alone does not grant ownership; the confirming strongly consistent listing does.
+A claim create/list error or panic may leave a claim but never acknowledges a
+writer. A competing opener removes only its own claim before returning busy;
+an uncertain removal requires fresh inspection. A crash or dropped handle leaves
+its claim in place. `OwnedDatabase::close` stops using the database and removes
+that handle's claim; successful removal acknowledges release. A release error
+may have removed the claim, so inspect on a new store before takeover. Unique
+claim keys are never reused, preventing a delayed DELETE from removing a later
+owner's claim. The immutable root is never removed by normal maintenance.
+
+After a crash, an operator must first prove the former process cannot write,
+then inspect and explicitly remove its exact stale claim key. There is no timed
+lease or automatic takeover. Existing namespaces can enroll only after all
+legacy writer processes are stopped: an already-open older binary cannot be
+fenced retroactively. Older binaries reject the new key kinds. The wrapper hides
+ownership keys from database recovery and compaction; raw
+`Database::open` rejects an enrolled namespace. An external deletion of an
+active claim violates the object-store contract and can permit another owner;
+backup and operator controls are required for arbitrary object loss.
+
+This chooses immutable claims over a mutable lease: lease expiry cannot safely
+fence a delayed writer with the current object-store operations. A process-only
+singleton without a storage witness cannot detect a second opener on another
+host. The claim protocol uses conditional create, strongly consistent list and
+durable remove, without filesystem locking or in-place mutation.
 
 ## Immutable checkpoint segments (M3)
 
