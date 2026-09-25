@@ -164,19 +164,25 @@ backend collects all listing pages and provides this object contract using nativ
 complete-object publication.
 
 `metadata` is the first durable object: UTF-8 JSON containing format version 1
-and the configuration. Each mutation is one immutable UTF-8 JSON object containing
-its format version, sequence, and a put or delete operation. Version 1 puts contain
-an ID and vector; version 2 puts also require a string-to-string `metadata` map.
-New writes use version 2; recovery accepts both versions and treats version 1
-metadata as empty. The mutation key is `mutation-` followed by a contiguous
-20-digit decimal sequence starting at 1.
+and the configuration. Each mutation-log object is immutable UTF-8 JSON with a
+format version and sequence. Versions 1 and 2 contain one put or delete; version
+1 puts contain an ID and vector, while version 2 puts also require a
+string-to-string `metadata` map. Ordinary single writes still use version 2.
+Version 3 contains a nonempty ordered `mutations` array of the version 2 operation
+schema. `apply_batch` publishes one version 3 object for all its operations.
+Recovery accepts all three versions and treats version 1 metadata as empty. The
+mutation key is `mutation-` followed by a contiguous 20-digit decimal sequence
+starting at 1. A sequence counts a published log object, not the number of
+operations inside a batch.
 Schema changes require explicit format-version handling.
 
 Immutable numbered objects avoid append operations unavailable in object stores.
 Immutable segments with a conditional mutable head could coordinate writers but
 add a publication protocol unnecessary for exclusive ownership. The chosen layout
-costs one object per mutation; checkpoints reduce payload replay, while explicit
-compaction reclaims covered history. JSON favors straightforward validation over a custom binary format.
+costs one object per single write; a batch trades one larger object and group
+acknowledgement for fewer conditional PUTs and keys. Checkpoints reduce payload
+replay, while explicit compaction reclaims covered history. JSON favors
+straightforward validation over a custom binary format.
 
 ## Acknowledgement and recovery
 
@@ -185,6 +191,17 @@ handle rejects further mutations until reopened; reads continue to show its last
 acknowledged state. Initialization has the same uncertain outcome: reopen after
 an error to discover whether metadata was published. Acknowledgement never depends
 on destructors.
+
+`apply_batch` rejects an empty batch or any invalid vector before storage access.
+Operations are applied in input order, so the last operation for an ID wins.
+One successful conditional create acknowledges the entire batch and makes its
+final state visible. A create error or panic poisons the handle while reads keep
+the previous acknowledged state. After a crash or lost acknowledgement, recovery
+sees either no batch object or one complete object and replays all operations in
+order. It never exposes a partial batch. Checkpoint and compaction use the batch's
+single sequence boundary. Batch size is caller controlled; there is no automatic
+splitting or second publication step. The caller must choose a size supported by
+the configured object store and available memory.
 
 Recovery loads the newest complete checkpoint, if present, and replays newer
 complete log objects in sequence, including completed writes that were not

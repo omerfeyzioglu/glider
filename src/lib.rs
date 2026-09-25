@@ -98,6 +98,13 @@ struct Record {
     sequence: u64,
     mutation: Mutation,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchRecord {
+    version: u32,
+    sequence: u64,
+    mutations: Vec<Mutation>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordV1 {
@@ -111,9 +118,10 @@ enum MutationV1 {
     Put { id: u64, vector: Vec<f32> },
     Delete { id: u64 },
 }
-#[derive(Serialize, Deserialize)]
+/// One ordered write inside an atomic batch. Later operations on the same ID win.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum Mutation {
+pub enum Mutation {
     Put {
         id: u64,
         vector: Vec<f32>,
@@ -329,9 +337,12 @@ impl<S: ObjectStore> Database<S> {
                 .store
                 .get(&object)?
                 .ok_or_else(|| Error::Corrupt(format!("listed object missing: {object}")))?;
-            let record = match decode::<Version>(&bytes)?.version {
+            let (record_sequence, mutations) = match decode::<Version>(&bytes)?.version {
                 1 => {
                     let old: RecordV1 = decode(&bytes)?;
+                    if old.version != 1 {
+                        return Err(Error::Corrupt(format!("invalid record version: {object}")));
+                    }
                     let mutation = match old.mutation {
                         MutationV1::Put { id, vector } => Mutation::Put {
                             id,
@@ -340,28 +351,38 @@ impl<S: ObjectStore> Database<S> {
                         },
                         MutationV1::Delete { id } => Mutation::Delete { id },
                     };
-                    Record {
-                        version: old.version,
-                        sequence: old.sequence,
-                        mutation,
-                    }
+                    (old.sequence, vec![mutation])
                 }
-                2 => decode::<Record>(&bytes)?,
+                2 => {
+                    let record: Record = decode(&bytes)?;
+                    (record.sequence, vec![record.mutation])
+                }
+                3 => {
+                    let record: BatchRecord = decode(&bytes)?;
+                    if record.mutations.is_empty() {
+                        return Err(Error::Corrupt(format!("empty batch record: {object}")));
+                    }
+                    (record.sequence, record.mutations)
+                }
                 _ => {
                     return Err(Error::Corrupt(format!(
                         "unsupported record version: {object}"
                     )))
                 }
             };
-            if record.sequence != next {
+            if record_sequence != next {
                 return Err(Error::Corrupt(format!("invalid record sequence: {object}")));
             }
-            if let Mutation::Put { vector, .. } = &record.mutation {
-                config
-                    .vector(vector)
-                    .map_err(|e| Error::Corrupt(e.to_string()))?;
+            for mutation in &mutations {
+                if let Mutation::Put { vector, .. } = mutation {
+                    config
+                        .vector(vector)
+                        .map_err(|e| Error::Corrupt(e.to_string()))?;
+                }
             }
-            db.apply(record.mutation);
+            for mutation in mutations {
+                db.apply(mutation);
+            }
             db.sequence = next;
         }
         Ok(db)
@@ -537,6 +558,20 @@ impl<S: ObjectStore> Database<S> {
     pub fn delete(&mut self, id: u64) -> Result<()> {
         self.commit(Mutation::Delete { id })
     }
+    /// Publish a nonempty ordered batch in one immutable object. Success makes
+    /// every operation visible together; an uncertain write requires reopening.
+    /// A batch uses one log sequence, regardless of its number of operations.
+    pub fn apply_batch(&mut self, mutations: Vec<Mutation>) -> Result<()> {
+        if mutations.is_empty() {
+            return Err(Error::Invalid("batch must not be empty".into()));
+        }
+        for mutation in &mutations {
+            if let Mutation::Put { vector, .. } = mutation {
+                self.config.vector(vector)?;
+            }
+        }
+        self.commit_batch(mutations)
+    }
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<Neighbor>> {
         self.search_filtered(query, k, &[])
     }
@@ -589,6 +624,30 @@ impl<S: ObjectStore> Database<S> {
         self.poisoned = true;
         self.store.create(&key(sequence), &bytes)?;
         self.apply(record.mutation);
+        self.sequence = sequence;
+        self.poisoned = false;
+        Ok(())
+    }
+    fn commit_batch(&mut self, mutations: Vec<Mutation>) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("mutation sequence exhausted".into()))?;
+        let record = BatchRecord {
+            version: 3,
+            sequence,
+            mutations,
+        };
+        let bytes = encode(&record)?;
+        // A lost acknowledgement may leave the complete batch remotely visible.
+        self.poisoned = true;
+        self.store.create(&key(sequence), &bytes)?;
+        for mutation in record.mutations {
+            self.apply(mutation);
+        }
         self.sequence = sequence;
         self.poisoned = false;
         Ok(())

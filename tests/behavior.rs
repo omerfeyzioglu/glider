@@ -1,6 +1,7 @@
 use glider::{
+    ivf::IvfConfig,
     store::{LocalStore, ObjectStore},
-    Config, Database, Error, Metric, Result,
+    Config, Database, Error, Metric, Mutation, Result,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 fn config() -> Config {
@@ -177,6 +178,174 @@ fn ambiguous_writes_require_recovery() {
         store.0.borrow_mut().fail = Some(committed);
         assert!(Database::open(store.clone(), config()).is_err());
         assert!(Database::open(store, config()).is_ok());
+    }
+}
+
+fn put(id: u64, x: f32, label: &str) -> Mutation {
+    Mutation::Put {
+        id,
+        vector: vec![x, 0.],
+        metadata: BTreeMap::from([("label".into(), label.into())]),
+    }
+}
+
+#[test]
+fn batch_publishes_one_ordered_object_and_survives_local_compaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("db");
+    let mut db = Database::open(LocalStore::open(&path).unwrap(), config()).unwrap();
+    db.put(10, vec![10., 0.]).unwrap();
+    db.apply_batch(vec![
+        put(1, 1., "old"),
+        put(2, 2., "blue"),
+        Mutation::Delete { id: 1 },
+        put(1, 0., "new"),
+        Mutation::Delete { id: 99 },
+    ])
+    .unwrap();
+    drop(db);
+    let mut db = Database::open(LocalStore::open(&path).unwrap(), config()).unwrap();
+    assert_eq!(db.get(1), Some([0., 0.].as_slice()));
+    assert_eq!(db.get(2), Some([2., 0.].as_slice()));
+    assert_eq!(db.get(10), Some([10., 0.].as_slice()));
+    assert_eq!(
+        db.search_filtered(&[0., 0.], 10, &[("label", "new")])
+            .unwrap()
+            .iter()
+            .map(|n| n.id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        db.get_metadata(1).unwrap().get("label").map(String::as_str),
+        Some("new")
+    );
+    db.checkpoint().unwrap();
+    db.apply_batch(vec![Mutation::Delete { id: 2 }, put(3, 3., "green")])
+        .unwrap();
+    drop(db);
+    let mut db = Database::open(LocalStore::open(&path).unwrap(), config()).unwrap();
+    assert_eq!(db.get(2), None);
+    assert_eq!(db.get(3), Some([3., 0.].as_slice()));
+    db.compact().unwrap();
+    drop(db);
+    let db = Database::open(LocalStore::open(&path).unwrap(), config()).unwrap();
+    assert_eq!(db.get(1), Some([0., 0.].as_slice()));
+    assert_eq!(db.get(2), None);
+    assert_eq!(db.get(3), Some([3., 0.].as_slice()));
+    assert_eq!(db.get(10), Some([10., 0.].as_slice()));
+    assert_eq!(
+        db.get_metadata(3).unwrap().get("label").map(String::as_str),
+        Some("green")
+    );
+
+    let store = Memory::default();
+    let mut db = Database::open(store.clone(), config()).unwrap();
+    db.apply_batch(vec![put(1, 1., "a"), put(2, 2., "b")])
+        .unwrap();
+    {
+        let stored = store.0.borrow();
+        assert_eq!(stored.objects.len(), 2); // metadata plus one batch object
+        let record: serde_json::Value =
+            serde_json::from_slice(&stored.objects["mutation-00000000000000000001"]).unwrap();
+        assert_eq!(record["version"], 3);
+        assert_eq!(record["sequence"], 1);
+        assert_eq!(record["mutations"].as_array().unwrap().len(), 2);
+    }
+    db.put(3, vec![3., 0.]).unwrap();
+    assert!(store
+        .0
+        .borrow()
+        .objects
+        .contains_key("mutation-00000000000000000002"));
+}
+
+#[test]
+fn batch_validation_rejects_all_before_publication() {
+    let store = Memory::default();
+    let mut db = Database::open(store.clone(), config()).unwrap();
+    db.put(7, vec![7., 0.]).unwrap();
+    db.build_ivf(IvfConfig {
+        partitions: 1,
+        iterations: 1,
+        seed: 42,
+    })
+    .unwrap();
+    assert!(matches!(db.apply_batch(vec![]), Err(Error::Invalid(_))));
+    assert!(matches!(
+        db.apply_batch(vec![put(1, 1., "valid"), put(2, f32::NAN, "bad")]),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(db.get(1), None);
+    assert_eq!(db.get(7), Some([7., 0.].as_slice()));
+    assert!(db.search_ivf(&[0., 0.], 1, 1).is_ok());
+    assert_eq!(store.0.borrow().objects.len(), 2);
+    db.apply_batch(vec![put(1, 1., "valid")]).unwrap();
+    assert_eq!(store.0.borrow().objects.len(), 3);
+    assert!(db.search_ivf(&[0., 0.], 1, 1).is_err());
+}
+
+#[test]
+fn uncertain_batch_is_all_or_none_after_reopen() {
+    for published in [false, true] {
+        for panic_after in [false, true] {
+            let store = Memory::default();
+            let mut db = Database::open(store.clone(), config()).unwrap();
+            db.put(1, vec![1., 0.]).unwrap();
+            db.build_ivf(IvfConfig {
+                partitions: 1,
+                iterations: 1,
+                seed: 42,
+            })
+            .unwrap();
+            if panic_after {
+                store.0.borrow_mut().panic = Some(published);
+            } else {
+                store.0.borrow_mut().fail = Some(published);
+            }
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                db.apply_batch(vec![put(1, 0., "new"), put(2, 2., "new")])
+            }));
+            if panic_after {
+                assert!(outcome.is_err());
+            } else {
+                assert!(outcome.unwrap().is_err());
+            }
+            assert_eq!(db.get(1), Some([1., 0.].as_slice()));
+            assert_eq!(db.get(2), None);
+            assert_eq!(db.search_ivf(&[0., 0.], 1, 1).unwrap().neighbors[0].id, 1);
+            assert!(matches!(db.delete(1), Err(Error::RecoveryRequired)));
+            drop(db);
+            let db = Database::open(store, config()).unwrap();
+            assert_eq!(
+                db.get(1),
+                Some([if published { 0. } else { 1. }, 0.].as_slice())
+            );
+            assert_eq!(db.get(2).is_some(), published);
+        }
+    }
+}
+
+#[test]
+fn malformed_batch_records_fail_recovery() {
+    for bad in [
+        r#"{"version":3,"sequence":1,"mutations":[]}"#,
+        r#"{"version":3,"sequence":2,"mutations":[{"type":"delete","id":1}]}"#,
+        r#"{"version":3,"sequence":1,"mutations":[{"type":"put","id":1,"vector":[1,0]}]}"#,
+        r#"{"version":3,"sequence":1,"mutations":[{"type":"delete","id":1},{"type":"put","id":2,"vector":[1],"metadata":{}}]}"#,
+        r#"{"version":3,"sequence":1,"mutations":[{"type":"delete","id":1,"extra":0}]}"#,
+        r#"{"version":3,"sequence":1,"mutations":[{"type":"put","id":1,"vector":[1,0],"metadata":{"a":"x","a":"y"}}]}"#,
+    ] {
+        let store = Memory::default();
+        drop(Database::open(store.clone(), config()).unwrap());
+        store.0.borrow_mut().objects.insert(
+            "mutation-00000000000000000001".into(),
+            bad.as_bytes().into(),
+        );
+        assert!(
+            matches!(Database::open(store, config()), Err(Error::Corrupt(_))),
+            "{bad}"
+        );
     }
 }
 #[test]
