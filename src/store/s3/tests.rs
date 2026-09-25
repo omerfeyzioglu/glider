@@ -190,6 +190,42 @@ fn minio(namespace: &str) -> S3Store {
 
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_chunked_snapshots_publish_manifest_last_and_recover() {
+    let namespace = "chunked-snapshots";
+    let store = minio(namespace);
+    let metrics = store.metrics();
+    let mut db = Database::open(store, config()).unwrap();
+    for id in 0..13 {
+        db.put(id, vec![(id % 5) as f32, (id / 5) as f32]).unwrap();
+    }
+    let expected = db.search(&[2., 1.], 13).unwrap();
+    let before = metrics.snapshot();
+    db.checkpoint_chunked(160).unwrap();
+    let after = metrics.snapshot();
+    drop(db);
+    let keys = minio(namespace).list().unwrap();
+    let chunks = keys
+        .iter()
+        .filter(|key| key.starts_with("segmentchunk-"))
+        .count();
+    assert!(chunks > 1);
+    assert_eq!(after.put - before.put, chunks as u64 + 1);
+
+    let mut db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.search(&[2., 1.], 13).unwrap(), expected);
+    db.compact_chunked(160).unwrap();
+    drop(db);
+    let db = Database::open(minio(namespace), config()).unwrap();
+    assert_eq!(db.search(&[2., 1.], 13).unwrap(), expected);
+    let keys = minio(namespace).list().unwrap();
+    assert!(keys.iter().any(|key| key.starts_with("compactedchunk-")));
+    assert!(!keys
+        .iter()
+        .any(|key| key.starts_with("segmentchunk-") || key.starts_with("mutation-")));
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_ivf_cache_reuses_one_immutable_object_after_restart() {
     let namespace = "ivf-cache";
     let options = crate::ivf::IvfConfig {

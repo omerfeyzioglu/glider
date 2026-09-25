@@ -162,6 +162,13 @@ reopening before further writes, just like uncertain mutations. Logs and older
 checkpoints are retained until explicitly compacted. See [DESIGN.md](DESIGN.md) for
 publication semantics and [BENCHMARKS.md](BENCHMARKS.md) for recovery measurements.
 
+For datasets where one full snapshot object is too large, call
+`db.checkpoint_chunked(8 * 1024 * 1024)?` instead. The argument caps each encoded
+data chunk in bytes; choose a limit that fits at least one document and your
+object-store request budget. Recovery reads the versioned manifest and all its
+chunks. The full live map still resides in memory.
+Older binaries that only read snapshot versions 1 and 2 cannot open a namespace
+after a chunked snapshot is published.
 
 ## Compaction (M4)
 
@@ -170,6 +177,9 @@ older snapshots. It runs synchronously and preserves live values, deletes and
 sequence numbers. Reopen after a compaction error before writing again; calling
 compaction again finishes interrupted cleanup. Compaction is explicit, so choose
 its frequency based on measured maintenance and recovery costs.
+`db.compact_chunked(8 * 1024 * 1024)?` uses the same bounded-chunk format and
+reclaims obsolete chunks after publishing the new manifest. The byte limit is
+an example, not a measured default for every deployment.
 
 A compacted namespace requires an M4-capable binary. Compaction reclaims logical
 objects; S3 bucket versioning may retain historical versions and delete markers.

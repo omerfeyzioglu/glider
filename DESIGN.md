@@ -249,7 +249,7 @@ sequence as one immutable `segment-` object with a 20-digit sequence suffix.
 Version 1 JSON contains version, sequence, configuration and a strictly ID-sorted
 array of `(id, vector)` entries. Version 2 contains `(id, {vector, metadata})`
 entries, with metadata a required string-to-string map. New snapshots use version
-2, and recovery accepts version 1 snapshots with empty metadata. The existing
+2 for the single-object API, and recovery accepts version 1 snapshots with empty metadata. The existing
 backend envelope protects its bytes. Deletes are represented by absence; the
 sequence boundary prevents older puts from resurrecting deleted IDs. An empty
 sequence-zero checkpoint is valid.
@@ -278,25 +278,71 @@ segments are not decoded by the engine; LocalStore still validates all envelopes
 and stabilizes all files on open. Older binaries reject segment keys rather than
 misread the namespace. Existing log-only databases remain readable.
 
-Checkpointing is explicit and synchronous; it serializes the full live map in
-memory. Checkpointing alone retains all logs and snapshots and requires listing
-all keys. It does not change mutation acknowledgement or detect external loss of
-an unwitnessed tail.
+Checkpointing is explicit and synchronous; the single-object form serializes the
+full live map in memory. Checkpointing alone retains all logs and snapshots and
+requires listing all keys. It does not change mutation acknowledgement or detect
+external loss of an unwitnessed tail.
+
+### Chunked snapshots (version 3)
+
+`checkpoint_chunked(max_chunk_bytes)` and `compact_chunked(max_chunk_bytes)`
+publish the same logical state as the single-object methods. They split the
+strictly ID-ordered document map into version 1 JSON chunks, each at most the
+caller-selected encoded payload limit. A single document that cannot fit is an
+input error detected before storage writes. Chunk keys are
+`segmentchunk-{sequence:020}-{limit:020}-{ordinal:010}` or
+`compactedchunk-{sequence:020}-{limit:020}-{ordinal:010}`. The limit in the key
+allows a failed attempt to be retried with a different layout without reusing a
+published key. Chunk objects contain version, sequence, configuration and rows.
+
+After every chunk is durably created, the writer publishes a version 3 manifest
+at the existing `segment-` or `compacted-` key. It contains version, sequence,
+configuration, byte limit and ordered chunk references with ID bounds, row counts
+and SHA-256 payload digests. The manifest is the sole publication boundary:
+chunks without it are orphaned derived bytes, not authoritative state. A
+successful manifest create acknowledges the checkpoint or compaction root. An
+error or panic during any chunk or manifest operation poisons writes and
+maintenance until reopen; reads retain the last acknowledged map. A complete
+manifest with a lost acknowledgement is selected on recovery. Retrying the same
+layout may reuse an already published chunk only after comparing its complete
+bytes; a conflicting chunk is an error. A late conditional PUT cannot replace a
+complete chunk or manifest.
+
+Recovery accepts legacy snapshot versions 1 and 2 and the version 3 manifest.
+For a selected manifest it requires every referenced chunk, checks digest,
+version, sequence, configuration, byte limit, row count and ID bounds, and
+validates all vectors and globally increasing IDs. It never falls back to an
+older snapshot when a selected chunk is missing or invalid. Unreferenced chunks
+from incomplete publications are ignored. Compaction retains only chunks named
+by the current compacted manifest and reclaims older and orphaned chunks after
+the new root is durable; interrupted cleanup resumes on a repeated call. Older
+binaries reject the new chunk keys and version 3 manifests.
+
+The single-object format uses fewer requests but makes one payload grow with the
+dataset. The manifest format bounds each data payload and temporary chunk
+serialization memory at the cost of more PUTs and recovery GETs. A mutable head
+or content-addressed keys would add coordination or key-reuse risks to cleanup
+without helping the exclusive owner. These APIs remain explicit; the database
+still materializes the full map in memory, scans the complete object listing on
+open, and stores one unbounded manifest. They do not yet support lazy partition
+reads or a bounded-memory database.
 
 ## Compaction (M4)
 
 `Database::compact()` publishes the complete current live state as
 `compacted-` plus its 20-digit mutation sequence, using the same versioned snapshot
-payload as an ordinary segment. Only this distinct snapshot kind authorizes
+payload as an ordinary segment. `compact_chunked` instead publishes the version 3
+chunked form described above. Only this distinct snapshot kind authorizes
 reclamation. After durable publication, compaction lists and validates the cleanup
 plan, then removes covered mutations, covered ordinary segments and older
 compaction snapshots. Metadata and the new compaction snapshot remain.
 
 Existing segments already contain full live state; consolidation serializes the
-recovered map rather than merging overlapping full snapshots. Combining state and
-reclamation boundary in one object avoids an additional manifest publication;
-a mutable head would introduce a coordination requirement unnecessary for the
-exclusive owner. There are no background workers or automatic compaction policy.
+recovered map rather than merging overlapping full snapshots. The single-object
+form combines state and reclamation boundary; the chunked form uses one final
+manifest as that boundary. A mutable head would introduce a coordination
+requirement unnecessary for the exclusive owner. There are no background workers
+or automatic compaction policy.
 
 Success acknowledges the snapshot and all listed removals, without consuming a
 mutation sequence. Any storage error or panic poisons writes and maintenance until
@@ -313,11 +359,12 @@ requires a contiguous mutation tail above it, and never falls back from a corrup
 selected snapshot. Old log/segment namespaces remain readable; older binaries
 reject the new key kind and cannot open a compacted namespace.
 
-After cleanup, storage contains metadata plus one snapshot, growing again with
-new writes and checkpoints until the next explicit compaction. Full-map cloning
-and serialization require temporary memory, and the replacement coexists with
-old objects until cleanup. This bounds retained logical history between explicit
-compactions, not live dataset size, total memory, or provider-retained versions.
+After cleanup, storage contains metadata plus one snapshot root and its referenced
+chunks, growing again with new writes and checkpoints until the next explicit
+compaction. Legacy full-map cloning and serialization require temporary memory;
+either replacement coexists with old objects until cleanup. This bounds retained
+logical history between explicit compactions, not live dataset size, total
+memory, or provider-retained versions.
 
 ## Local backend
 
