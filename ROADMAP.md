@@ -255,6 +255,15 @@ Done when:
 - New formats have versioned compatibility and crash tests; old namespaces open
   or fail with an explicit migration path.
 
+### M10a — Keep idle object-store transport tasks running
+
+During the M11 comparison, a second S3 reader left idle behind a long scan
+failed its next GET with an incomplete HTTP response while MinIO stayed alive.
+The S3 adapter's current-thread runtime stopped driving connection tasks between
+calls. Keep one I/O worker active per S3 handle; verify background progress
+without retries and retain the existing publication/failure tests. This small
+transport correction precedes the full M11 comparison.
+
 ## M11 — Make filtered exact queries selective on object storage
 
 Status: planned

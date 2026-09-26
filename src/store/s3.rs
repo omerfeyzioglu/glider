@@ -143,7 +143,12 @@ impl S3Store {
             })
             .build()
             .map_err(remote_error)?;
-        let runtime = Builder::new_current_thread().enable_all().build()?;
+        // Keep HTTP connection tasks alive while the synchronous caller is
+        // idle, so peer closure and pool expiration are processed promptly.
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
         Ok(Self {
             remote,
             namespace: Path::from(namespace),
