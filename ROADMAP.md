@@ -225,9 +225,9 @@ staging and restart on LocalStore and MinIO. Do not reuse a failed destination.
 Status: complete for the M8 initial envelope; larger workloads require a new envelope
 
 The 2,000-mutation stress input now opens from 20 version-3 batch objects in
-30.9 ms p95 on loopback MinIO, with 21 GETs, one LIST page and 11.8 MiB peak
-client RSS. At 2,000 live rows, 128 KiB chunked compaction opens in 25.2 ms
-with 14 GETs and 13.1 MiB peak RSS; maintenance writes 0.980 times the input
+27.3 ms p95 on loopback MinIO, with 21 GETs, one LIST page and 11.7 MiB peak
+client RSS. At 2,000 live rows, 128 KiB chunked compaction opens in 28.0 ms
+with 14 GETs and 13.2 MiB peak RSS; maintenance writes 0.980 times the input
 mutation payload and leaves 14 objects. The runtime M8 policy signals
 compaction before its 24-object hard tail, rejects writes at that bound without
 publication, and reconstructs counters after restart. Interrupted compaction

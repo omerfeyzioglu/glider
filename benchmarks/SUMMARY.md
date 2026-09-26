@@ -1,6 +1,6 @@
 # Benchmark summary
 
-70 raw reports; 7 compatible before/after result pairs. History is preserved in `runs/` and `baselines/`.
+75 raw reports; 7 compatible before/after result pairs. History is preserved in `runs/` and `baselines/`.
 
 Start here or with [latest.json](latest.json). Full tables/index: `python3 tools/benchmarks.py summary --full` (generates ignored `HISTORY.md` and `index.json`).
 
@@ -26,7 +26,13 @@ Latest means greatest recorded timestamp per backend/scope; ties use content has
 | observation | s3 / commit/delete | [fd3472ec0030:0](runs/fd3472ec00302f7188dc5e5267aab275ea6c4ed60bde76d6a0191236f1d17240.json) | 8791ebcfaae4 | rows=1000; dimensions=64; mutations=5000; operations=100; queries=100; samples=5; seed=42 | 969583 | N/A |
 | observation | s3 / commit/insert | [fd3472ec0030:0](runs/fd3472ec00302f7188dc5e5267aab275ea6c4ed60bde76d6a0191236f1d17240.json) | 8791ebcfaae4 | rows=1000; dimensions=64; mutations=5000; operations=100; queries=100; samples=5; seed=42 | 1015042 | N/A |
 | observation | s3 / commit/overwrite | [fd3472ec0030:0](runs/fd3472ec00302f7188dc5e5267aab275ea6c4ed60bde76d6a0191236f1d17240.json) | 8791ebcfaae4 | rows=1000; dimensions=64; mutations=5000; operations=100; queries=100; samples=5; seed=42 | 975625 | N/A |
-| observation | s3 / recovery/total | [f476cc0de892:0](runs/f476cc0de892b072e51721b0251dcaa6abd82992cfba3cd058dae02e3bac50b8.json) | 8791ebcfaae4 | rows=200; dimensions=64; mutations=2000; operations=200; queries=100; samples=3; seed=42 | 927690125 | 2001 |
+| observation | s3 / recovery/total | [cfe9cf1023cb:0](runs/cfe9cf1023cb661022e26763ea93c8a8b10e3a3bcb2dd05ec983b81c03d77d45.json) | fe97839b207d | rows=2000; dimensions=64; mutations=2000; operations=200; queries=100; samples=3; seed=42; compact_at=2000 | 27488209 | 14 |
 | observation | s3 / search | [dbee064bd603:0](runs/dbee064bd603a9c009b96e46aa308f035fadd06910fa016ea8e87aea0e675150.json) | 8791ebcfaae4 | rows=2000; dimensions=64; mutations=5000; operations=200; queries=1000; samples=1; seed=42; ivf_partitions=32; ivf_probes=8; ivf_iterations=8 | 6542 | 2001 |
+
+Latest observed compaction (single maintenance operation; logical payload amplification):
+
+| Backend | Latency ns | Written B | Removed objects | Additional write amplification | HTTP DELETE |
+|---|---|---|---|---|---|
+| s3 | 61732375 | 1493821 | 20 | 0.98 | 20 |
 
 Timing is descriptive, not a regression gate. Compare explicit raw reports with `python3 tools/benchmarks.py compare BEFORE AFTER`; incompatible or incomplete identities are rejected. Seeds, source fingerprints, environment, raw samples and backend metrics remain in the linked reports.

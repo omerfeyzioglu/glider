@@ -39,7 +39,8 @@ def main():
                    run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip())
         cases = ((100, 2000, True, "live-2000-chunked"),) if args.chunked_only else (
             (100, 200, True, "compacted"),
-            (100, 2000, True, "live-2000-compacted"))
+            (100, 2000, True, "live-2000-compacted"),
+            (100, 2000, True, "live-2000-chunked"))
         if not (args.compaction_only or args.chunked_only):
             cases = ((1, 200, False, "before"),
                      (100, 200, False, "after")) + cases
