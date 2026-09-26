@@ -1,5 +1,5 @@
 //! Explicit wall-clock scenarios; setup, validation, reporting and cleanup are untimed.
-use glider::{store::ObjectStore, Config, Database};
+use glider::{store::ObjectStore, Config, Database, Mutation};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -65,6 +65,10 @@ struct Counts {
     remove_calls: u64,
     get_payload_bytes: u64,
     create_payload_bytes: u64,
+    #[serde(skip_serializing_if = "zero_count")]
+    get_wall_ns: u64,
+    #[serde(skip_serializing_if = "zero_count")]
+    list_wall_ns: u64,
 }
 fn zero_count(value: &u64) -> bool {
     *value == 0
@@ -75,17 +79,21 @@ struct Counted<S> {
 }
 impl<S: ObjectStore> ObjectStore for Counted<S> {
     fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
+        let started = Instant::now();
         let result = self.inner.get(key)?;
         let mut counts = self.counts.get();
         counts.get_calls += 1;
+        counts.get_wall_ns += started.elapsed().as_nanos() as u64;
         counts.get_payload_bytes += result.as_ref().map_or(0, |v| v.len() as u64);
         self.counts.set(counts);
         Ok(result)
     }
     fn list(&self) -> glider::Result<Vec<String>> {
+        let started = Instant::now();
         let result = self.inner.list()?;
         let mut counts = self.counts.get();
         counts.list_calls += 1;
+        counts.list_wall_ns += started.elapsed().as_nanos() as u64;
         self.counts.set(counts);
         Ok(result)
     }
@@ -359,32 +367,54 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let mut checkpoint = None;
     let mut compaction = None;
     let mut mutation_bytes = 0_u64;
-    for (i, vector) in data.into_iter().enumerate() {
-        expected[i % o.rows] = vector.clone();
+    for (batch_index, batch) in data.chunks(o.batch_size).enumerate() {
+        let start_index = batch_index * o.batch_size;
+        let end_index = start_index + batch.len();
+        let mut mutations = Vec::with_capacity(batch.len());
+        for (offset, vector) in batch.iter().enumerate() {
+            let id = (start_index + offset) % o.rows;
+            expected[id] = vector.clone();
+            mutations.push(Mutation::Put {
+                id: id as u64,
+                vector: vector.clone(),
+                metadata: BTreeMap::new(),
+            });
+        }
         let before_mutation = counts.get().create_payload_bytes;
-        db.put((i % o.rows) as u64, vector)?;
+        if o.batch_size == 1 {
+            let Mutation::Put { id, vector, .. } = mutations.pop().unwrap() else {
+                unreachable!()
+            };
+            db.put(id, vector)?;
+        } else {
+            db.apply_batch(mutations)?;
+        }
         mutation_bytes += counts.get().create_payload_bytes - before_mutation;
-        if o.checkpoint_at == i + 1 {
+        if o.checkpoint_at == end_index {
             let before = counts.get();
             let before_http = observer.snapshot();
             let start = Instant::now();
             db.checkpoint()?;
             let elapsed = ns(start);
-            let mut result = json!({"sequence": i + 1, "latency_ns": elapsed,
+            let mut result = json!({"sequence": batch_index + 1, "logical_mutations": end_index, "latency_ns": elapsed,
                 "logical_bytes_written": counts.get().create_payload_bytes - before.create_payload_bytes,
                 "creates": counts.get().create_calls - before.create_calls});
             backend::attach_http(&mut result, "http_requests", observer.delta(before_http));
             checkpoint = Some(result);
         }
-        if o.compact_at == i + 1 {
+        if o.compact_at == end_index {
             let before = counts.get();
             let before_http = observer.snapshot();
             let start = Instant::now();
-            db.compact()?;
+            if o.chunk_bytes == 0 {
+                db.compact()?;
+            } else {
+                db.compact_chunked(o.chunk_bytes)?;
+            }
             let elapsed = ns(start);
             let read = counts.get().get_payload_bytes - before.get_payload_bytes;
             let written = counts.get().create_payload_bytes - before.create_payload_bytes;
-            let mut result = json!({"sequence": i + 1, "latency_ns": elapsed,
+            let mut result = json!({"sequence": batch_index + 1, "logical_mutations": end_index, "latency_ns": elapsed,
                 "logical_bytes_read": read, "logical_bytes_written": written,
                 "creates": counts.get().create_calls - before.create_calls,
                 "removes": counts.get().remove_calls - before.remove_calls,
@@ -437,6 +467,7 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     }
     let mut result = json!({"scenario": "recovery", "backend": N::NAME, "cache": N::RECOVERY_CACHE,
         "live_documents": o.rows, "mutation_history": o.mutations, "history": "round-robin puts",
+        "durable_mutation_objects": o.mutations.div_ceil(o.batch_size),
         "dataset_seed": o.seed, "query_seed": null, "query_sha256": null,
         "resources": resources(cpu_samples, "sum of open windows excluding validation and destruction"),
         "dataset_sha256": data_hash, "warmup_reopens": 1, "build_store_calls": build_counts,

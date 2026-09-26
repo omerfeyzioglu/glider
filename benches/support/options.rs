@@ -36,10 +36,14 @@ pub struct Options {
     pub rows: usize,
     pub dimensions: usize,
     pub mutations: usize,
+    #[serde(skip_serializing_if = "is_one")]
+    pub batch_size: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub checkpoint_at: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub compact_at: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub chunk_bytes: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub profile_seconds: usize,
     #[serde(skip_serializing_if = "is_zero")]
@@ -63,6 +67,9 @@ pub struct Options {
 fn is_zero(value: &usize) -> bool {
     *value == 0
 }
+fn is_one(value: &usize) -> bool {
+    *value == 1
+}
 
 impl Options {
     pub fn parse() -> Result<Option<Self>> {
@@ -78,8 +85,10 @@ impl Options {
             rows: 1000,
             dimensions: 32,
             mutations: 5000,
+            batch_size: 1,
             checkpoint_at: 0,
             compact_at: 0,
+            chunk_bytes: 0,
             profile_seconds: 0,
             ivf_partitions: 0,
             ivf_probes: 0,
@@ -111,8 +120,10 @@ impl Options {
                     --scenario all|search|commit|recovery (all)\n\
                     --rows N (1000; search size / recovery live IDs)\n\
                     --dimensions D (32) --mutations N (5000; recovery total puts, >= rows)\n\
+                    --batch-size N (1; recovery puts per durable mutation object)\n\
                     --checkpoint-at N (0; disabled, otherwise checkpoint after N recovery puts)\n\
                     --compact-at N (0; disabled, otherwise compact after N recovery puts)\n\
+                    --chunk-bytes N (0; compact-at uses legacy snapshot, otherwise chunked)\n\
                     --profile-seconds N (0; separate diagnostic search loop before measurement)\n\
                     --operations N (200; commits per insert/overwrite/delete phase)\n\
                     --queries N (100) --samples N (5; search batches / warm reopens)\n\
@@ -143,8 +154,10 @@ impl Options {
                 "--rows" => o.rows = value.parse()?,
                 "--dimensions" => o.dimensions = value.parse()?,
                 "--mutations" => o.mutations = value.parse()?,
+                "--batch-size" => o.batch_size = value.parse()?,
                 "--checkpoint-at" => o.checkpoint_at = value.parse()?,
                 "--compact-at" => o.compact_at = value.parse()?,
+                "--chunk-bytes" => o.chunk_bytes = value.parse()?,
                 "--profile-seconds" => o.profile_seconds = value.parse()?,
                 "--ivf-partitions" => o.ivf_partitions = value.parse()?,
                 "--ivf-probes" => o.ivf_probes = value.parse()?,
@@ -187,6 +200,15 @@ impl Options {
         if matches!(o.scenario.as_str(), "all" | "recovery") && o.mutations < o.rows {
             return Err("recovery mutations must be >= rows".into());
         }
+        if o.batch_size == 0 || (o.batch_size != 1 && o.scenario != "recovery") {
+            return Err("batch-size requires recovery and a positive value".into());
+        }
+        if [o.checkpoint_at, o.compact_at]
+            .into_iter()
+            .any(|boundary| boundary > 0 && boundary % o.batch_size != 0 && boundary != o.mutations)
+        {
+            return Err("checkpoint-at and compact-at must end at a batch boundary".into());
+        }
         if o.checkpoint_at > 0
             && (!matches!(o.scenario.as_str(), "all" | "recovery") || o.checkpoint_at > o.mutations)
         {
@@ -196,6 +218,9 @@ impl Options {
             && (!matches!(o.scenario.as_str(), "all" | "recovery") || o.compact_at > o.mutations)
         {
             return Err("compact-at requires recovery and must not exceed mutations".into());
+        }
+        if o.chunk_bytes > 0 && o.compact_at == 0 {
+            return Err("chunk-bytes requires compact-at".into());
         }
         if o.profile_seconds > 0 && o.scenario != "search" {
             return Err("profile-seconds requires --scenario search".into());

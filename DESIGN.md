@@ -477,6 +477,34 @@ either replacement coexists with old objects until cleanup. This bounds retained
 logical history between explicit compactions, not live dataset size, total
 memory, or provider-retained versions.
 
+### Bounded single-machine maintenance (M10)
+
+`Database::set_maintenance_limits` enables a runtime policy after recovery;
+callers must reapply it on every open. The policy does not change the persisted
+format or mutation acknowledgement. Successful object creation/removal updates a
+visible engine-object counter; recovery reconstructs it from the strongly
+consistent listing. An uncertain operation poisons the handle, so stale counters
+cannot authorize another write. `maintenance_status` exposes the sequence, tail
+object count, visible object count, soft compaction signal and hard write block.
+
+The M8 policy signals compaction at 16 tail or 64 visible engine objects and
+blocks a new mutation at 24 tail or 96 visible objects. It caps each atomic batch
+at 100 mutations. Backpressure is checked before mutation publication, so a
+rejected write creates no object and does not poison the handle. Checkpointing
+can reset the replay tail while retaining old objects; the visible-object bound
+still drives compaction. Maintenance is explicit, not part of a mutation's
+acknowledgement. `compact` and `compact_chunked` publish a new root before
+cleanup, and a repeated call after reopening resumes interrupted cleanup.
+
+At the M8 size, 100-operation batches reduce 2,000 writes to 20 mutation
+objects. A 128 KiB chunked compaction of 2,000 live rows yields 12 chunks and
+one manifest; with 24 subsequent tail objects, recovery needs at most 38 GETs
+including metadata. This is a measured layout choice for the initial envelope,
+not a bound for arbitrary datasets or chunk sizes. `benchmarks/M10.md` records
+the targeted counts, timings, memory and write amplification. No new catalog or
+mutation format was needed; the existing version 3 batch and snapshot formats
+remain compatible with old namespaces.
+
 ## Local backend
 
 Each logical object has a separate body and seal file. The body contains, in order:

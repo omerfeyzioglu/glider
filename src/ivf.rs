@@ -151,7 +151,7 @@ impl<S: ObjectStore> Database<S> {
             index,
         })?;
         self.poisoned = true;
-        self.store.create(&key, &bytes)?;
+        self.tracked_create(&key, &bytes)?;
         self.poisoned = false;
         Ok(())
     }
