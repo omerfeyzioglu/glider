@@ -39,6 +39,8 @@ pub enum Error {
     Exists(String),
     #[error("storage namespace already has an owner: {0}")]
     Busy(String),
+    #[error("maintenance required before more writes; compact the database")]
+    MaintenanceRequired,
     #[error("write outcome uncertain; reopen storage and the database before writing again")]
     RecoveryRequired,
 }
@@ -90,6 +92,51 @@ impl Config {
 pub struct Neighbor {
     pub id: u64,
     pub distance: f64,
+}
+
+/// Optional write-side bounds for a single-machine deployment. Soft limits
+/// request maintenance; hard limits reject new mutations before publication.
+#[derive(Debug, Clone, Copy)]
+pub struct MaintenanceLimits {
+    pub soft_tail_objects: u64,
+    pub hard_tail_objects: u64,
+    pub soft_visible_objects: usize,
+    pub hard_visible_objects: usize,
+    pub max_batch_mutations: usize,
+}
+
+impl MaintenanceLimits {
+    /// M8's 2,000-row, 64-dimension initial envelope. The tail leaves room for
+    /// a selected chunked snapshot within the 64-GET recovery budget.
+    pub const fn m8() -> Self {
+        Self {
+            soft_tail_objects: 16,
+            hard_tail_objects: 24,
+            soft_visible_objects: 64,
+            hard_visible_objects: 96,
+            max_batch_mutations: 100,
+        }
+    }
+    fn validate(self) -> Result<()> {
+        if self.soft_tail_objects == 0
+            || self.soft_tail_objects > self.hard_tail_objects
+            || self.soft_visible_objects == 0
+            || self.soft_visible_objects > self.hard_visible_objects
+            || self.max_batch_mutations == 0
+        {
+            return Err(Error::Invalid("invalid maintenance limits".into()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintenanceStatus {
+    pub sequence: u64,
+    pub tail_objects: u64,
+    pub visible_objects: usize,
+    pub should_compact: bool,
+    pub writes_blocked: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -572,6 +619,8 @@ pub struct Database<S> {
     checkpoint_sequence: Option<u64>,
     compacted_sequence: Option<u64>,
     ivf: Option<ivf::Index>,
+    visible_objects: usize,
+    maintenance_limits: Option<MaintenanceLimits>,
 }
 impl<S: ObjectStore> Database<S> {
     /// Open/recover, or initialize an empty namespace. Config must match on restart.
@@ -584,6 +633,7 @@ impl<S: ObjectStore> Database<S> {
             checkpoint_sequence,
             ..
         } = catalog;
+        let visible_objects = keys.len() + 1; // metadata is omitted from Catalog::keys.
         let mut db = Self {
             store,
             config,
@@ -593,6 +643,8 @@ impl<S: ObjectStore> Database<S> {
             checkpoint_sequence,
             compacted_sequence: latest_compacted,
             ivf: None,
+            visible_objects,
+            maintenance_limits: None,
         };
         // Validate the reclamation boundary even if a newer ordinary snapshot
         // supplies the live state. Never fall back from an invalid boundary.
@@ -625,6 +677,53 @@ impl<S: ObjectStore> Database<S> {
     }
     pub(crate) fn into_store(self) -> S {
         self.store
+    }
+    /// Enable write bounds after opening. Reopen and set the same policy after
+    /// a crash; counters are reconstructed from the authoritative listing.
+    pub fn set_maintenance_limits(&mut self, limits: MaintenanceLimits) -> Result<()> {
+        limits.validate()?;
+        self.maintenance_limits = Some(limits);
+        Ok(())
+    }
+    pub fn maintenance_status(&self) -> MaintenanceStatus {
+        let tail_objects = self.sequence - self.checkpoint_sequence.unwrap_or(0);
+        let (should_compact, writes_blocked) =
+            self.maintenance_limits.map_or((false, false), |limits| {
+                (
+                    tail_objects >= limits.soft_tail_objects
+                        || self.visible_objects >= limits.soft_visible_objects,
+                    tail_objects >= limits.hard_tail_objects
+                        || self.visible_objects >= limits.hard_visible_objects,
+                )
+            });
+        MaintenanceStatus {
+            sequence: self.sequence,
+            tail_objects,
+            visible_objects: self.visible_objects,
+            should_compact,
+            writes_blocked,
+        }
+    }
+    fn ensure_write_capacity(&self, mutations: usize) -> Result<()> {
+        if let Some(limits) = self.maintenance_limits {
+            if mutations > limits.max_batch_mutations {
+                return Err(Error::Invalid("batch exceeds maintenance limit".into()));
+            }
+            if self.maintenance_status().writes_blocked {
+                return Err(Error::MaintenanceRequired);
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn tracked_create(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
+        self.store.create(key, bytes)?;
+        self.visible_objects += 1;
+        Ok(())
+    }
+    fn tracked_remove(&mut self, key: &str) -> Result<()> {
+        self.store.remove(key)?;
+        self.visible_objects -= 1;
+        Ok(())
     }
     fn load_snapshot(&mut self, object: &str, sequence: u64) -> Result<()> {
         let bytes = self
@@ -795,7 +894,7 @@ impl<S: ObjectStore> Database<S> {
                     return Err(Error::Corrupt(format!("conflicting snapshot chunk: {key}")));
                 }
             } else {
-                self.store.create(&key, &bytes)?;
+                self.tracked_create(&key, &bytes)?;
             }
             references.push(ChunkRef {
                 first_id,
@@ -816,7 +915,7 @@ impl<S: ObjectStore> Database<S> {
         } else {
             segment_key(self.sequence)
         };
-        self.store.create(&key, &encode(&manifest)?)?;
+        self.tracked_create(&key, &encode(&manifest)?)?;
         Ok(())
     }
     /// Consolidate live state into a durable snapshot, then reclaim covered logs
@@ -844,7 +943,7 @@ impl<S: ObjectStore> Database<S> {
             } else {
                 let bytes = self.snapshot_bytes()?;
                 self.poisoned = true;
-                self.store.create(&compacted_key(self.sequence), &bytes)?;
+                self.tracked_create(&compacted_key(self.sequence), &bytes)?;
             }
             self.compacted_sequence = Some(self.sequence);
             self.checkpoint_sequence = Some(self.sequence);
@@ -867,6 +966,7 @@ impl<S: ObjectStore> Database<S> {
         {
             return Err(Error::Corrupt("invalid listing during compaction".into()));
         }
+        self.visible_objects = keys.len();
         let mut obsolete = Vec::new();
         for object in keys {
             if object == "metadata" {
@@ -918,7 +1018,7 @@ impl<S: ObjectStore> Database<S> {
             }
         }
         for object in obsolete {
-            self.store.remove(&object)?;
+            self.tracked_remove(&object)?;
         }
         self.poisoned = false;
         Ok(())
@@ -984,7 +1084,7 @@ impl<S: ObjectStore> Database<S> {
         }
         let bytes = self.snapshot_bytes()?;
         self.poisoned = true;
-        self.store.create(&segment_key(self.sequence), &bytes)?;
+        self.tracked_create(&segment_key(self.sequence), &bytes)?;
         self.checkpoint_sequence = Some(self.sequence);
         self.poisoned = false;
         Ok(())
@@ -1089,6 +1189,7 @@ impl<S: ObjectStore> Database<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
+        self.ensure_write_capacity(1)?;
         let sequence = self
             .sequence
             .checked_add(1)
@@ -1101,7 +1202,7 @@ impl<S: ObjectStore> Database<S> {
         let bytes = encode(&record)?;
         // Set before entering storage: even a caught backend panic cannot permit reuse.
         self.poisoned = true;
-        self.store.create(&key(sequence), &bytes)?;
+        self.tracked_create(&key(sequence), &bytes)?;
         self.apply(record.mutation);
         self.sequence = sequence;
         self.poisoned = false;
@@ -1111,6 +1212,7 @@ impl<S: ObjectStore> Database<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
+        self.ensure_write_capacity(mutations.len())?;
         let sequence = self
             .sequence
             .checked_add(1)
@@ -1123,7 +1225,7 @@ impl<S: ObjectStore> Database<S> {
         let bytes = encode(&record)?;
         // A lost acknowledgement may leave the complete batch remotely visible.
         self.poisoned = true;
-        self.store.create(&key(sequence), &bytes)?;
+        self.tracked_create(&key(sequence), &bytes)?;
         for mutation in record.mutations {
             self.apply(mutation);
         }

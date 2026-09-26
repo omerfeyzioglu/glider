@@ -1,7 +1,7 @@
 use glider::{
     ivf::IvfConfig,
     store::{LocalStore, ObjectStore},
-    Config, Database, Error, Metric, Mutation, Result,
+    Config, Database, Error, MaintenanceLimits, Metric, Mutation, Result,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 fn config() -> Config {
@@ -283,6 +283,90 @@ fn batch_validation_rejects_all_before_publication() {
     db.apply_batch(vec![put(1, 1., "valid")]).unwrap();
     assert_eq!(store.0.borrow().objects.len(), 3);
     assert!(db.search_ivf(&[0., 0.], 1, 1).is_err());
+}
+
+#[test]
+fn maintenance_backpressure_survives_restart_and_uncertain_compaction() {
+    let store = Memory::default();
+    let limits = MaintenanceLimits {
+        soft_tail_objects: 2,
+        hard_tail_objects: 3,
+        soft_visible_objects: 4,
+        hard_visible_objects: 5,
+        max_batch_mutations: 2,
+    };
+    let mut db = Database::open(store.clone(), config()).unwrap();
+    db.set_maintenance_limits(limits).unwrap();
+    assert!(matches!(
+        db.apply_batch(vec![put(1, 1., "a"), put(2, 2., "b"), put(3, 3., "c")]),
+        Err(Error::Invalid(_))
+    ));
+    for id in 0..3 {
+        db.put(id, vec![id as f32, 0.]).unwrap();
+    }
+    let status = db.maintenance_status();
+    assert_eq!((status.tail_objects, status.visible_objects), (3, 4));
+    assert!(status.should_compact && status.writes_blocked);
+    assert!(matches!(
+        db.put(3, vec![3., 0.]),
+        Err(Error::MaintenanceRequired)
+    ));
+    assert_eq!(store.0.borrow().objects.len(), 4);
+    drop(db);
+
+    let mut db = Database::open(store.clone(), config()).unwrap();
+    db.set_maintenance_limits(limits).unwrap();
+    assert_eq!(db.maintenance_status(), status);
+    store.0.borrow_mut().fail = Some(true); // Snapshot published, ack lost.
+    assert!(db.compact().is_err());
+    assert!(matches!(
+        db.put(3, vec![3., 0.]),
+        Err(Error::RecoveryRequired)
+    ));
+    drop(db);
+
+    let mut db = Database::open(store.clone(), config()).unwrap();
+    db.set_maintenance_limits(limits).unwrap();
+    assert_eq!(db.maintenance_status().visible_objects, 5);
+    assert!(db.maintenance_status().writes_blocked);
+    db.compact().unwrap(); // Resume cleanup at the selected durable root.
+    assert_eq!(db.maintenance_status().visible_objects, 2);
+    assert_eq!(db.maintenance_status().tail_objects, 0);
+    db.put(3, vec![3., 0.]).unwrap();
+    assert_eq!(db.get(3), Some([3., 0.].as_slice()));
+}
+
+#[test]
+fn maintenance_object_count_tracks_chunked_roots_and_derived_cache() {
+    let store = Memory::default();
+    let mut db = Database::open(store.clone(), config()).unwrap();
+    for id in 0..10 {
+        db.put(id, vec![id as f32, 0.]).unwrap();
+    }
+    db.checkpoint_chunked(256).unwrap();
+    assert_eq!(
+        db.maintenance_status().visible_objects,
+        store.0.borrow().objects.len()
+    );
+    db.compact_chunked(256).unwrap();
+    assert_eq!(
+        db.maintenance_status().visible_objects,
+        store.0.borrow().objects.len()
+    );
+    db.load_or_build_ivf(IvfConfig {
+        partitions: 2,
+        iterations: 1,
+        seed: 42,
+    })
+    .unwrap();
+    let status = db.maintenance_status();
+    assert_eq!(status.visible_objects, store.0.borrow().objects.len());
+    drop(db);
+    let db = Database::open(store.clone(), config()).unwrap();
+    assert_eq!(
+        db.maintenance_status().visible_objects,
+        status.visible_objects
+    );
 }
 
 #[test]

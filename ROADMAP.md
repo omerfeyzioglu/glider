@@ -222,7 +222,17 @@ staging and restart on LocalStore and MinIO. Do not reuse a failed destination.
 
 ## M10 — Bound memory, recovery and write-side amplification
 
-Status: planned
+Status: complete for the M8 initial envelope; larger workloads require a new envelope
+
+The 2,000-mutation stress input now opens from 20 version-3 batch objects in
+27.3 ms p95 on loopback MinIO, with 21 GETs, one LIST page and 11.7 MiB peak
+client RSS. At 2,000 live rows, 128 KiB chunked compaction opens in 28.0 ms
+with 14 GETs and 13.2 MiB peak RSS; maintenance writes 0.980 times the input
+mutation payload and leaves 14 objects. The runtime M8 policy signals
+compaction before its 24-object hard tail, rejects writes at that bound without
+publication, and reconstructs counters after restart. Interrupted compaction
+resumes from its committed root. Existing persisted versions remain readable.
+See `benchmarks/M10.md` for the narrow measurements and layout assumptions.
 
 Goal:
 Keep opening, ingesting, checkpointing and compacting within the M8 resource
