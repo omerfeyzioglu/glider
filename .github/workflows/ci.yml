@@ -65,6 +65,9 @@ jobs:
       - name: Validate filtered exact versus IVF quality
         run: python3 tools/filter_benchmark.py --smoke --output target/filter-smoke
 
+      - name: Verify serial serving, recovery and backup smoke
+        run: python3 tools/m13_soak.py target/serving-smoke --smoke
+
       - name: Retain benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,4 +82,5 @@ jobs:
             target/ann-smoke/SUMMARY.md
             target/filter-smoke/*.json
             target/filter-smoke/SUMMARY.md
+            target/serving-smoke/*.json
           if-no-files-found: ignore
