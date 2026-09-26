@@ -152,6 +152,10 @@ no object requests. MinIO recovery measurements are archived in
 [benchmarks/SUMMARY.md](benchmarks/SUMMARY.md); a cloud-provider latency baseline
 has not been established.
 
+For the bounded real-provider handoff, see [the S3 pilot](docs/S3_PILOT.md).
+It has a disposable MinIO mode and an explicit AWS mode that checks an active
+Free account plan before writing. Routine CI uses only MinIO.
+
 ## Atomic batch writes
 
 Use a batch to publish several ordered operations with one object-store PUT:

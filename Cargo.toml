@@ -29,3 +29,7 @@ harness = false
 [[example]]
 name = "m13_soak"
 required-features = ["s3"]
+
+[[example]]
+name = "s3_pilot"
+required-features = ["s3"]
