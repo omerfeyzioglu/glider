@@ -112,6 +112,15 @@ the exclusive-owner publication model. The cache saves retraining; recovery stil
 loads authoritative documents into memory, and queries still use them for exact
 candidate scoring and filtering.
 
+For the M8 deployment, exact search is the supported serving policy. The M12
+quality gate tested serialized full-vector partitions and four-partition bundles:
+eight probes fail sparse-filter recall, while higher probing or bundling exceeds
+the selected request/byte budgets. A filter-specific persistent partition copy
+would duplicate the small M11 resident exact posting. No production persisted
+partition protocol is introduced for this envelope. Explicit resident IVF APIs
+remain experimental; approximate requests in the serving wrapper are rejected
+until a workload-specific quality policy is justified. See `benchmarks/M12.md`.
+
 IVF is the first partitioned baseline, chosen for a small implementation and a
 layout suitable for later object-storage evaluation. HNSW would instead add graph
 memory and maintenance; SPFresh-style local rebalancing is deferred until update

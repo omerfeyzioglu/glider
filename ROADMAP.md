@@ -304,14 +304,18 @@ verify the exact path. Broader predicates use the validated full scan.
 
 ## M12 — Search persisted ANN partitions without loading all vectors
 
-Status: planned
+Status: complete by the exact-serving acceptance alternative for M8.
+The tested IVF layouts fail the sparse-filter budgets; production persisted ANN
+is deferred. See [benchmarks/M12.md](benchmarks/M12.md).
 
 Goal:
 Turn IVF from an in-memory candidate baseline into a useful object-store query
 path, while authoritative vectors remain recoverable without the derived index.
 
 Steps:
-- Test a versioned partition layout that fetches only probed candidates and
+- First gate candidate layouts on quality and serialized request/byte costs.
+  If no tested layout meets M8, retain exact serving and defer publication work.
+- For an accepted candidate, test a versioned partition layout that fetches only probed candidates and
   supports exact reranking and the M11 filter path. Compare alternatives before
   fixing the layout; include index build, update and remote GET costs.
 - Tie each index generation to a committed mutation boundary. Define rebuild,
@@ -328,6 +332,20 @@ Done when:
 - The selected deployment workload meets its M8 ANN quality and resource
   budgets, or the result is recorded and the exact path remains the supported
   serving mode.
+
+### M12a — Reject unsuitable layouts before adding a publication protocol
+
+The version-1 full-vector partition candidate and four-partition bundle were
+serialized and round-tripped against the existing deterministic IVF cache.
+On 1,000 queries per distribution, eight probes miss sparse-filter recall;
+higher probing exceeds eight GETs. Bundles exceed 512 KiB even at the minimum
+observed transfer. M11's 20-row exact posting needs no query GETs. Filter-only
+partition copies would add publication and invalidation work to duplicate that
+already-exact path. No persisted ANN generation is enabled for this envelope;
+there is no new format to recover or reclaim. Existing derived-cache loss,
+corruption, restart and uncertain-publication tests still verify exact recovery.
+Reopen this decision for a workload that justifies ANN, without claiming that
+all possible layouts have been ruled out.
 
 ## M13 — Single-machine serving and recovery operations
 
