@@ -266,7 +266,7 @@ transport correction precedes the full M11 comparison.
 
 ## M11 — Make filtered exact queries selective on object storage
 
-Status: in progress
+Status: complete for the M8 hot equality predicate; see [benchmarks/M11.md](benchmarks/M11.md).
 
 Goal:
 Avoid reading every vector chunk for a selective equality filter while keeping
@@ -298,8 +298,9 @@ streaming reader already validates all selected chunks at open. Retaining the
 20 matching documents during that scan avoids a separate persisted posting
 object, write amplification and a new recovery dependency. This intermediate
 choice has no new persisted format; the posting is rebuilt after restart.
-Complete M11 only after the 1,000-query MinIO latency and nonselective checks,
-update/delete and failure-path tests, and exact-oracle verification.
+The 1,000-query MinIO comparison meets the selective and nonselective budgets.
+Update/delete, ties, compaction, restart, missing chunks and posting-cap tests
+verify the exact path. Broader predicates use the validated full scan.
 
 ## M12 — Search persisted ANN partitions without loading all vectors
 
