@@ -15,6 +15,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -74,6 +75,7 @@ jobs:
         with:
           name: benchmark-reports
           path: |
+            target/minio-diagnostics/*.jsonl
             target/backend-smoke/*.json
             target/compaction-*.json
             target/search-smoke/*.json

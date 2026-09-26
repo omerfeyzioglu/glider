@@ -5,42 +5,12 @@ import json
 import os
 from pathlib import Path
 import secrets
-import subprocess
-import time
-import urllib.error
-import urllib.request
 
 # The legacy Quay repository no longer permits anonymous pulls. This digest
 # contains MinIO RELEASE.2025-10-15T17-29-55Z and mc for isolated CI tests.
 IMAGE = "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9"
-AUTH_READY = ('mc alias set test http://127.0.0.1:9000 '
-              '"$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1 '
-              '&& mc ls test >/dev/null 2>&1')
 
-
-def run(*args, env=None, capture=False):
-    return subprocess.run(args, env=env, check=True, text=True,
-                          stdout=subprocess.PIPE if capture else None).stdout
-
-
-def ready(endpoint, container):
-    # Health may turn green before S3 authentication works. Poll only startup
-    # readiness; database requests themselves are never retried here.
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(endpoint + "/minio/health/ready", timeout=1) as response:
-                healthy = response.status == 200
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
-            healthy = False
-        if healthy:
-            probe = subprocess.run(["docker", "exec", container, "/bin/sh", "-c", AUTH_READY],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   check=False)
-            if probe.returncode == 0:
-                return
-        time.sleep(0.1)
-    raise RuntimeError("MinIO health and authenticated S3 listing did not become ready within 30 seconds")
+from minio_harness import container_scope, ready, run
 
 
 def main():
@@ -69,7 +39,7 @@ def main():
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
         run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
-    try:
+    with container_scope(name):
         run("docker", "run", "-d", "--name", name, "-p", "127.0.0.1::9000",
             "-e", "MINIO_ROOT_USER", "-e", "MINIO_ROOT_PASSWORD", IMAGE,
             "server", "/data", env=env, capture=True)
@@ -171,8 +141,6 @@ def main():
             run("python3", "tools/search_benchmark.py", "--backend", "s3", "--smoke",
                 "--output", str(search_output), "--label", "MinIO search smoke; desktop load uncontrolled", env=env)
         print("S3 integration and abrupt MinIO restart checks passed.", flush=True)
-    finally:
-        subprocess.run(["docker", "rm", "-fv", name], check=False, stdout=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

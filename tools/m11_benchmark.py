@@ -4,10 +4,10 @@ import json
 import os
 from pathlib import Path
 import secrets
-import subprocess
 import sys
 
-from test_s3 import IMAGE, ready, run
+from test_s3 import IMAGE
+from minio_harness import container_scope, ready, run
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
         env["GLIDER_M11_FULL"] = "1"
     run("cargo", "build", "--release", "--locked", "--features", "s3",
         "--example", "m11_filter_probe", env=env)
-    try:
+    with container_scope(name):
         run("docker", "run", "-d", "--name", name, "-p", "127.0.0.1::9000",
             "-e", "MINIO_ROOT_USER", "-e", "MINIO_ROOT_PASSWORD", IMAGE,
             "server", "/data", env=env, capture=True)
@@ -58,13 +58,6 @@ def main():
             item = report[phase]
             print(phase, "p95_ms=", item["p95_ns"] / 1e6,
                   "GETs=", item["get_calls"], flush=True)
-    except subprocess.CalledProcessError:
-        print(run("docker", "inspect", "--format", "{{json .State}}", name, capture=True),
-              file=sys.stderr)
-        raise
-    finally:
-        subprocess.run(["docker", "rm", "-fv", name], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

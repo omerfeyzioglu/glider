@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 import secrets
-import subprocess
 
-from test_s3 import IMAGE, ready, run
+from test_s3 import IMAGE
+from minio_harness import container_scope, ready, run
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8),
                MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
-    try:
+    with container_scope(name):
         run("docker", "run", "-d", "--name", name, "-p", "127.0.0.1::9000",
             "-e", "MINIO_ROOT_USER", "-e", "MINIO_ROOT_PASSWORD", IMAGE,
             "server", "/data", env=env, capture=True)
@@ -71,9 +71,6 @@ def main():
             (args.output / (label + ".json")).write_text(raw)
             print(label, "p95_ms=", result["total_open"]["p95_sample_ns"] / 1e6,
                   "get=", result["measured_store_calls_per_sample"][0]["get_calls"], flush=True)
-    finally:
-        subprocess.run(["docker", "rm", "-fv", name], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":
