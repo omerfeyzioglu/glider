@@ -197,6 +197,21 @@ mutation tail and manifest in memory, and is subject to the same exclusive
 namespace ownership rule. It is useful when base-vector RAM matters more than
 remote read latency.
 
+For a known selective equality, retain its matching rows during the validated
+open. The row budget prevents an unexpectedly broad filter from filling RAM:
+
+```rust,ignore
+let reader = StreamingDatabase::open_with_filter(
+    LocalStore::open(&path)?, config, "selected", "true", 64,
+)?;
+let nearest = reader.search_filtered(&query, 10, &[("selected", "true")])?;
+```
+
+That predicate uses resident matching rows plus newer mutations; other queries
+still scan chunks. The posting is rebuilt on every open and makes no durable
+writes. Exceeding the row budget returns an error; use ordinary streaming open
+for a broader filter.
+
 ## Compaction (M4)
 
 Call `db.compact()?` to publish a full snapshot and reclaim covered mutations and

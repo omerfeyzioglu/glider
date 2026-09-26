@@ -13,11 +13,15 @@ use std::{
 struct Memory {
     objects: Rc<RefCell<BTreeMap<String, Vec<u8>>>>,
     gets: Rc<Cell<usize>>,
+    get_bytes: Rc<Cell<usize>>,
 }
 impl ObjectStore for Memory {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.gets.set(self.gets.get() + 1);
-        Ok(self.objects.borrow().get(key).cloned())
+        let value = self.objects.borrow().get(key).cloned();
+        self.get_bytes
+            .set(self.get_bytes.get() + value.as_ref().map_or(0, Vec::len));
+        Ok(value)
     }
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.objects.borrow().keys().cloned().collect())
@@ -33,6 +37,210 @@ impl ObjectStore for Memory {
         self.objects.borrow_mut().remove(key);
         Ok(())
     }
+}
+
+#[test]
+fn m8_filter_distribution_forces_nearly_full_chunk_scan() {
+    let store = Memory::default();
+    let config = Config {
+        dimensions: 64,
+        metric: Metric::SquaredEuclidean,
+    };
+    let mut db = Database::open(store.clone(), config).unwrap();
+    let mut state = 42_u64;
+    for batch_start in (0..2000).step_by(100) {
+        let mut batch = Vec::new();
+        for id in batch_start..batch_start + 100 {
+            let vector = (0..64)
+                .map(|_| {
+                    state = state.wrapping_add(0x9e3779b97f4a7c15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+                    z ^= z >> 31;
+                    ((z >> 40) as u32 as f32) * (1.0 / 8_388_608.0) - 1.0
+                })
+                .collect();
+            let metadata = if id % 100 == 0 {
+                BTreeMap::from([("selected".into(), "true".into())])
+            } else {
+                BTreeMap::new()
+            };
+            batch.push(Mutation::Put {
+                id: id as u64,
+                vector,
+                metadata,
+            });
+        }
+        db.apply_batch(batch).unwrap();
+    }
+    db.compact_chunked(131_072).unwrap();
+    let chunks: Vec<_> = store
+        .objects
+        .borrow()
+        .iter()
+        .filter(|(key, _)| key.starts_with("compactedchunk-"))
+        .map(|(_, bytes)| {
+            let value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let rows = value["documents"].as_array().unwrap();
+            rows.iter()
+                .filter(|row| row[1]["metadata"]["selected"] == "true")
+                .count()
+        })
+        .collect();
+    assert_eq!(chunks.iter().sum::<usize>(), 20);
+    assert!(chunks.iter().filter(|&&count| count > 0).count() > 4);
+    let query = vec![0.0; 64];
+    let expected = db
+        .search_filtered(&query, 10, &[("selected", "true")])
+        .unwrap();
+    drop(db);
+    let reader = StreamingDatabase::open(store.clone(), config).unwrap();
+    let before_gets = store.gets.get();
+    let before_bytes = store.get_bytes.get();
+    assert_eq!(
+        reader
+            .search_filtered(&query, 10, &[("selected", "true")])
+            .unwrap(),
+        expected
+    );
+    assert_eq!(store.gets.get() - before_gets, chunks.len());
+    assert!(store.get_bytes.get() - before_bytes > 1_000_000);
+    eprintln!(
+        "M11 baseline: {} chunks, {} matching chunks, {} GET bytes",
+        chunks.len(),
+        chunks.iter().filter(|&&count| count > 0).count(),
+        store.get_bytes.get() - before_bytes
+    );
+    let reader =
+        StreamingDatabase::open_with_filter(store.clone(), config, "selected", "true", 64).unwrap();
+    let before_gets = store.gets.get();
+    let before_bytes = store.get_bytes.get();
+    assert_eq!(
+        reader
+            .search_filtered(&query, 10, &[("selected", "true")])
+            .unwrap(),
+        expected
+    );
+    assert_eq!(store.gets.get() - before_gets, 0);
+    assert_eq!(store.get_bytes.get() - before_bytes, 0);
+}
+
+#[test]
+fn resident_filter_posting_applies_tail_and_rejects_missing_base_on_reopen() {
+    let store = Memory::default();
+    let cfg = config(Metric::SquaredEuclidean);
+    let mut db = Database::open(store.clone(), cfg).unwrap();
+    for (id, group) in [(1, "red"), (2, "red"), (3, "blue")] {
+        db.put_with_metadata(id, vec![id as f32, 0.], metadata(group))
+            .unwrap();
+    }
+    db.compact_chunked(256).unwrap();
+    db.put_with_metadata(1, vec![0., 0.], metadata("blue"))
+        .unwrap();
+    db.delete(2).unwrap();
+    db.put_with_metadata(4, vec![3., 0.], metadata("red"))
+        .unwrap();
+    db.put_with_metadata(3, vec![3., 0.], metadata("red"))
+        .unwrap();
+    let query = [0., 0.];
+    let expected = db.search_filtered(&query, 10, &[("group", "red")]).unwrap();
+    let expected_blue = db
+        .search_filtered(&query, 10, &[("group", "blue")])
+        .unwrap();
+    assert_eq!(
+        expected,
+        vec![
+            glider::Neighbor {
+                id: 3,
+                distance: 9.
+            },
+            glider::Neighbor {
+                id: 4,
+                distance: 9.
+            },
+        ]
+    );
+    assert_eq!(
+        expected_blue,
+        vec![glider::Neighbor {
+            id: 1,
+            distance: 0.
+        }]
+    );
+    drop(db);
+
+    let reader =
+        StreamingDatabase::open_with_filter(store.clone(), cfg, "group", "red", 64).unwrap();
+    let before_gets = store.gets.get();
+    assert_eq!(
+        reader
+            .search_filtered(&query, 10, &[("group", "red")])
+            .unwrap(),
+        expected
+    );
+    assert_eq!(store.gets.get(), before_gets);
+    assert_eq!(
+        reader
+            .search_filtered(&query, 10, &[("group", "blue")])
+            .unwrap(),
+        expected_blue
+    );
+    assert!(store.gets.get() > before_gets); // Unindexed predicates stay exact.
+    drop(reader);
+    let mut db = Database::open(store.clone(), cfg).unwrap();
+    db.compact_chunked(256).unwrap();
+    drop(db);
+    let reader =
+        StreamingDatabase::open_with_filter(store.clone(), cfg, "group", "red", 64).unwrap();
+    let before_gets = store.gets.get();
+    assert_eq!(
+        reader
+            .search_filtered(&query, 10, &[("group", "red")])
+            .unwrap(),
+        expected
+    );
+    assert_eq!(store.gets.get(), before_gets);
+    drop(reader);
+    assert!(matches!(
+        StreamingDatabase::open_with_filter(store.clone(), cfg, "group", "red", 1),
+        Err(Error::Invalid(_))
+    ));
+    let chunk = store
+        .objects
+        .borrow()
+        .keys()
+        .find(|key| key.starts_with("compactedchunk-"))
+        .unwrap()
+        .clone();
+    store.objects.borrow_mut().remove(&chunk);
+    assert!(StreamingDatabase::open_with_filter(store, cfg, "group", "red", 64).is_err());
+}
+
+#[test]
+fn posting_budget_applies_to_selected_snapshot_not_older_compaction() {
+    let store = Memory::default();
+    let cfg = config(Metric::Manhattan);
+    let mut db = Database::open(store.clone(), cfg).unwrap();
+    for id in 0..3 {
+        db.put_with_metadata(id, vec![id as f32, 0.], metadata("red"))
+            .unwrap();
+    }
+    db.compact_chunked(256).unwrap();
+    db.delete(0).unwrap();
+    db.delete(1).unwrap();
+    db.checkpoint_chunked(256).unwrap();
+    drop(db);
+    let reader = StreamingDatabase::open_with_filter(store, cfg, "group", "red", 1).unwrap();
+    assert_eq!(
+        reader
+            .search_filtered(&[0., 0.], 5, &[("group", "red")])
+            .unwrap(),
+        vec![glider::Neighbor {
+            id: 2,
+            distance: 2.
+        }]
+    );
 }
 fn config(metric: Metric) -> Config {
     Config {
@@ -97,6 +305,8 @@ fn streamed_exact_and_filtered_results_match_recovered_database() {
         drop(db);
 
         let reader = StreamingDatabase::open(store.clone(), cfg).unwrap();
+        let indexed =
+            StreamingDatabase::open_with_filter(store.clone(), cfg, "group", "red", 41).unwrap();
         assert_eq!(reader.sequence(), 44);
         assert_eq!(reader.config(), cfg);
         for (query, k, filter, result) in expected {
@@ -104,6 +314,11 @@ fn streamed_exact_and_filtered_results_match_recovered_database() {
                 reader.search_filtered(&query, k, &filter).unwrap(),
                 result,
                 "metric={metric:?} query={query:?} k={k} filter={filter:?}"
+            );
+            assert_eq!(
+                indexed.search_filtered(&query, k, &filter).unwrap(),
+                result,
+                "posting metric={metric:?} query={query:?} k={k} filter={filter:?}"
             );
         }
         assert_eq!(
