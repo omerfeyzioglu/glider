@@ -387,8 +387,198 @@ Retain the single-write baseline unchanged, and verify the full soak against
 both the batch and existing query/recovery/resource bounds. This is an explicit
 serial contract; no concurrent request queue latency is claimed.
 
+## Next: safe concurrent use and a measured capacity boundary
+
+M8–M13 establish a serial contract for 2,000 synthetic vectors, not a general
+production capacity claim. M14–M20 below are planned; conditional work stays
+deferred when its entry condition is absent. One owner continues to publish
+authoritative state unless a later measured decision explicitly changes that.
+
+Execution rules:
+- Start each milestone with the concrete failure or bottleneck, the smallest
+  reproducer, and its acceptance limits. Correctness work needs failure tests,
+  not an artificial performance benchmark. Set numeric performance budgets
+  before optimizing; distinguish queue delay from storage and execution time.
+- Reuse valid archived baselines. Run one targeted before/after comparison for
+  a performance decision, with enough samples to support the claimed statistic.
+  Expand only to resolve a specific uncertainty; avoid full parameter matrices,
+  repeated full soaks, and unrelated benchmarks. Preserve required CI gates.
+- If a blocker appears, insert a small Mxxa step with evidence and acceptance
+  criteria, update this roadmap, resolve it, then resume the dependent work.
+  Do not silently expand a milestone or mark unmet criteria complete.
+- Keep context small: read changed/relevant sections, inspect failing output,
+  and record only the decision, reproducible evidence and durable guarantees.
+  Follow AGENTS.md: a branch and PR per logical change, verified CI, and tests
+  plus DESIGN.md updates when behavior or architecture changes.
+
+## M14 — Bound and diagnose MinIO CI failures
+
+Status: planned; small prerequisite.
+
+Evidence: M10a fixed idle S3 transport progress. The latest main
+[CI run](https://github.com/omerfeyzioglu/glider/actions/runs/36237507054)
+passed in about four minutes; its MinIO integration step took 98 seconds and
+serving smoke 12 seconds. This is one observation, not a duration guarantee.
+`tools/test_s3.py` still has unbounded child commands, including the authenticated
+probe inside its nominal 30-second readiness deadline and container cleanup.
+The workflow has no explicit job timeout. These are harness gaps, not evidence
+of another engine transport failure.
+
+Steps:
+- Attribute time to build, image/startup, readiness, tests and cleanup; inspect
+  existing CI logs before adding measurements or changing coverage.
+- Bound child processes and cleanup in the shared MinIO harness and its callers;
+  enforce the remaining readiness deadline and an explicit outer job limit.
+  On failure retain the failed stage and sanitized diagnostics without secrets.
+- Keep startup polling separate from database operations. Fix reproduced causes;
+  do not hide failures with blind retries or larger timeouts. Preserve short
+  object-store, crash/restart and serving checks; long performance runs stay
+  outside routine CI. Remove duplicate setup only when timing justifies it.
+
+Done when:
+- Injected stuck probe, failed startup/test and stuck cleanup terminate within
+  declared bounds, report the original cause and attempt bounded cleanup.
+- A normal MinIO CI run passes with stage timing and useful failure artifacts;
+  no recovery coverage is silently removed to obtain a green result.
+
+## M15 — Safe client retries and conditional updates
+
+Status: planned.
+
+Problem: a lost acknowledgement leaves clients unsure whether a batch committed;
+repeating an old request can overwrite newer data even when replay is idempotent.
+
+Steps:
+- Define request IDs, payload identity and durable result lookup. Persist the
+  deduplication decision atomically with the mutation; checkpoint and recovery
+  must preserve it. Compare bounded retention alternatives before choosing a
+  versioned format, including explicit behavior for expired/unknown IDs.
+- Add document revision preconditions checked by the owner at commit time,
+  including delete/reinsert cases. Specify batch conflict atomicity and read
+  visibility after acknowledgement. Do not confuse revisions with request IDs.
+- Define retry guarantees across isolated takeover, backup and restore; restoring
+  an older backup must not imply knowledge of requests beyond its boundary.
+
+Done when:
+- Lost acknowledgements, restart, compaction and isolated takeover tests show
+  that a retained request cannot apply twice; mismatched payload reuse and stale
+  revisions return explicit conflicts. Concurrent duplicates share one outcome.
+- Retention memory/storage is bounded, expiration is explicit, and failure tests
+  cannot produce a durable mutation without its required retry metadata.
+- A client can resolve an uncertain result within the documented retention and
+  recovery scope; no claim of unlimited exactly-once delivery is made.
+
+## M16 — Bounded concurrent admission with one committer
+
+Status: planned; depends on M15's request contract.
+
+Problem: the serial API has no queue limits or latency contract for many callers.
+
+Steps:
+- Define a small concurrent workload, arrival rate and numeric queue, memory and
+  end-to-end latency budgets. Measure queue wait, commit time and maintenance
+  separately; the M13 batch timing is not an end-to-end concurrent baseline.
+- Introduce bounded admission by both request count and bytes, explicit overload
+  responses, and one commit worker. Compare caller batching with bounded group
+  commit only if small requests make PUT cost or throughput the limiting factor.
+- Specify fairness, maximum batching delay, shutdown and cancellation before
+  versus after publication. Preserve each request's atomicity and M15 identity.
+
+Done when:
+- Controlled load within the declared envelope meets its budgets; overload has
+  bounded memory and explicit rejection instead of indefinite queue growth.
+- Tests cover full queues, cancellation, shutdown, worker failure and uncertain
+  PUT: acknowledged requests survive recovery; other outcomes remain resolvable
+  under M15. No request receives success before durable publication.
+
+## M17 — Consistent concurrent read views
+
+Status: planned; enter when overlapping reads/writes are required or M16 shows
+that serialized reads violate the declared latency budget.
+
+Steps:
+- Compare a simple lock with immutable pinned views on the affected workload.
+  Choose the least complex design meeting the budget; full transactional MVCC
+  is not a prerequisite. Avoid copying the entire document map per small batch
+  unless the measured memory and update costs justify it.
+- Bind vectors, metadata, tombstones and any derived index to one committed
+  boundary. Define read-your-writes and the lifetime of an old view. Retain
+  referenced memory/objects until safe reclamation; bound slow-reader retention.
+
+Done when:
+- Deterministic interleaving tests prove readers never see partial batches,
+  mixed revisions or reclaimed data during updates, compaction and view release.
+- Acknowledged writes are visible according to the documented view contract;
+  long readers and failures obey explicit memory/storage retention limits.
+- The targeted overlap measurement meets the declared latency/resource budgets.
+  If serialization suffices, record the evidence and defer pinned-view work.
+
+## M18 — Maintenance without unbounded foreground stalls
+
+Status: conditional on measured maintenance stalls in the active envelope.
+
+Steps:
+- Attribute admission/read tail latency to snapshot construction, publication
+  and cleanup. Compare smaller bounded synchronous work with a background worker
+  before adding scheduling and another publication participant.
+- If background work is justified, budget CPU, memory, I/O and backlog. Build
+  from a fixed committed boundary; coordinate publication with the owner and
+  preserve newer writes. Reclamation must respect M17 views when enabled.
+
+Done when:
+- The identified stall fits the predeclared budget without unbounded backlog,
+  memory or write amplification; hard limits still apply backpressure.
+- Crash tests before publication, after publication and during cleanup preserve
+  acknowledged writes and resume safely. Reader-held objects survive cleanup.
+- Maintenance/storage failure has an explicit serving/recovery outcome; a worker
+  cannot silently die while admission continues beyond the resource limits.
+
+## M19 — Establish a representative larger operating envelope
+
+Status: planned; does not assume that M17/M18 need implementation.
+
+Steps:
+- Select one intended deployment workload: representative dimensions, dataset,
+  filter selectivity, update rate, concurrency and storage service. Record numeric
+  latency, throughput, RSS, recovery, request/byte and backup/restore budgets.
+- Increase the suspected limiting axis in a few steps and stop at the first
+  budget breach. Profile that boundary rather than running a broad matrix.
+  Separate cold recovery, steady reads/writes and maintenance costs.
+- Validate remote storage on the chosen service before claiming remote behavior.
+  If unavailable, report only local/MinIO evidence and leave remote acceptance
+  open. Include bounded admission/open behavior for oversized namespaces.
+
+Done when:
+- Reproducible evidence identifies a supported envelope and its first limiting
+  resource, with exact-oracle checks and failure/recovery tests at that size.
+- One final workload-specific soak and backup/restore rehearsal meet its stated
+  budgets after targeted fixes; the small M8 result is not extrapolated.
+
+## M20 — Remove the demonstrated capacity bottleneck
+
+Status: conditional; select scope from M19 evidence, not a feature checklist.
+
+Steps:
+- Choose one cause and compare the smallest relevant alternatives: selective
+  reads/cache layout for GET/byte cost, compact representation for RAM, indexing
+  for exact-scan CPU, or batching for commit overhead. Split independent changes
+  into separately reviewed steps.
+- Reopen persisted ANN only when exact search misses the chosen envelope.
+  Require exact-oracle recall/short-result, latency, memory and update/rebuild
+  budgets, with generation publication, corruption and recovery tests.
+- Consider multiple committers only after evidence shows the single committer
+  is saturated after batching and avoidable work is removed. Compare continued
+  serialization, conflict validation and partition ownership; specify fencing
+  and object-store publication before changing the ownership contract.
+
+Done when:
+- A targeted before/after result meets the selected envelope without weakening
+  durability, recovery or query quality, and relevant failure tests plus CI pass.
+- The chosen mechanism and rejected alternatives are documented. Unjustified
+  ANN, multi-writer or other branches remain deferred, not marked implemented.
+
 ## Beyond the single-machine target
 
-Sharding, replication, consensus, multi-writer execution, GPU work,
-quantization and additional index families need separate requirements and
-measurements. They are not prerequisites for this roadmap.
+Distributed sharding, replication, consensus and GPU work need separate
+requirements and measurements. Quantization, additional index families and
+multi-writer execution are conditional options under M20, not prerequisites.
