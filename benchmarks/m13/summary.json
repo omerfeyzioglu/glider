@@ -1,0 +1,17 @@
+{
+  "git_revision": "6df0e30539e6db3566a407d13875277dfcb10be0",
+  "git_status": "",
+  "service": "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "os": "Darwin 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:03 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T8132 arm64",
+  "cpu": "Apple M4",
+  "smoke": false,
+  "elapsed_seconds": 1811.29150075,
+  "mutation_payload_bytes": 418487412,
+  "maintenance_payload_bytes": 673946252,
+  "additional_maintenance_write_ratio": 1.6104337494385614,
+  "epochs": 6,
+  "cycles": 1800,
+  "queries": 180000,
+  "logical_mutations": 720000
+}
