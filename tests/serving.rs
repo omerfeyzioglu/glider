@@ -198,7 +198,9 @@ fn legacy_v1_v2_migrate_through_chunked_backup_and_restore() {
         )
         .unwrap();
     source.create("mutation-00000000000000000002",br#"{"version":2,"sequence":2,"mutation":{"type":"put","id":2,"vector":[2,0],"metadata":{"selected":"true"}}}"#).unwrap();
-    let mut db = open(source.clone());
+    let mut chunked = options();
+    chunked.chunk_bytes = Some(131_072);
+    let mut db = SingleMachine::open(source.clone(), config(), chunked).unwrap();
     let backup = Memory::default();
     db.backup_to(backup.clone()).unwrap();
     let root = source

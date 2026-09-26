@@ -45,6 +45,8 @@ def main():
             assert r['max_visible_engine_objects'] <= 128
             if not args.smoke:
                 assert r['unfiltered']['p95_ns'] <= 5_000_000 and r['filtered']['p95_ns'] <= 5_000_000
+                assert r['batch']['p95_ns'] <= 100_000_000
+                assert r['cycles']*400/r['elapsed_seconds'] >= 100
             for opened in r['opens']:
                 assert opened['http_gets'] <= 64 and opened['http_lists'] <= 4
                 if not args.smoke:

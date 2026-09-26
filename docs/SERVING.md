@@ -69,8 +69,10 @@ Checksums and recovery detect corruption and missing referenced chunks, but
 unwitnessed final-object deletion cannot always be detected. Recovery cannot
 recreate acknowledged data lost from both the source and its backups.
 
-Legacy v1 vector-only and v2 metadata records remain readable. Backup compaction
-migrates them to the existing v3 chunk/manifest format. Do not open a compacted
+Legacy v1 vector-only and v2 metadata records remain readable. Default backup
+compaction produces the existing v2 single-object snapshot. Set
+`chunk_bytes: Some(131_072)` to produce v3 chunks for streaming readers; this
+layout needs a separately measured admission budget. Do not open a compacted
 namespace with an older binary that does not understand that format.
 
 ## Verification

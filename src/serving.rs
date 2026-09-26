@@ -11,7 +11,8 @@ pub struct ServingOptions {
     pub max_documents: usize,
     /// Serialized vector plus metadata, excluding ID and log framing.
     pub max_document_bytes: usize,
-    pub chunk_bytes: usize,
+    /// None selects a single-object snapshot; Some enables chunked snapshots.
+    pub chunk_bytes: Option<usize>,
 }
 impl ServingOptions {
     pub const fn m8() -> Self {
@@ -19,12 +20,12 @@ impl ServingOptions {
             maintenance: MaintenanceLimits::m8(),
             max_documents: 2000,
             max_document_bytes: 4096,
-            chunk_bytes: 131_072,
+            chunk_bytes: None,
         }
     }
     fn validate(self) -> Result<()> {
         self.maintenance.validate()?;
-        if self.max_documents == 0 || self.max_document_bytes == 0 || self.chunk_bytes == 0 {
+        if self.max_documents == 0 || self.max_document_bytes == 0 || self.chunk_bytes == Some(0) {
             return Err(Error::Invalid("serving bounds must be positive".into()));
         }
         Ok(())
@@ -169,7 +170,10 @@ impl<S: ObjectStore> SingleMachine<S> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        let result = self.db.compact_chunked(self.options.chunk_bytes);
+        let result = match self.options.chunk_bytes {
+            Some(bytes) => self.db.compact_chunked(bytes),
+            None => self.db.compact(),
+        };
         if result.is_ok() {
             self.maintenance_runs += 1;
         } else {
