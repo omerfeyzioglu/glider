@@ -1,7 +1,23 @@
 //! Feasibility gate, not a production persisted ANN reader. Logical layout costs
 //! are computed from actual serialized candidate objects; no remote latency claim.
 use glider::{ivf::IvfConfig, store::ObjectStore, Config, Database, Error, Metric, Mutation};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+struct CandidateDocument {
+    vector: Vec<f32>,
+    metadata: BTreeMap<String, String>,
+}
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+struct CandidatePartition {
+    version: u32,
+    sequence: u64,
+    config: Config,
+    documents: Vec<(u64, CandidateDocument)>,
+}
 use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
@@ -9,6 +25,12 @@ use std::{
     rc::Rc,
     time::Instant,
 };
+
+#[derive(Serialize)]
+struct CandidateBundle<'a> {
+    version: u32,
+    partitions: &'a [CandidatePartition],
+}
 
 #[derive(Clone, Default)]
 struct Memory(Rc<RefCell<BTreeMap<String, Vec<u8>>>>);
@@ -109,24 +131,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Versioned candidate wire objects contain full vectors + metadata for
         // exact reranking. Serialize and round-trip, but do not publish a new
         // engine format before the quality/resource gate is satisfied.
-        let partitions: Vec<Value> = postings.iter().map(|ids| json!({
-            "version":1, "sequence":20, "config":config,
-            "documents":ids.iter().map(|id| json!([id, {"vector": data[*id], "metadata":db.get_metadata(*id as u64).unwrap()}])).collect::<Vec<_>>()
-        })).collect();
+        let partitions: Vec<_> = postings
+            .iter()
+            .map(|ids| CandidatePartition {
+                version: 1,
+                sequence: 20,
+                config,
+                documents: ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            *id as u64,
+                            CandidateDocument {
+                                vector: data[*id].clone(),
+                                metadata: db.get_metadata(*id as u64).unwrap().clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
         let sizes: Vec<_> = partitions
             .iter()
             .map(|p| {
                 let bytes = serde_json::to_vec(p).unwrap();
-                assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), *p);
+                assert_eq!(
+                    serde_json::from_slice::<CandidatePartition>(&bytes).unwrap(),
+                    *p
+                );
                 bytes.len()
             })
             .collect();
         let bundles: Vec<_> = partitions
             .chunks(4)
             .map(|p| {
-                serde_json::to_vec(&json!({"version":1,"partitions":p}))
-                    .unwrap()
-                    .len()
+                serde_json::to_vec(&CandidateBundle {
+                    version: 1,
+                    partitions: p,
+                })
+                .unwrap()
+                .len()
             })
             .collect();
         let mut cases = Vec::new();
