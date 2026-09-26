@@ -7,9 +7,9 @@ import argparse
 import json
 import os
 from pathlib import Path
-import subprocess
 
 from benchmarks import reports
+from minio_harness import run
 
 LABEL = "M4 layout experiment; desktop load and power uncontrolled"
 
@@ -68,8 +68,7 @@ def validate(document, backend, compact, secrets=()):
 
 
 def measure(backend, compact=True, root="target", label=LABEL, env=None, secrets=()):
-    raw = subprocess.run(command(backend, compact, root, label), env=env, check=True,
-                         text=True, stdout=subprocess.PIPE).stdout
+    raw = run(*command(backend, compact, root, label), env=env, capture=True)
     config_env = os.environ if env is None else env
     credentials = tuple(config_env.get(k, "") for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"))
     validate(json.loads(raw), backend, compact, tuple(secrets) + credentials)

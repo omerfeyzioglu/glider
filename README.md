@@ -132,6 +132,16 @@ and removes its container/data afterward. No existing buckets or credentials are
 used. Service-dependent Rust tests are explicitly ignored in ordinary test runs;
 the runner executes them, and CI invokes the runner.
 
+MinIO runners bound commands to 10 minutes (Docker commands to 2 minutes),
+authenticated startup to 30 seconds, each failure diagnostic to 5 seconds and
+cleanup to 10 seconds. Timed-out commands and their child processes are killed;
+database requests are not retried. Stage durations and sanitized failure output
+are saved to `target/minio-diagnostics/events.jsonl` and retained by CI, whose
+outer job limit is 20 minutes. Cleanup failure cannot replace the original test
+failure; if Docker is unavailable, removal may require later manual cleanup of
+the named disposable container. These limits bound the test harness, not engine
+request latency or a provider's durability guarantee.
+
 `S3Store::metrics()` returns a cloneable observer that remains available after the
 store is moved into `Database`. Snapshot differences count actual HTTP client
 attempts, including every list page, request-body bytes (with envelope overhead),

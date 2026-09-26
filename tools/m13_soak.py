@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 import secrets
-import subprocess
 import time
-from test_s3 import IMAGE, ready, run
+from test_s3 import IMAGE
+from minio_harness import container_scope, ready, run
 
 
 def main():
@@ -25,7 +25,7 @@ def main():
     revision = run('git', 'rev-parse', 'HEAD', capture=True).strip()
     status = run('git', 'status', '--short', capture=True).strip()
     start = time.monotonic()
-    try:
+    with container_scope(name):
         run('docker', 'run', '-d', '--name', name, '-p', '127.0.0.1::9000', '-e', 'MINIO_ROOT_USER', '-e', 'MINIO_ROOT_PASSWORD', IMAGE, 'server', '/data', env=env, capture=True)
         port = run('docker', 'port', name, '9000/tcp', capture=True).strip().split(':')[-1]
         endpoint = 'http://127.0.0.1:'+port
@@ -62,8 +62,6 @@ def main():
             assert sum(r['elapsed_seconds'] for r in reports) >= 1800
         summary = dict(git_revision=revision, git_status=status, service=IMAGE, rustc=run('rustc','--version',capture=True).strip(), os=run('uname','-srvm',capture=True).strip(), cpu=run('sysctl','-n','machdep.cpu.brand_string',capture=True).strip() if os.uname().sysname=='Darwin' else os.uname().machine, smoke=args.smoke, elapsed_seconds=time.monotonic()-start, mutation_payload_bytes=mutation, maintenance_payload_bytes=maintenance, additional_maintenance_write_ratio=maintenance/mutation, epochs=len(reports), cycles=cycles*len(reports), queries=cycles*len(reports)*100, logical_mutations=cycles*len(reports)*400)
         (args.output/'summary.json').write_text(json.dumps(summary, indent=2)+'\n')
-    finally:
-        subprocess.run(['docker', 'rm', '-fv', name], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == '__main__':
