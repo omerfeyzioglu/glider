@@ -475,8 +475,8 @@ Existing segments already contain full live state; consolidation serializes the
 recovered map rather than merging overlapping full snapshots. The single-object
 form combines state and reclamation boundary; the chunked form uses one final
 manifest as that boundary. A mutable head would introduce a coordination
-requirement unnecessary for the exclusive owner. There are no background workers
-or automatic compaction policy.
+requirement unnecessary for the exclusive owner. There are no background workers. The core database requires explicit maintenance;
+the serial serving wrapper schedules it before admitting a batch at soft limits.
 
 Success acknowledges the snapshot and all listed removals, without consuming a
 mutation sequence. Any storage error or panic poisons writes and maintenance until
@@ -527,6 +527,50 @@ not a bound for arbitrary datasets or chunk sizes. `benchmarks/M10.md` records
 the targeted counts, timings, memory and write amplification. No new catalog or
 mutation format was needed; the existing version 3 batch and snapshot formats
 remain compatible with old namespaces.
+
+## Serial single-machine serving (M13)
+
+`serving::SingleMachine` holds one `OwnedDatabase` and exposes serial exact
+queries, bounded atomic batches, status, maintenance and backup. Exclusive
+borrowing prevents overlapping publication, reads and reclamation; this contract
+needs no pinned concurrent views or background workers. It uses the resident
+map because the M8 set fits the measured memory budget. M11 remains available
+for separately opened frozen streaming views under its ownership precondition.
+An approximate request returns an explicit policy error; there is no silent
+quality downgrade or automatic ANN planner.
+
+`ServingOptions::m8` limits the final live set to 2,000 documents, each serialized
+vector/metadata payload to 4,096 bytes, batches to 100 mutations, and compaction
+chunks to 128 KiB. It uses the M10 tail/object limits. Batches validate capacity,
+vectors and document bytes before any storage access. At a soft limit the
+wrapper completes compaction before publishing the next batch; a maintenance
+failure means that submitted batch was never published. A batch publication
+failure retains the ordinary uncertain-outcome semantics. Neither path retries
+an uncertain request. Reads retain the last acknowledged map; status exposes
+sequence, tail, visible engine objects, row capacity, exact policy, returned
+storage errors, backup errors, maintenance runs and the recovery-required flag.
+Counters are per handle and reset on reopen; the sequence is durable. Operators
+measure process RSS separately. Bounds are reapplied and recovered rows checked
+on every open; recovery itself still validates/loads the authoritative state
+before checking serving capacity, so this is not protection from opening an
+arbitrarily oversized namespace.
+
+`backup_to` runs synchronously on a clean handle, compacts and completes cleanup,
+then stages that committed root and all referenced objects into a fresh empty
+nonoverlapping prefix. Metadata publishes last and the complete destination is
+validated before success. It acknowledges a backup of the current sequence,
+not a new mutation. Destination errors leave an unpromoted copy and do not
+poison the source; source maintenance errors do. Backup restoration stages into
+another fresh prefix, validates exact state and claims ownership before client
+switch. A poisoned serving handle refuses graceful close and leaves its claim;
+use isolated takeover, never same-prefix reopening after uncertainty. Legacy
+v1/v2 records migrate through version-3 chunked compaction without a new format.
+
+This is a synchronous library serving contract, not a network server or a
+concurrent request latency guarantee. The M8 workload uses full 100-operation
+batches to amortize maintenance; small batches, larger rows or other arrival
+rates require new capacity and write-amplification measurements. Operator steps
+are in `docs/SERVING.md` and `docs/RECOVERY.md`.
 
 ## Local backend
 

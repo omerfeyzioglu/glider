@@ -349,7 +349,8 @@ all possible layouts have been ruled out.
 
 ## M13 — Single-machine serving and recovery operations
 
-Status: planned
+Status: in progress; serial serving and failure/restore tests implemented.
+The 30-minute MinIO soak and CI remain required before completion.
 
 Goal:
 Run the selected workload continuously on one machine with predictable reads,

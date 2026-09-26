@@ -280,3 +280,30 @@ there is no automatic planner. The [filtered quality results](benchmarks/FILTERI
 show why sparse filters can make partial probing both incomplete and inaccurate.
 Metadata and vectors share the mutation and snapshot durability
 boundary; existing version 1 databases open with empty metadata.
+
+## Bounded single-machine serving
+
+For the initial 2,000-row, 64-dimension deployment, `SingleMachine` owns the
+namespace, enforces capacity, and completes due maintenance before a batch.
+Queries use exact mode; M12 did not justify enabling approximate serving.
+
+```rust
+use glider::{Config, Metric, Mutation, store::LocalStore};
+use glider::serving::{SingleMachine, ServingOptions, SearchMode};
+let config = Config { dimensions: 64, metric: Metric::SquaredEuclidean };
+let mut service = SingleMachine::open(
+    LocalStore::open("vectors")?, config, ServingOptions::m8())?;
+service.apply_batch(vec![Mutation::Put {
+    id: 1, vector: vec![0.; 64], metadata: Default::default(),
+}])?;
+let hits = service.query(&vec![0.; 64], 10, &[], SearchMode::Exact)?;
+let status = service.status();
+service.close()?;
+# Ok::<(), glider::Error>(())
+```
+
+Use 100-operation batches for the measured M8 maintenance envelope. This
+serial library API has no HTTP listener or background scheduler. See
+[serving operations](docs/SERVING.md) for status, backup/restore, failure handling,
+and the 30-minute soak command. After uncertainty, follow the
+[fresh-prefix recovery procedure](docs/RECOVERY.md).
