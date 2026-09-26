@@ -76,24 +76,29 @@ fn zero_count(value: &u64) -> bool {
 struct Counted<S> {
     inner: S,
     counts: Rc<Cell<Counts>>,
+    timed_reads: bool,
 }
 impl<S: ObjectStore> ObjectStore for Counted<S> {
     fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
-        let started = Instant::now();
+        let started = self.timed_reads.then(Instant::now);
         let result = self.inner.get(key)?;
         let mut counts = self.counts.get();
         counts.get_calls += 1;
-        counts.get_wall_ns += started.elapsed().as_nanos() as u64;
+        if let Some(started) = started {
+            counts.get_wall_ns += started.elapsed().as_nanos() as u64;
+        }
         counts.get_payload_bytes += result.as_ref().map_or(0, |v| v.len() as u64);
         self.counts.set(counts);
         Ok(result)
     }
     fn list(&self) -> glider::Result<Vec<String>> {
-        let started = Instant::now();
+        let started = self.timed_reads.then(Instant::now);
         let result = self.inner.list()?;
         let mut counts = self.counts.get();
         counts.list_calls += 1;
-        counts.list_wall_ns += started.elapsed().as_nanos() as u64;
+        if let Some(started) = started {
+            counts.list_wall_ns += started.elapsed().as_nanos() as u64;
+        }
         self.counts.set(counts);
         Ok(result)
     }
@@ -118,6 +123,7 @@ fn open<N: Namespace>(
     namespace: &N,
     config: Config,
     counts: &Rc<Cell<Counts>>,
+    timed_reads: bool,
 ) -> Result<(Db<N>, backend::Observer)> {
     let store = namespace.open()?;
     let observer = N::observe(&store);
@@ -126,6 +132,7 @@ fn open<N: Namespace>(
             Counted {
                 inner: store,
                 counts: counts.clone(),
+                timed_reads,
             },
             config,
         )?,
@@ -138,7 +145,7 @@ fn ns(start: Instant) -> f64 {
 
 fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let counts = Rc::new(Cell::new(Counts::default()));
-    let (mut db, observer) = open(namespace, o.config(), &counts)?;
+    let (mut db, observer) = open(namespace, o.config(), &counts, o.feature == "m10")?;
     let mut data = vectors(o.seed, o.rows, o.dimensions);
     let mut queries = vectors(o.seed ^ 0xd1b54a32d192ed03, o.queries, o.dimensions);
     if o.distribution == "clustered" {
@@ -307,7 +314,7 @@ fn search<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
 
 fn commit<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let counts = Rc::new(Cell::new(Counts::default()));
-    let (mut db, observer) = open(namespace, o.config(), &counts)?;
+    let (mut db, observer) = open(namespace, o.config(), &counts, o.feature == "m10")?;
     let mut phases = Vec::new();
     for (phase_index, phase) in ["insert", "overwrite", "delete"].iter().enumerate() {
         let data = if *phase == "delete" {
@@ -359,7 +366,7 @@ fn commit<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
 
 fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let counts = Rc::new(Cell::new(Counts::default()));
-    let (mut db, observer) = open(namespace, o.config(), &counts)?;
+    let (mut db, observer) = open(namespace, o.config(), &counts, o.feature == "m10")?;
     let data = vectors(o.seed, o.mutations, o.dimensions);
     let data_hash = fingerprint(&data);
     // Round-robin overwrite history: live size is fixed independently of history.
@@ -396,9 +403,12 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
             let start = Instant::now();
             db.checkpoint()?;
             let elapsed = ns(start);
-            let mut result = json!({"sequence": batch_index + 1, "logical_mutations": end_index, "latency_ns": elapsed,
+            let mut result = json!({"sequence": batch_index + 1, "latency_ns": elapsed,
                 "logical_bytes_written": counts.get().create_payload_bytes - before.create_payload_bytes,
                 "creates": counts.get().create_calls - before.create_calls});
+            if o.batch_size > 1 {
+                result["logical_mutations"] = json!(end_index);
+            }
             backend::attach_http(&mut result, "http_requests", observer.delta(before_http));
             checkpoint = Some(result);
         }
@@ -414,7 +424,7 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
             let elapsed = ns(start);
             let read = counts.get().get_payload_bytes - before.get_payload_bytes;
             let written = counts.get().create_payload_bytes - before.create_payload_bytes;
-            let mut result = json!({"sequence": batch_index + 1, "logical_mutations": end_index, "latency_ns": elapsed,
+            let mut result = json!({"sequence": batch_index + 1, "latency_ns": elapsed,
                 "logical_bytes_read": read, "logical_bytes_written": written,
                 "creates": counts.get().create_calls - before.create_calls,
                 "removes": counts.get().remove_calls - before.remove_calls,
@@ -422,6 +432,9 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
                 "input_mutation_payload_bytes": mutation_bytes,
                 "additional_read_amplification": read as f64 / mutation_bytes as f64,
                 "additional_write_amplification": written as f64 / mutation_bytes as f64});
+            if o.batch_size > 1 {
+                result["logical_mutations"] = json!(end_index);
+            }
             backend::attach_http(&mut result, "http_requests", observer.delta(before_http));
             compaction = Some(result);
         }
@@ -430,7 +443,7 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     let build_http = observer.snapshot();
     drop(db);
     let footprint = namespace.inventory()?;
-    drop(open(namespace, o.config(), &counts)?); // Explicit untimed warm recovery.
+    drop(open(namespace, o.config(), &counts, o.feature == "m10")?); // Explicit untimed warm recovery.
     let mut store_samples = Vec::with_capacity(o.samples);
     let mut replay_samples = Vec::with_capacity(o.samples);
     let mut total_samples = Vec::with_capacity(o.samples);
@@ -447,6 +460,7 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
         let counted = Counted {
             inner: store,
             counts: counts.clone(),
+            timed_reads: o.feature == "m10",
         };
         let replay_start = Instant::now();
         let db = Database::open(counted, o.config())?;
@@ -467,13 +481,15 @@ fn recovery<N: Namespace>(o: &Options, namespace: &N) -> Result<Value> {
     }
     let mut result = json!({"scenario": "recovery", "backend": N::NAME, "cache": N::RECOVERY_CACHE,
         "live_documents": o.rows, "mutation_history": o.mutations, "history": "round-robin puts",
-        "durable_mutation_objects": o.mutations.div_ceil(o.batch_size),
         "dataset_seed": o.seed, "query_seed": null, "query_sha256": null,
         "resources": resources(cpu_samples, "sum of open windows excluding validation and destruction"),
         "dataset_sha256": data_hash, "warmup_reopens": 1, "build_store_calls": build_counts,
         "local_store_open": timing(&store_samples, 1), "database_replay": timing(&replay_samples, 1),
         "total_open": timing(&total_samples, 1), "measured_store_calls_per_sample": calls,
         "inventory": footprint});
+    if o.feature == "m10" {
+        result["durable_mutation_objects"] = json!(o.mutations.div_ceil(o.batch_size));
+    }
     if let Some(compaction) = compaction {
         result["compaction"] = compaction;
     }
