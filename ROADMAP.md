@@ -417,14 +417,14 @@ Status: complete. [PR #38](https://github.com/omerfeyzioglu/glider/pull/38)
 passed CI, including normal MinIO integration and serving recovery. Nine harness
 failure tests cover deadlines, descendants, readiness, cleanup and redaction.
 
-Evidence: M10a fixed idle S3 transport progress. The latest main
+Baseline before M14: M10a had fixed idle S3 transport progress. The then-current main
 [CI run](https://github.com/omerfeyzioglu/glider/actions/runs/36237507054)
 passed in about four minutes; its MinIO integration step took 98 seconds and
 serving smoke 12 seconds. This is one observation, not a duration guarantee.
-`tools/test_s3.py` still has unbounded child commands, including the authenticated
+`tools/test_s3.py` had unbounded child commands, including the authenticated
 probe inside its nominal 30-second readiness deadline and container cleanup.
-The workflow has no explicit job timeout. These are harness gaps, not evidence
-of another engine transport failure.
+The workflow had no explicit job timeout. M14 closed these harness gaps without
+changing the engine transport protocol.
 
 Steps:
 - Attribute time to build, image/startup, readiness, tests and cleanup; inspect
@@ -445,7 +445,9 @@ Done when:
 
 ### M14a — Bounded real-S3 correctness pilot before further expansion
 
-Status: prepared locally; real AWS acceptance remains open. See
+Status: local preparation and CI passed in
+[PR #39](https://github.com/omerfeyzioglu/glider/pull/39); real AWS acceptance
+remains open. See
 [docs/S3_PILOT.md](docs/S3_PILOT.md). The runner's MinIO rehearsal verifies
 conditional publication, separate-process recovery, lost mutation acknowledgement,
 isolated takeover, exact filtered results, backup/restore and cleanup.
