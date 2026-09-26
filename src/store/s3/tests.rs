@@ -71,6 +71,27 @@ fn builder() -> AmazonS3Builder {
         .with_access_key_id("test-only")
         .with_secret_access_key("test-only")
 }
+
+#[test]
+fn http_runtime_keeps_driving_tasks_between_object_calls() {
+    let store = S3Store::open(builder(), "idle-runtime").unwrap();
+    let runtime = store.runtime.as_ref().unwrap();
+    let (started, start_wait) = futures::channel::oneshot::channel();
+    let (release, release_wait) = futures::channel::oneshot::channel();
+    let (finished, finish_wait) = std::sync::mpsc::channel();
+    runtime.spawn(async move {
+        started.send(()).unwrap();
+        release_wait.await.unwrap();
+        finished.send(()).unwrap();
+    });
+    runtime.block_on(start_wait).unwrap();
+    // No object operation calls block_on after this point. HTTP pool tasks must
+    // still process peer closure and idle expiration while the caller is idle.
+    release.send(()).unwrap();
+    assert!(finish_wait
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok());
+}
 fn response(status: u16, body: impl AsRef<[u8]>) -> HttpResponse {
     let bytes = body.as_ref().to_vec();
     let length = bytes.len();

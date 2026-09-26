@@ -9,7 +9,7 @@ s3 = ["dep:object_store", "dep:tokio", "dep:futures", "dep:async-trait"]
 
 [dependencies]
 object_store = { version = "0.14.1", default-features = false, features = ["aws"], optional = true }
-tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"], optional = true }
 futures = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 serde = { version = "1", features = ["derive"] }

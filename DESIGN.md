@@ -547,7 +547,12 @@ The optional `s3` feature implements the same synchronous ObjectStore contract.
 The `object_store` client handles signing, HTTP and pagination; glider retains
 ownership of the log, validation, recovery and search. Using this client avoids
 handwritten signing/HTTP machinery. A private Tokio runtime bridges its async I/O
-without changing the engine API; callers use blocking threads.
+without changing the engine API; callers use blocking threads. Each S3 handle
+keeps one runtime worker active between synchronous calls so HTTP connection
+tasks process peer closure and pool expiration while the caller is idle. A
+current-thread runtime would suspend those tasks outside `block_on`, permitting
+stale pooled connections to survive a long idle period. This does not add
+automatic request retries or alter write acknowledgement and recovery.
 
 One bucket plus a nonempty, nonoverlapping namespace prefix identifies a database. The caller
 provisions the bucket, credentials and exclusive namespace ownership. The service
