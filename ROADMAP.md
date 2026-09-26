@@ -413,7 +413,9 @@ Execution rules:
 
 ## M14 — Bound and diagnose MinIO CI failures
 
-Status: planned; small prerequisite.
+Status: complete. [PR #38](https://github.com/omerfeyzioglu/glider/pull/38)
+passed CI, including normal MinIO integration and serving recovery. Nine harness
+failure tests cover deadlines, descendants, readiness, cleanup and redaction.
 
 Evidence: M10a fixed idle S3 transport progress. The latest main
 [CI run](https://github.com/omerfeyzioglu/glider/actions/runs/36237507054)
@@ -440,6 +442,32 @@ Done when:
   declared bounds, report the original cause and attempt bounded cleanup.
 - A normal MinIO CI run passes with stage timing and useful failure artifacts;
   no recovery coverage is silently removed to obtain a green result.
+
+### M14a — Bounded real-S3 correctness pilot before further expansion
+
+Status: prepared locally; real AWS acceptance remains open. See
+[docs/S3_PILOT.md](docs/S3_PILOT.md). The runner's MinIO rehearsal verifies
+conditional publication, separate-process recovery, lost mutation acknowledgement,
+isolated takeover, exact filtered results, backup/restore and cleanup.
+
+Run the first AWS validation after M14, before treating MinIO behavior as provider
+evidence. Daily development, failure matrices and PR CI continue on MinIO.
+Use a dedicated S3 Standard bucket from the existing machine; EC2 and broad
+benchmarks are not prerequisites. Subsequent AWS checks should follow relevant
+storage changes, not every PR. M19 still needs its own capacity evidence.
+
+The AWS runner must verify the same credentials belong to an active Free plan,
+with remaining credit/time and an owned, unversioned test bucket. Refuse paid,
+expired or unverifiable plans. Bound requests, payload and elapsed time; retain
+only the current run's reports and clean only its fresh prefixes. A failing or
+timed-out run must preserve its original error and identify possible leftovers.
+
+Done when:
+- Local tests prove the plan/bucket refusal paths, budget enforcement and safe
+  cleanup; the MinIO pilot and CI pass.
+- One bounded AWS run passes the same correctness/recovery checks, records its
+  backend, revision and request/payload counts, and verifies cleanup. Until then,
+  mark provider acceptance pending and make no AWS latency/capacity claim.
 
 ## M15 — Safe client retries and conditional updates
 

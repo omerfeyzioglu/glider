@@ -69,6 +69,11 @@ jobs:
       - name: Verify serial serving, recovery and backup smoke
         run: python3 tools/m13_soak.py target/serving-smoke --smoke
 
+      - name: Verify bounded provider pilot on MinIO
+        run: |
+          cargo test --locked --features s3 --example s3_pilot
+          python3 tools/s3_pilot.py target/s3-pilot --minio
+
       - name: Retain benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,4 +90,5 @@ jobs:
             target/filter-smoke/*.json
             target/filter-smoke/SUMMARY.md
             target/serving-smoke/*.json
+            target/s3-pilot/*.json
           if-no-files-found: ignore

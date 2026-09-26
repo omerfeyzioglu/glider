@@ -114,7 +114,9 @@ impl S3Store {
     pub fn open(builder: AmazonS3Builder, namespace: &str) -> Result<Self> {
         Self::with_connector(builder, namespace, ReqwestConnector::default())
     }
-    fn with_connector<C: HttpConnector>(
+    /// Supply a transport for bounded probes or fault injection. Conditional
+    /// publication, disabled retries and request metrics are still enforced.
+    pub fn with_connector<C: HttpConnector>(
         builder: AmazonS3Builder,
         namespace: &str,
         connector: C,
