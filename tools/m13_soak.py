@@ -42,7 +42,7 @@ def main():
             reports.append(r)
             env['GLIDER_S3_NAMESPACE'] = r['active_prefix']
             assert r['peak_process_rss_bytes'] <= 64*1024*1024
-            assert r['max_visible_engine_objects'] <= 128
+            assert r['max_visible_engine_objects'] + 2 <= 128
             if not args.smoke:
                 assert r['unfiltered']['p95_ns'] <= 5_000_000 and r['filtered']['p95_ns'] <= 5_000_000
                 assert r['batch']['p95_ns'] <= 100_000_000

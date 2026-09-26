@@ -540,13 +540,12 @@ An approximate request returns an explicit policy error; there is no silent
 quality downgrade or automatic ANN planner.
 
 `ServingOptions::m8` limits the final live set to 2,000 documents, each serialized
-vector/metadata payload to 4,096 bytes, batches to 100 mutations, and uses single-object compaction.
-The resident serving path does not need streaming chunks: at this size the
-M10 whole-snapshot measurement fits memory/recovery limits, while the first
-M13 paced run found 112 ms batch p95 with chunked compaction. One snapshot PUT
-and one old-root DELETE avoid the per-chunk publication/reclamation cost.
-Callers needing streaming snapshots can select `chunk_bytes: Some(131_072)`
-and establish their own admission budget. It uses the M10 tail/object limits. Batches validate capacity,
+vector/metadata payload to 4,096 bytes, and batches to 100 mutations. It uses
+single-object compaction and the M10 tail/object limits. The M8 resident set
+fits the measured memory/recovery limits; one snapshot PUT and one old-root
+DELETE avoid per-chunk publication/reclamation overhead. Callers needing
+streaming snapshots can select `chunk_bytes: Some(131_072)` and establish their
+own admission budget. Batches validate capacity,
 vectors and document bytes before any storage access. At a soft limit the
 wrapper completes compaction before publishing the next batch; a maintenance
 failure means that submitted batch was never published. A batch publication

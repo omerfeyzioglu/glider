@@ -349,8 +349,9 @@ all possible layouts have been ruled out.
 
 ## M13 — Single-machine serving and recovery operations
 
-Status: in progress; serial serving and failure/restore tests implemented.
-The 30-minute MinIO soak and CI remain required before completion.
+Status: complete for the M8 envelope. Serial serving, failure/restore tests
+and the six-process 30-minute MinIO soak meet the acceptance criteria.
+See [benchmarks/M13.md](benchmarks/M13.md); PR merge requires green CI.
 
 Goal:
 Run the selected workload continuously on one machine with predictable reads,
@@ -378,7 +379,7 @@ Done when:
 The smoke found about 56 ms p95 for 100-operation batches including due
 compaction. M10's write-amplification result relies on batching; the original
 single-write latency budget does not describe this admission pause. Add a
-separate 100 ms batch p95 and at least 100 logical mutations/s serving budget,
+separate 100 ms batch p95 and at least 100 logical mutations/s serving budget.
 The first paced segment exceeded the batch budget at 112 ms p95 with chunked
 compaction. Use the M10-measured single-object snapshot for resident serving to
 reduce publication and reclamation requests; keep optional chunks for streaming.
