@@ -373,6 +373,16 @@ Done when:
 - Operators can identify the committed state, restore it, and explain the
   system's documented failure and capacity limits.
 
+### M13a — Budget synchronous batch admission explicitly
+
+The smoke found about 56 ms p95 for 100-operation batches including due
+compaction. M10's write-amplification result relies on batching; the original
+single-write latency budget does not describe this admission pause. Add a
+separate 100 ms batch p95 and at least 100 logical mutations/s serving budget,
+retain the single-write baseline unchanged, and verify the full soak against
+both the batch and existing query/recovery/resource bounds. This is an explicit
+serial contract; no concurrent request queue latency is claimed.
+
 ## Beyond the single-machine target
 
 Sharding, replication, consensus, multi-writer execution, GPU work,

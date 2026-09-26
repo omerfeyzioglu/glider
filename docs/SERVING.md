@@ -17,7 +17,9 @@ not inherit this workload's maintenance write-amplification result.
 The wrapper checks input/capacity before I/O and compacts when the M10 soft
 limits are reached, before publishing the next batch. This introduces a visible
 maintenance pause in that batch call. Batch latency includes it; it is not a
-single-write latency claim. A successful batch acknowledges all its mutations.
+single-write latency claim. The serving budget is batch p95 <=100 ms including
+maintenance and sustained throughput >=100 logical mutations/s. A successful
+batch acknowledges all its mutations.
 An error during scheduled maintenance occurs before that batch is published;
 an error during batch publication may have committed the entire batch. Stop
 writes whenever `status().recovery_required` is true.
