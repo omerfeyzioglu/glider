@@ -74,7 +74,9 @@ fn load_manifest<S: ObjectStore>(
 
 /// Frozen read-only view of the latest acknowledged namespace state. It keeps
 /// the selected manifest and uncheckpointed mutations in memory, and reads one
-/// validated snapshot chunk at a time for exact queries. The caller must still
+/// validated snapshot chunk at a time for ordinary exact queries. An optional
+/// equality posting retains only matching base rows from the validated open.
+/// The caller must still
 /// exclusively own the namespace; this is not a concurrent-reader protocol.
 pub struct StreamingDatabase<S> {
     store: S,
@@ -83,6 +85,28 @@ pub struct StreamingDatabase<S> {
     kind: &'static str,
     overlay: BTreeMap<u64, Option<Document>>,
     sequence: u64,
+    posting: Option<FilterPosting>,
+}
+
+struct FilterPosting {
+    key: String,
+    value: String,
+    max_rows: usize,
+    documents: Vec<(u64, Document)>,
+}
+
+impl FilterPosting {
+    fn collect(&mut self, id: u64, document: &Document) -> Result<()> {
+        if document.metadata.get(&self.key) == Some(&self.value) {
+            if self.documents.len() == self.max_rows {
+                return Err(Error::Invalid(
+                    "filter posting exceeds configured row budget".into(),
+                ));
+            }
+            self.documents.push((id, document.clone()));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,7 +120,34 @@ impl<S: ObjectStore> StreamingDatabase<S> {
     /// selected chunks are validated on open without retaining their documents.
     /// The latest mutation tail is replayed into a small overlay when compacted
     /// or checkpointed recently; its size grows with uncheckpointed changes.
-    pub fn open(mut store: S, config: Config) -> Result<Self> {
+    pub fn open(store: S, config: Config) -> Result<Self> {
+        Self::open_inner(store, config, None)
+    }
+
+    /// Retain one equality posting from the mandatory validated snapshot scan.
+    /// Queries containing that predicate read only resident matching base rows
+    /// and the mutation overlay. Other filters still scan all base chunks.
+    /// Exceeding `max_rows` returns an explicit error during open; use the
+    /// ordinary streaming open when that predicate is too broad to retain.
+    pub fn open_with_filter(
+        store: S,
+        config: Config,
+        key: &str,
+        value: &str,
+        max_rows: usize,
+    ) -> Result<Self> {
+        Self::open_inner(
+            store,
+            config,
+            Some((key.to_owned(), value.to_owned(), max_rows)),
+        )
+    }
+
+    fn open_inner(
+        mut store: S,
+        config: Config,
+        filter: Option<(String, String, usize)>,
+    ) -> Result<Self> {
         let Catalog {
             keys,
             latest_segment,
@@ -104,15 +155,36 @@ impl<S: ObjectStore> StreamingDatabase<S> {
             checkpoint_sequence,
             last_mutation,
         } = inspect_namespace(&mut store, config, false)?;
+        let mut posting = filter.map(|(key, value, max_rows)| FilterPosting {
+            key,
+            value,
+            max_rows,
+            documents: Vec::new(),
+        });
         let mut selected = None;
         if let Some(sequence) = latest_compacted {
             let manifest = load_manifest(&store, config, "compacted", sequence)?;
-            scan_snapshot(&store, config, "compacted", &manifest, |_, _| Ok(()))?;
+            scan_snapshot(&store, config, "compacted", &manifest, |id, document| {
+                if latest_segment.is_none_or(|newer| newer <= sequence) {
+                    if let Some(posting) = posting.as_mut() {
+                        posting.collect(id, &document)?;
+                    }
+                }
+                Ok(())
+            })?;
             selected = Some(("compacted", manifest));
         }
         if let Some(sequence) = latest_segment.filter(|s| latest_compacted.is_none_or(|c| *s > c)) {
+            if let Some(posting) = posting.as_mut() {
+                posting.documents.clear();
+            }
             let manifest = load_manifest(&store, config, "segment", sequence)?;
-            scan_snapshot(&store, config, "segment", &manifest, |_, _| Ok(()))?;
+            scan_snapshot(&store, config, "segment", &manifest, |id, document| {
+                if let Some(posting) = posting.as_mut() {
+                    posting.collect(id, &document)?;
+                }
+                Ok(())
+            })?;
             selected = Some(("segment", manifest));
         }
         let (kind, manifest) = selected.ok_or_else(|| {
@@ -158,6 +230,7 @@ impl<S: ObjectStore> StreamingDatabase<S> {
             kind,
             overlay,
             sequence,
+            posting,
         })
     }
 
@@ -206,8 +279,8 @@ impl<S: ObjectStore> StreamingDatabase<S> {
         self.search_filtered(query, k, &[])
     }
 
-    /// Exact filtered top-k. Each query reads and validates every base chunk;
-    /// query memory excludes the full snapshot document map.
+    /// Exact filtered top-k. A query containing the indexed equality uses the
+    /// resident validated posting and tail; all others re-read every base chunk.
     pub fn search_filtered(
         &self,
         query: &[f32],
@@ -219,18 +292,31 @@ impl<S: ObjectStore> StreamingDatabase<S> {
             return Ok(Vec::new());
         }
         let mut heap = BinaryHeap::new();
-        scan_snapshot(
-            &self.store,
-            self.config,
-            self.kind,
-            &self.manifest,
-            |id, document| {
-                if !self.overlay.contains_key(&id) && matches_filter(&document.metadata, filter) {
-                    consider(&mut heap, k, id, &document, query, self.config.metric);
+        if let Some(posting) = self.posting.as_ref().filter(|posting| {
+            filter
+                .iter()
+                .any(|&(key, value)| key == posting.key && value == posting.value)
+        }) {
+            for (id, document) in &posting.documents {
+                if !self.overlay.contains_key(id) && matches_filter(&document.metadata, filter) {
+                    consider(&mut heap, k, *id, document, query, self.config.metric);
                 }
-                Ok(())
-            },
-        )?;
+            }
+        } else {
+            scan_snapshot(
+                &self.store,
+                self.config,
+                self.kind,
+                &self.manifest,
+                |id, document| {
+                    if !self.overlay.contains_key(&id) && matches_filter(&document.metadata, filter)
+                    {
+                        consider(&mut heap, k, id, &document, query, self.config.metric);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
         for (&id, document) in &self.overlay {
             if let Some(document) = document.as_ref() {
                 if matches_filter(&document.metadata, filter) {

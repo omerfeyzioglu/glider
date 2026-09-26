@@ -421,7 +421,7 @@ Legacy single-object roots are rejected for this mode; `compact_chunked` can
 migrate them. The view freezes at the recovered mutation sequence and uses the
 same exclusive namespace ownership precondition as the mutable database.
 
-`search` and `search_filtered` read and revalidate each base chunk in order,
+Ordinary `search` and `search_filtered` read and revalidate each base chunk in order,
 skip IDs replaced or deleted in the overlay, score matching base rows and live
 overlay rows, then return the exact distance/ID top-k. A bounded top-k heap
 avoids retaining all candidates. `get_with_metadata` first checks the overlay,
@@ -434,9 +434,23 @@ This separates base-vector working memory from dataset size: ordinary searches
 retain a manifest, the latest uncheckpointed IDs, one decoded chunk and up to k
 neighbors, plus transient response/decoder allocations. The manifest and mutation
 tail are not bounded, nor is a request for k equal to the whole dataset. Opening
-validates all chunks and exact searches issue one GET per chunk, so this path
-trades RAM for remote reads and is not an ANN latency optimization. Physical
-partitioning and selective object reads remain future work.
+validates all chunks and ordinary exact searches issue one GET per chunk, so
+this path trades RAM for remote reads and is not an ANN latency optimization.
+
+`StreamingDatabase::open_with_filter` may retain one equality posting during
+the mandatory selected-chunk validation scan. The posting contains only matching
+base documents and is derived entirely in memory. A query whose conjunction
+contains that exact key/value scores the posting after excluding IDs changed in
+the overlay, then scores matching live overlay rows. Other predicates and
+unfiltered queries use the ordinary validated full scan. The posting adds no
+persisted format, publication boundary or recovery dependency; every reopen
+rebuilds it from the selected authoritative snapshot. A missing or invalid
+selected chunk fails open. A later external loss is detected on reopen; the
+resident posting still represents the previously validated frozen view. At the
+M8 size the chosen filter matches 20 of 2,000 rows. The caller supplies a maximum
+posting row count; exceeding it fails open explicitly before retaining more
+rows. A broader filter or larger dataset needs its own memory budget or the
+ordinary streaming path.
 
 ## Compaction (M4)
 

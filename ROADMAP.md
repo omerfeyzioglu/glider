@@ -266,7 +266,7 @@ transport correction precedes the full M11 comparison.
 
 ## M11 — Make filtered exact queries selective on object storage
 
-Status: planned
+Status: in progress
 
 Goal:
 Avoid reading every vector chunk for a selective equality filter while keeping
@@ -275,7 +275,8 @@ filtered exact search a no-false-negative correctness oracle.
 Steps:
 - Compare chunk summaries and a derived metadata posting layout on the M8
   filter distributions. Select a layout by GET count, bytes, memory, write cost
-  and recovery behavior, then version and validate it.
+  and recovery behavior. Version any persisted layout; validate a transient
+  layout against the selected authoritative snapshot on each open.
 - Apply newer puts/deletes over the selected base consistently. A missing or
   stale derived structure must never silently omit an eligible document;
   fall back to a validated exact scan or return an explicit error.
@@ -288,6 +289,17 @@ Done when:
   across updates, compaction, restart and injected failures.
 - Selective workloads meet their M8 request, byte, latency and memory budgets;
   the nonselective path has no unjustified regression.
+
+### M11a — Reuse the mandatory validation scan for one hot equality predicate
+
+The M8 `selected=true` predicate occurs in 11 of 12 sorted 128 KiB chunks, so
+chunk summaries would still fetch 11 chunks and exceed the four-GET budget. The
+streaming reader already validates all selected chunks at open. Retaining the
+20 matching documents during that scan avoids a separate persisted posting
+object, write amplification and a new recovery dependency. This intermediate
+choice has no new persisted format; the posting is rebuilt after restart.
+Complete M11 only after the 1,000-query MinIO latency and nonselective checks,
+update/delete and failure-path tests, and exact-oracle verification.
 
 ## M12 — Search persisted ANN partitions without loading all vectors
 
