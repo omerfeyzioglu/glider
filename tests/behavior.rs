@@ -618,3 +618,48 @@ fn top_k_matches_full_sort_with_ties_extremes_and_boundary_sizes() {
         }
     }
 }
+
+#[test]
+fn exact_results_retain_only_returned_neighbors() {
+    for metric in [Metric::SquaredEuclidean, Metric::Manhattan] {
+        let mut db = Database::open(
+            Memory::default(),
+            Config {
+                dimensions: 2,
+                metric,
+            },
+        )
+        .unwrap();
+        db.apply_batch(
+            (0..5000)
+                .map(|id| Mutation::Put {
+                    id,
+                    vector: vec![(id % 7) as f32, 1.],
+                    metadata: if id % 100 == 0 {
+                        BTreeMap::from([("selected".into(), "true".into())])
+                    } else {
+                        BTreeMap::new()
+                    },
+                })
+                .collect(),
+        )
+        .unwrap();
+        for filter in [
+            vec![],
+            vec![("selected", "true")],
+            vec![("missing", "value")],
+        ] {
+            let all = db.search_filtered(&[0., 0.], usize::MAX, &filter).unwrap();
+            for k in [0, 1, 10, 50, 5000, usize::MAX] {
+                let results = db.search_filtered(&[0., 0.], k, &filter).unwrap();
+                assert_eq!(results, all[..k.min(all.len())]);
+                assert_eq!(
+                    results.capacity(),
+                    results.len(),
+                    "retained allocation: metric={metric:?}, k={k}, matches={}",
+                    all.len()
+                );
+            }
+        }
+    }
+}
