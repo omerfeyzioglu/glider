@@ -115,6 +115,12 @@ impl ObjectStore for Observed {
         self.note("delete", key, 0, start);
         result
     }
+    fn remove_many(&mut self, keys: &[String]) -> glider::Result<()> {
+        let start = Instant::now();
+        let result = self.inner.remove_many(keys);
+        self.note("remove_many", &keys.join(","), 0, start);
+        result
+    }
 }
 
 const CONFIG: Config = Config {

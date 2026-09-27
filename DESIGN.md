@@ -537,7 +537,11 @@ payload as an ordinary segment. `compact_chunked` instead publishes the version 
 chunked form described above. Only this distinct snapshot kind authorizes
 reclamation. After durable publication, compaction lists and validates the cleanup
 plan, then removes covered mutations, covered ordinary segments and older
-compaction snapshots. Metadata and the new compaction snapshot remain.
+compaction snapshots. The validated obsolete set may be removed in bounded
+parallel groups through `ObjectStore::remove_many`; default backends retain
+serial removal. Success acknowledges every removal. Errors/panics may leave an
+arbitrary subset absent, poison the handle and require recovery to rebuild
+object counts before new writes. Metadata and the new compaction snapshot remain.
 
 Existing segments already contain full live state; consolidation serializes the
 recovered map rather than merging overlapping full snapshots. The single-object
@@ -743,7 +747,13 @@ opened; the database retains its existing acknowledged-state read semantics.
 A timed-out request may still complete remotely. Conditional creation prevents a
 late request from replacing a newly committed object at the same sequence key.
 
-Removal sends one native DELETE, with no automatic retry; absence is success.
+Removal sends one native DELETE per key, with no automatic retry; absence is success.
+Compaction cleanup executes at most four such requests simultaneously and waits
+for the entire validated set before acknowledging success or returning a storage
+error. Partial failure poisons the store. This is synchronous bounded parallel
+I/O after snapshot publication, not a background publication participant or an
+S3 bulk-delete request. Obsolete keys cannot be referenced by the serial reader
+or reused by later writes, so reordered or delayed DELETEs remain safe.
 Errors or panics poison the store. Never reusing reclaimed keys makes delayed
 DELETE requests safe across reopen and later compactions. Versioned buckets may
 retain old versions and delete markers: glider reclaims the visible namespace,

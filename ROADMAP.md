@@ -630,7 +630,10 @@ Done when:
 
 ### M19b — Bound foreground cleanup latency
 
-Status: justified by the M19 first-step failure; implementation pending.
+Status: implementation and local failure/recovery tests passed; measurement
+and PR CI pending. The S3 backend issues at most four native DELETEs concurrently;
+other backends default to serial cleanup. Partial failures retain a poisoned
+handle and recovery rebuilds counters.
 
 The slowest maintenance event spent 44.703 ms deleting 17 independent obsolete
 keys serially, after publishing a complete snapshot. Compare bounded concurrent

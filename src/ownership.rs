@@ -161,6 +161,9 @@ impl<S: ObjectStore> ObjectStore for OwnedStore<S> {
     fn remove(&mut self, key: &str) -> Result<()> {
         self.inner.remove(key)
     }
+    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+        self.inner.remove_many(keys)
+    }
 }
 
 /// A single mutable database whose owner claim is enforced by conditional
