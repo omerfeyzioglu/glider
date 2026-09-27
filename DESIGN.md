@@ -17,7 +17,7 @@ Database API (put / get / delete / exact and filtered search)
     -> local development backend or S3-compatible backend
 ```
 
-For version 3 chunked snapshots, a separate read-only `StreamingDatabase` path
+For version 3/5 chunked snapshots, a separate read-only `StreamingDatabase` path
 keeps the selected manifest and newer mutations in memory and scans validated
 data chunks directly from the object store for exact queries.
 
@@ -231,7 +231,9 @@ format version and sequence. Versions 1 and 2 contain one put or delete; version
 string-to-string `metadata` map. Ordinary single writes still use version 2.
 Version 3 contains a nonempty ordered `mutations` array of the version 2 operation
 schema. `apply_batch` publishes one version 3 object for all its operations.
-Recovery accepts all three versions and treats version 1 metadata as empty. The
+Version 4 stores a bounded retry request and its durable conditional outcome in
+the same object; successful outcomes apply its operations, conflicts apply none.
+Recovery accepts all four versions and treats version 1 metadata as empty. The
 mutation key is `mutation-` followed by a contiguous 20-digit decimal sequence
 starting at 1. A sequence counts a published log object, not the number of
 operations inside a batch.
@@ -334,15 +336,80 @@ singleton without a storage witness cannot detect a second opener on another
 host. The claim protocol uses conditional create, strongly consistent list and
 durable remove, without filesystem locking or in-place mutation.
 
+### Bounded retries and conditional batches (M15)
+
+`apply_request(Request)` adds a bounded retry contract to `Database`,
+`OwnedDatabase` and `SingleMachine`. An ID is the complete pair of an observed
+commit boundary and a 128-bit nonce; `request_id` uses OS randomness without I/O.
+The client keeps both fields unchanged. SHA-256 of the canonical serde JSON
+request (ID, ordered conditions and operations, ordered metadata maps) identifies
+its payload. At most 100 operations, 100 strictly ID-ordered conditions and 1 MiB
+of encoded request bytes are admitted. Legacy mutation APIs have no retry IDs.
+
+A new ID is admitted while `current_sequence - boundary < 128`; future boundaries
+are rejected. A version 4 mutation object contains the entire request and its
+outcome. The owner's one conditional create atomically publishes the decision
+and all successful mutations. Conditional conflicts publish a decision with no
+state changes and still consume a sequence. A retained duplicate returns the
+original sequence/conflict without I/O, regardless of later revisions or write
+capacity; different payload reuse returns `RequestConflict`. Input/capacity
+rejections before publication are not durable decisions. Preconditions compare
+against the state before the whole batch; operations then apply in input order.
+Acknowledgement exposes the complete resulting map. Uncertain errors/panics
+poison writes and result lookup, retaining the prior acknowledged read view.
+
+Receipts remain through `boundary + 128` and expire after that boundary. There
+are at most 128 receipts containing fixed-size IDs, digests and outcomes; full
+request payloads are not retained in memory or snapshots. Unknown IDs at the
+admission cutoff return `Expired`, even if no prior decision is known, and
+submission cannot reinterpret an expired ID as new. `lookup_request` distinguishes
+`Retained`, `Unknown` in this history, `Expired` and `Ahead`. Recovery revalidates
+and replays decisions; checkpoints and compaction retain the same receipt state.
+A clock-based TTL would need a durable trusted time rule across restore; an LRU
+of arbitrary UUIDs would mistake evicted IDs for new requests. The chosen fixed
+commit window needs neither clocks nor a permanent retired-ID ledger. It is an
+explicit capacity bound, not a promised wall-clock retry duration.
+
+`revision(id)` observes either presence or absence at the current sequence.
+Conditions reject a change to that ID after the observation, including a delete,
+reinsert, same-value replacement or deletion of an absent ID. Unrelated writes
+do not conflict. Recent ID/change-sequence pairs include tombstones and are
+retained above `revision_floor`, normally `sequence - 128`. At most 12,800 pairs
+are retained. A larger legacy batch advances the floor to its own sequence and
+clears older observations instead of keeping unbounded tombstones. Conditions
+below the floor return a durable `ExpiredRevision` conflict. This chooses bounded
+observation validity over indefinite per-ID tombstones or rejecting conditions
+on every unrelated write. Request identity and document observation are separate.
+These tokens are a trusted library concurrency contract, not authentication.
+
+Single-object snapshots version 4 and chunked manifests version 5 require the
+bounded receipt/change state. Chunk data stays version 1. Legacy snapshots 1–3
+are readable; their boundary is the initial revision floor, because they do not
+preserve earlier ID changes or receipts. New snapshots preserve observations
+across maintenance without changing their sequence. Older binaries reject these
+versions instead of dropping retry metadata. Streaming readers validate and
+replay the same decisions while returning only document/query results.
+
+Isolated takeover copies the selected history and its receipts; later writes
+in the quarantined source cannot affect it. `Unknown` in that destination is
+safe to submit there, but cannot prove absence in the quarantined source. Backup
+and restore preserve only the backup boundary: no request beyond it is promised
+known, and its revisions/IDs cannot be treated as a continuation of discarded
+future history. Clients must reconcile across an explicitly announced rollback.
+Concurrent callers must serialize through the owner (currently exclusive
+borrowing or a caller mutex); concurrent duplicates then share one outcome.
+No unlimited exactly-once or cross-rollback delivery guarantee is provided.
+
 ## Immutable checkpoint segments (M3)
 
 `Database::checkpoint()` publishes the complete live state at the current mutation
 sequence as one immutable `segment-` object with a 20-digit sequence suffix.
 Version 1 JSON contains version, sequence, configuration and a strictly ID-sorted
 array of `(id, vector)` entries. Version 2 contains `(id, {vector, metadata})`
-entries, with metadata a required string-to-string map. New snapshots use version
-2 for the single-object API, and recovery accepts version 1 snapshots with empty metadata. The existing
-backend envelope protects its bytes. Deletes are represented by absence; the
+entries, with metadata a required string-to-string map. New single-object
+snapshots use version 4 with the same documents and required retry/revision state.
+Recovery accepts version 1 snapshots with empty metadata and version 2 snapshots
+without retry state. The backend envelope protects its bytes. Deletes are represented by absence; the
 sequence boundary prevents older puts from resurrecting deleted IDs. An empty
 sequence-zero checkpoint is valid.
 
@@ -375,11 +442,11 @@ full live map in memory. Checkpointing alone retains all logs and snapshots and
 requires listing all keys. It does not change mutation acknowledgement or detect
 external loss of an unwitnessed tail.
 
-### Chunked snapshots (version 3)
+### Chunked snapshots (versions 3 and 5)
 
 `checkpoint_chunked(max_chunk_bytes)` and `compact_chunked(max_chunk_bytes)`
-publish the same logical state as the single-object methods. They split the
-strictly ID-ordered document map into version 1 JSON chunks, each at most the
+publish the same logical and retry/revision state as the single-object methods.
+They split the strictly ID-ordered document map into version 1 JSON chunks, each at most the
 caller-selected encoded payload limit. A single document that cannot fit is an
 input error detected before storage writes. Chunk keys are
 `segmentchunk-{sequence:020}-{limit:020}-{ordinal:010}` or
@@ -387,8 +454,9 @@ input error detected before storage writes. Chunk keys are
 allows a failed attempt to be retried with a different layout without reusing a
 published key. Chunk objects contain version, sequence, configuration and rows.
 
-After every chunk is durably created, the writer publishes a version 3 manifest
-at the existing `segment-` or `compacted-` key. It contains version, sequence,
+After every chunk is durably created, the writer publishes a version 5 manifest
+(version 3 plus required retry/revision state) at the existing `segment-` or
+`compacted-` key. It contains version, sequence,
 configuration, byte limit and ordered chunk references with ID bounds, row counts
 and SHA-256 payload digests. The manifest is the sole publication boundary:
 chunks without it are orphaned derived bytes, not authoritative state. A
@@ -400,7 +468,7 @@ layout may reuse an already published chunk only after comparing its complete
 bytes; a conflicting chunk is an error. A late conditional PUT cannot replace a
 complete chunk or manifest.
 
-Recovery accepts legacy snapshot versions 1 and 2 and the version 3 manifest.
+Recovery accepts single-object versions 1, 2 and 4 and manifest versions 3 and 5.
 For a selected manifest it requires every referenced chunk, checks digest,
 version, sequence, configuration, byte limit, row count and ID bounds, and
 validates all vectors and globally increasing IDs. It never falls back to an
@@ -408,7 +476,7 @@ older snapshot when a selected chunk is missing or invalid. Unreferenced chunks
 from incomplete publications are ignored. Compaction retains only chunks named
 by the current compacted manifest and reclaims older and orphaned chunks after
 the new root is durable; interrupted cleanup resumes on a repeated call. Older
-binaries reject the new chunk keys and version 3 manifests.
+binaries reject unsupported chunk keys or manifest versions.
 
 The single-object format uses fewer requests but makes one payload grow with the
 dataset. The manifest format bounds each data payload and temporary chunk
@@ -423,9 +491,9 @@ reads or a bounded-memory database.
 
 `StreamingDatabase::open(store, config)` requires an existing namespace whose
 selected compaction boundary and selected newer checkpoint, if any, use version
-3 chunked manifests. It performs the same key, metadata and contiguous-log
+3/5 chunked manifests. It performs the same key, metadata and contiguous-log
 checks as `Database::open`, validates each selected root and all referenced
-chunks, then replays newer version 1/2/3 mutations into an ID-keyed overlay.
+chunks, then replays newer version 1/2/3/4 mutations into an ID-keyed overlay.
 Legacy single-object roots are rejected for this mode; `compact_chunked` can
 migrate them. The view freezes at the recovered mutation sequence and uses the
 same exclusive namespace ownership precondition as the mutable database.
@@ -465,7 +533,7 @@ ordinary streaming path.
 
 `Database::compact()` publishes the complete current live state as
 `compacted-` plus its 20-digit mutation sequence, using the same versioned snapshot
-payload as an ordinary segment. `compact_chunked` instead publishes the version 3
+payload as an ordinary segment. `compact_chunked` instead publishes the version 5
 chunked form described above. Only this distinct snapshot kind authorizes
 reclamation. After durable publication, compaction lists and validates the cleanup
 plan, then removes covered mutations, covered ordinary segments and older
@@ -524,9 +592,8 @@ objects. A 128 KiB chunked compaction of 2,000 live rows yields 12 chunks and
 one manifest; with 24 subsequent tail objects, recovery needs at most 38 GETs
 including metadata. This is a measured layout choice for the initial envelope,
 not a bound for arbitrary datasets or chunk sizes. `benchmarks/M10.md` records
-the targeted counts, timings, memory and write amplification. No new catalog or
-mutation format was needed; the existing version 3 batch and snapshot formats
-remain compatible with old namespaces.
+the targeted counts, timings, memory and write amplification. That layout needed
+no new catalog; M15 added versioned retry metadata to snapshots and request records. Old namespaces remain readable.
 
 ## Serial single-machine serving (M13)
 
@@ -568,8 +635,8 @@ poison the source; source maintenance errors do. Backup restoration stages into
 another fresh prefix, validates exact state and claims ownership before client
 switch. A poisoned serving handle refuses graceful close and leaves its claim;
 use isolated takeover, never same-prefix reopening after uncertainty. Legacy
-v1/v2 records migrate through the existing version-2 single-object snapshot,
-or version-3 chunked snapshots when selected, without a new format.
+v1/v2 records migrate through version-4 single-object snapshots or version-5
+chunked manifests, preserving M15 retry/revision state for later requests.
 
 This is a synchronous library serving contract, not a network server or a
 concurrent request latency guarantee. The M8 workload uses full 100-operation

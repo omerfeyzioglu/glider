@@ -180,6 +180,11 @@ recovery finds either the complete batch or none of it. The caller chooses a
 batch size that fits one request and memory. Single `put` and `delete` calls keep
 their existing behavior and log format.
 
+For safe retries after a lost acknowledgement, use `apply_request` with an
+unchanged request ID and optional document revision conditions. Its durable
+outcome survives restart, compaction and isolated takeover within a bounded
+128-commit window. See [the retry contract and example](docs/RETRIES.md).
+
 ## Recovery checkpoints (M3)
 
 Call `db.checkpoint()?` to persist the current live state as one immutable segment.
@@ -193,8 +198,9 @@ For datasets where one full snapshot object is too large, call
 data chunk in bytes; choose a limit that fits at least one document and your
 object-store request budget. Recovery reads the versioned manifest and all its
 chunks. The full live map still resides in memory.
-Older binaries that only read snapshot versions 1 and 2 cannot open a namespace
-after a chunked snapshot is published.
+New single-object snapshots use version 4 and chunked manifests use version 5
+to preserve retry metadata. Older binaries that do not support these versions
+refuse them; existing snapshot versions 1–3 remain readable.
 
 For read-only exact queries without retaining all base vectors in RAM, open a
 streaming reader after publishing a chunked snapshot:

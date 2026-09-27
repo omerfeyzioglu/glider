@@ -1241,3 +1241,59 @@ fn minio_delayed_old_compaction_publication_is_ignored_and_reclaimable() {
     let db = Database::open(minio(namespace), config()).unwrap();
     assert_eq!(db.get(2), Some([3., 4.].as_slice()));
 }
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_retry_decision_survives_uncertain_put_takeover_and_compaction() {
+    use crate::retry::{Lookup, Request, RequestId};
+    for (suffix, cut, committed) in [
+        ("before", Cut::TimeoutBefore, false),
+        ("after", Cut::TimeoutAfter, true),
+    ] {
+        let source = format!("retry-{suffix}");
+        let destination = format!("retry-staged-{suffix}");
+        let backup = format!("retry-backup-{suffix}");
+        let fault = Fault::default();
+        let store = S3Store::with_connector(minio_builder(), &source, fault.clone()).unwrap();
+        let metrics = store.metrics();
+        let mut db = OwnedDatabase::open(store, config()).unwrap();
+        let request = Request {
+            id: RequestId {
+                boundary: 0,
+                nonce: [42; 16],
+            },
+            conditions: vec![db.revision(1)],
+            mutations: vec![Mutation::Put {
+                id: 1,
+                vector: vec![1., 0.],
+                metadata: BTreeMap::new(),
+            }],
+        };
+        let before = metrics.snapshot();
+        *fault.0.lock().unwrap() = Some(cut);
+        assert!(db.apply_request(request.clone()).is_err());
+        assert_eq!(metrics.snapshot().put - before.put, 1);
+        assert!(matches!(
+            db.lookup_request(request.id),
+            Err(Error::RecoveryRequired)
+        ));
+        drop(db);
+        stage_isolated_namespace(&minio(&source), minio(&destination), config()).unwrap();
+        let mut db = OwnedDatabase::open(minio(&destination), config()).unwrap();
+        assert_eq!(
+            matches!(db.lookup_request(request.id).unwrap(), Lookup::Retained(_)),
+            committed
+        );
+        assert_eq!(db.get(1).is_some(), committed);
+        let outcome = db.apply_request(request.clone()).unwrap();
+        assert_eq!(outcome.sequence, 1);
+        db.put(1, vec![9., 0.]).unwrap();
+        db.compact_chunked(512).unwrap();
+        db.close().unwrap();
+        stage_isolated_namespace(&minio(&destination), minio(&backup), config()).unwrap();
+        let mut db = OwnedDatabase::open(minio(&backup), config()).unwrap();
+        assert_eq!(db.apply_request(request).unwrap(), outcome);
+        assert_eq!(db.get(1), Some([9., 0.].as_slice()));
+        db.close().unwrap();
+    }
+}

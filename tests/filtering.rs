@@ -363,7 +363,8 @@ fn version_one_records_and_snapshots_upgrade_without_losing_state() {
     let segment: serde_json::Value =
         serde_json::from_slice(&objects["segment-00000000000000000002"]).unwrap();
     assert_eq!(record["version"], 2);
-    assert_eq!(segment["version"], 2);
+    assert_eq!(segment["version"], 4);
+    assert_eq!(segment["retry"]["revision_floor"], 1);
 }
 
 #[test]

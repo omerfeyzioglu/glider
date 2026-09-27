@@ -122,13 +122,24 @@ impl<S: ObjectStore> SingleMachine<S> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
         }
+        self.validate_batch(&mutations)?;
+        if self.db.maintenance_status().should_compact {
+            self.maintain()?;
+        }
+        let result = self.db.apply_batch(mutations);
+        if result.is_err() && self.db.poisoned {
+            self.storage_errors += 1;
+        }
+        result
+    }
+    fn validate_batch(&self, mutations: &[Mutation]) -> Result<()> {
         if mutations.is_empty() || mutations.len() > self.options.maintenance.max_batch_mutations {
             return Err(Error::Invalid(
                 "batch outside serving operation bound".into(),
             ));
         }
         let mut ids: BTreeSet<_> = self.db.documents.keys().copied().collect();
-        for mutation in &mutations {
+        for mutation in mutations {
             match mutation {
                 Mutation::Put {
                     id,
@@ -156,10 +167,34 @@ impl<S: ObjectStore> SingleMachine<S> {
                 "batch exceeds serving document capacity".into(),
             ));
         }
+        Ok(())
+    }
+    pub fn request_id(&self) -> Result<crate::retry::RequestId> {
+        self.db.request_id()
+    }
+    pub fn revision(&self, id: u64) -> crate::retry::Revision {
+        self.db.revision(id)
+    }
+    pub fn revision_floor(&self) -> u64 {
+        self.db.revision_floor()
+    }
+    pub fn lookup_request(&self, id: crate::retry::RequestId) -> Result<crate::retry::Lookup> {
+        self.db.lookup_request(id)
+    }
+    /// Retained duplicates resolve before capacity checks and maintenance, even
+    /// if later commits changed the live set or exhausted write admission.
+    pub fn apply_request(
+        &mut self,
+        request: crate::retry::Request,
+    ) -> Result<crate::retry::Outcome> {
+        if let Some(outcome) = self.db.retained_request(&request)? {
+            return Ok(outcome);
+        }
+        self.validate_batch(&request.mutations)?;
         if self.db.maintenance_status().should_compact {
             self.maintain()?;
         }
-        let result = self.db.apply_batch(mutations);
+        let result = self.db.apply_request(request);
         if result.is_err() && self.db.poisoned {
             self.storage_errors += 1;
         }

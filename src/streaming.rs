@@ -1,4 +1,4 @@
-//! Read-only exact search over version 3 snapshot chunks and a mutation tail.
+//! Read-only exact search over version 3/5 chunked snapshots and a mutation tail.
 use crate::{
     compacted_key, decode, inspect_namespace, key, matches_filter, parse_chunked_manifest,
     read_mutations, read_snapshot_chunk, scan_snapshot, segment_key, store::ObjectStore, Catalog,
@@ -64,9 +64,9 @@ fn load_manifest<S: ObjectStore>(
     let bytes = store
         .get(&key)?
         .ok_or_else(|| Error::Corrupt(format!("listed snapshot missing: {key}")))?;
-    if decode::<Version>(&bytes)?.version != 3 {
+    if !matches!(decode::<Version>(&bytes)?.version, 3 | 5) {
         return Err(Error::Invalid(
-            "streaming reader requires version 3 snapshots; compact with compact_chunked".into(),
+            "streaming reader requires version 3/5 snapshots; compact with compact_chunked".into(),
         ));
     }
     parse_chunked_manifest(&bytes, sequence, config)
@@ -116,7 +116,7 @@ pub struct OwnedDocument {
 }
 
 impl<S: ObjectStore> StreamingDatabase<S> {
-    /// Open an initialized namespace with a version 3 chunked snapshot. All
+    /// Open an initialized namespace with a version 3/5 chunked snapshot. All
     /// selected chunks are validated on open without retaining their documents.
     /// The latest mutation tail is replayed into a small overlay when compacted
     /// or checkpointed recently; its size grows with uncheckpointed changes.
@@ -188,8 +188,12 @@ impl<S: ObjectStore> StreamingDatabase<S> {
             selected = Some(("segment", manifest));
         }
         let (kind, manifest) = selected.ok_or_else(|| {
-            Error::Invalid("streaming reader requires a version 3 chunked snapshot".into())
+            Error::Invalid("streaming reader requires a version 3/5 chunked snapshot".into())
         })?;
+        let mut retry = manifest
+            .retry
+            .clone()
+            .unwrap_or_else(|| crate::retry::State::legacy(manifest.sequence));
         let mut overlay = BTreeMap::new();
         let mut sequence = manifest.sequence;
         for object in keys.into_iter().filter(|key| key.starts_with("mutation-")) {
@@ -204,7 +208,7 @@ impl<S: ObjectStore> StreamingDatabase<S> {
                     "unexpected object or log gap: {object}"
                 )));
             }
-            for mutation in read_mutations(&store, &object, next, config)? {
+            for mutation in read_mutations(&store, &object, next, config, &mut retry)? {
                 match mutation {
                     Mutation::Put {
                         id,

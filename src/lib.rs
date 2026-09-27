@@ -19,6 +19,7 @@
 pub mod ivf;
 pub mod ownership;
 pub mod recovery;
+pub mod retry;
 pub mod serving;
 pub mod store;
 pub mod streaming;
@@ -42,6 +43,10 @@ pub enum Error {
     Busy(String),
     #[error("maintenance required before more writes; compact the database")]
     MaintenanceRequired,
+    #[error("request ID reused with a different payload")]
+    RequestConflict,
+    #[error("request ID expired; its outcome is no longer resolvable")]
+    RequestExpired,
     #[error("write outcome uncertain; reopen storage and the database before writing again")]
     RecoveryRequired,
 }
@@ -173,7 +178,7 @@ enum MutationV1 {
     Delete { id: u64 },
 }
 /// One ordered write inside an atomic batch. Later operations on the same ID win.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Mutation {
     Put {
@@ -228,6 +233,8 @@ struct Segment {
     config: Config,
     // A sorted array, not a JSON map: duplicate IDs must be rejected on decode.
     documents: Vec<(u64, Document)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry: Option<retry::State>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -245,6 +252,8 @@ struct SnapshotManifest {
     config: Config,
     max_chunk_bytes: usize,
     chunks: Vec<ChunkRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry: Option<retry::State>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -350,13 +359,14 @@ fn key(sequence: u64) -> String {
 
 fn parse_chunked_manifest(bytes: &[u8], sequence: u64, config: Config) -> Result<SnapshotManifest> {
     let manifest: SnapshotManifest = decode(bytes)?;
-    if manifest.version != 3
+    if !matches!(manifest.version, 3 | 5)
         || manifest.sequence != sequence
         || manifest.config != config
         || manifest.max_chunk_bytes == 0
     {
         return Err(Error::Corrupt("invalid chunked snapshot identity".into()));
     }
+    validate_retry_snapshot(manifest.version, manifest.retry.as_ref(), sequence)?;
     let mut previous_id = None;
     for reference in &manifest.chunks {
         if reference.rows == 0
@@ -554,15 +564,64 @@ fn inspect_namespace<S: ObjectStore>(
     })
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestRecord {
+    version: u32,
+    sequence: u64,
+    request: retry::Request,
+    outcome: retry::Outcome,
+}
+
+fn validate_retry_snapshot(
+    version: u32,
+    state: Option<&retry::State>,
+    sequence: u64,
+) -> Result<()> {
+    match (version, state) {
+        (4 | 5, Some(state)) => state.validate(sequence),
+        (1..=3, None) => Ok(()),
+        _ => Err(Error::Corrupt(
+            "snapshot missing or unexpected retry state".into(),
+        )),
+    }
+}
+
 fn read_mutations<S: ObjectStore>(
     store: &S,
     object: &str,
     next: u64,
     config: Config,
+    state: &mut retry::State,
 ) -> Result<Vec<Mutation>> {
     let bytes = store
         .get(object)?
         .ok_or_else(|| Error::Corrupt(format!("listed object missing: {object}")))?;
+    if decode::<Version>(&bytes)?.version == 4 {
+        let record: RequestRecord = decode(&bytes)?;
+        record
+            .request
+            .validate(config)
+            .map_err(|e| Error::Corrupt(e.to_string()))?;
+        if record.sequence != next
+            || record.outcome.sequence != next
+            || state
+                .duplicate(&record.request, next - 1)
+                .map_err(|e| Error::Corrupt(e.to_string()))?
+                .is_some()
+            || state.decide(&record.request, next) != record.outcome
+        {
+            return Err(Error::Corrupt("invalid durable request decision".into()));
+        }
+        let mutations = if record.outcome.conflict.is_none() {
+            record.request.mutations.clone()
+        } else {
+            Vec::new()
+        };
+        state.advance(next, &mutations);
+        state.retain(&record.request, record.outcome)?;
+        return Ok(mutations);
+    }
     let (record_sequence, mutations) = match decode::<Version>(&bytes)?.version {
         1 => {
             let old: RecordV1 = decode(&bytes)?;
@@ -606,6 +665,7 @@ fn read_mutations<S: ObjectStore>(
                 .map_err(|e| Error::Corrupt(e.to_string()))?;
         }
     }
+    state.advance(next, &mutations);
     Ok(mutations)
 }
 
@@ -622,6 +682,7 @@ pub struct Database<S> {
     ivf: Option<ivf::Index>,
     visible_objects: usize,
     maintenance_limits: Option<MaintenanceLimits>,
+    retry: retry::State,
 }
 impl<S: ObjectStore> Database<S> {
     /// Open/recover, or initialize an empty namespace. Config must match on restart.
@@ -646,6 +707,7 @@ impl<S: ObjectStore> Database<S> {
             ivf: None,
             visible_objects,
             maintenance_limits: None,
+            retry: retry::State::default(),
         };
         // Validate the reclamation boundary even if a newer ordinary snapshot
         // supplies the live state. Never fall back from an invalid boundary.
@@ -668,7 +730,7 @@ impl<S: ObjectStore> Database<S> {
                     "unexpected object or log gap: {object}"
                 )));
             }
-            let mutations = read_mutations(&db.store, &object, next, config)?;
+            let mutations = read_mutations(&db.store, &object, next, config, &mut db.retry)?;
             for mutation in mutations {
                 db.apply(mutation);
             }
@@ -732,7 +794,7 @@ impl<S: ObjectStore> Database<S> {
             .get(object)?
             .ok_or_else(|| Error::Corrupt(format!("listed snapshot missing: {object}")))?;
         let version = decode::<Version>(&bytes)?.version;
-        if version == 3 {
+        if matches!(version, 3 | 5) {
             return self.load_chunked_snapshot(object, sequence, &bytes);
         }
         let segment = match version {
@@ -742,6 +804,7 @@ impl<S: ObjectStore> Database<S> {
                     version: old.version,
                     sequence: old.sequence,
                     config: old.config,
+                    retry: None,
                     documents: old
                         .documents
                         .into_iter()
@@ -757,7 +820,7 @@ impl<S: ObjectStore> Database<S> {
                         .collect(),
                 }
             }
-            2 => decode::<Segment>(&bytes)?,
+            2 | 4 => decode::<Segment>(&bytes)?,
             _ => return Err(Error::Corrupt("unsupported snapshot version".into())),
         };
         if segment.sequence != sequence || segment.config != self.config {
@@ -765,6 +828,10 @@ impl<S: ObjectStore> Database<S> {
                 "invalid snapshot version, sequence or configuration".into(),
             ));
         }
+        validate_retry_snapshot(segment.version, segment.retry.as_ref(), sequence)?;
+        self.retry = segment
+            .retry
+            .unwrap_or_else(|| retry::State::legacy(sequence));
         let mut documents = BTreeMap::new();
         let mut previous_id = None;
         for (id, document) in segment.documents {
@@ -798,12 +865,16 @@ impl<S: ObjectStore> Database<S> {
             Ok(())
         })?;
         self.documents = documents;
+        self.retry = manifest
+            .retry
+            .unwrap_or_else(|| retry::State::legacy(sequence));
         self.sequence = sequence;
         Ok(())
     }
     fn snapshot_bytes(&self) -> Result<Vec<u8>> {
         encode(&Segment {
-            version: 2,
+            version: 4,
+            retry: Some(self.retry.clone()),
             sequence: self.sequence,
             config: self.config,
             documents: self
@@ -905,7 +976,8 @@ impl<S: ObjectStore> Database<S> {
             });
         }
         let manifest = SnapshotManifest {
-            version: 3,
+            version: 5,
+            retry: Some(self.retry.clone()),
             sequence: self.sequence,
             config: self.config,
             max_chunk_bytes: max_bytes,
@@ -927,7 +999,7 @@ impl<S: ObjectStore> Database<S> {
     pub fn compact(&mut self) -> Result<()> {
         self.compact_with(None)
     }
-    /// Compact using version 3 snapshot chunks with a maximum encoded payload
+    /// Compact using version 5 manifests and version 1 chunks with a maximum encoded payload
     /// size per chunk. The manifest is the single authoritative boundary.
     pub fn compact_chunked(&mut self, max_chunk_bytes: usize) -> Result<()> {
         self.compact_with(Some(max_chunk_bytes))
@@ -1031,9 +1103,9 @@ impl<S: ObjectStore> Database<S> {
             .get(&key)?
             .ok_or_else(|| Error::Corrupt(format!("compaction snapshot missing: {key}")))?;
         match decode::<Version>(&bytes)?.version {
-            1 | 2 => {
+            1 | 2 | 4 => {
                 let header: SnapshotHeader = decode(&bytes)?;
-                if !matches!(header.version, 1 | 2)
+                if !matches!(header.version, 1 | 2 | 4)
                     || header.sequence != self.sequence
                     || header.config != self.config
                 {
@@ -1041,11 +1113,11 @@ impl<S: ObjectStore> Database<S> {
                 }
                 return Ok(BTreeSet::new());
             }
-            3 => {}
+            3 | 5 => {}
             _ => return Err(Error::Corrupt("unsupported compacted snapshot".into())),
         }
         let manifest: SnapshotManifest = decode(&bytes)?;
-        if manifest.version != 3
+        if !matches!(manifest.version, 3 | 5)
             || manifest.sequence != self.sequence
             || manifest.config != self.config
             || manifest.max_chunk_bytes == 0
@@ -1090,7 +1162,7 @@ impl<S: ObjectStore> Database<S> {
         self.poisoned = false;
         Ok(())
     }
-    /// Persist the current state as bounded immutable chunks plus one version 3
+    /// Persist the current state as bounded immutable chunks plus one version 5
     /// manifest. Chunks alone are not authoritative; an uncertain outcome
     /// requires reopening before another durable operation.
     pub fn checkpoint_chunked(&mut self, max_chunk_bytes: usize) -> Result<()> {
@@ -1152,6 +1224,81 @@ impl<S: ObjectStore> Database<S> {
         }
         self.commit_batch(mutations)
     }
+    /// Observe an ID, including absence. Conditions expire explicitly at the
+    /// reported revision floor and never allow delete/reinsert ABA.
+    pub fn revision(&self, id: u64) -> retry::Revision {
+        retry::Revision {
+            id,
+            boundary: self.sequence,
+        }
+    }
+    pub fn revision_floor(&self) -> u64 {
+        self.retry.revision_floor
+    }
+    /// Generate locally without publishing; retain the ID for all retries.
+    pub fn request_id(&self) -> Result<retry::RequestId> {
+        let mut nonce = [0; 16];
+        getrandom::getrandom(&mut nonce).map_err(|e| Error::Invalid(e.to_string()))?;
+        Ok(retry::RequestId {
+            boundary: self.sequence,
+            nonce,
+        })
+    }
+    /// Poisoned handles cannot resolve uncertainty from their stale read view.
+    pub fn lookup_request(&self, id: retry::RequestId) -> Result<retry::Lookup> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        Ok(self.retry.lookup(id, self.sequence))
+    }
+    pub(crate) fn retained_request(
+        &self,
+        request: &retry::Request,
+    ) -> Result<Option<retry::Outcome>> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        request.validate(self.config)?;
+        self.retry.duplicate(request, self.sequence)
+    }
+    /// Persist the conditional decision and mutations in the SAME immutable
+    /// object. A retained duplicate returns its original outcome without I/O.
+    pub fn apply_request(&mut self, request: retry::Request) -> Result<retry::Outcome> {
+        if let Some(outcome) = self.retained_request(&request)? {
+            return Ok(outcome);
+        }
+        self.ensure_write_capacity(request.mutations.len())?;
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("mutation sequence exhausted".into()))?;
+        let outcome = self.retry.decide(&request, sequence);
+        let record = RequestRecord {
+            version: 4,
+            sequence,
+            request,
+            outcome,
+        };
+        let bytes = encode(&record)?;
+        // Prepare all fallible metadata encoding before publication.
+        let mut state = self.retry.clone();
+        let mutations = if outcome.conflict.is_none() {
+            record.request.mutations.clone()
+        } else {
+            Vec::new()
+        };
+        state.advance(sequence, &mutations);
+        state.retain(&record.request, outcome)?;
+        self.poisoned = true;
+        self.tracked_create(&key(sequence), &bytes)?;
+        for mutation in mutations {
+            self.apply(mutation);
+        }
+        self.retry = state;
+        self.sequence = sequence;
+        self.poisoned = false;
+        Ok(outcome)
+    }
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<Neighbor>> {
         self.search_filtered(query, k, &[])
     }
@@ -1204,6 +1351,8 @@ impl<S: ObjectStore> Database<S> {
         // Set before entering storage: even a caught backend panic cannot permit reuse.
         self.poisoned = true;
         self.tracked_create(&key(sequence), &bytes)?;
+        self.retry
+            .advance(sequence, std::slice::from_ref(&record.mutation));
         self.apply(record.mutation);
         self.sequence = sequence;
         self.poisoned = false;
@@ -1227,6 +1376,7 @@ impl<S: ObjectStore> Database<S> {
         // A lost acknowledgement may leave the complete batch remotely visible.
         self.poisoned = true;
         self.tracked_create(&key(sequence), &bytes)?;
+        self.retry.advance(sequence, &record.mutations);
         for mutation in record.mutations {
             self.apply(mutation);
         }
