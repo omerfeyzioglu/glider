@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import re
 import secrets
@@ -55,7 +56,8 @@ def check_aws(env):
                   "--no-cli-pager", "--cli-connect-timeout", "5",
                   "--cli-read-timeout", "10", env=env, capture=True, timeout=15)
         return json.loads(raw or "{}")
-    account = free_plan(aws("freetier", "get-account-plan-state", region="us-east-1"))
+    plan = aws("freetier", "get-account-plan-state", region="us-east-1")
+    account = free_plan(plan)
     bucket = ["--bucket", env["GLIDER_S3_BUCKET"], "--expected-bucket-owner", account]
     region = env["GLIDER_S3_REGION"]
     location = aws("s3api", "get-bucket-location", *bucket, region=region).get("LocationConstraint")
@@ -64,6 +66,8 @@ def check_aws(env):
         raise ValueError("bucket region differs from GLIDER_S3_REGION")
     if aws("s3api", "get-bucket-versioning", *bucket, region=region).get("Status"):
         raise ValueError("pilot requires a fresh bucket without versioning or retained historical versions")
+    return {key: plan[key] for key in (
+        "accountPlanType", "accountPlanStatus", "accountPlanRemainingCredits", "accountPlanExpirationDate")}
 
 
 def exercise(output, env):
@@ -101,8 +105,8 @@ def main():
     env["GLIDER_S3_NAMESPACE"] = "glider-pilot/" + secrets.token_hex(16)
     # Build locally before spending AWS credits or starting the timed workload.
     run("cargo", "build", "--release", "--locked", "--features", "s3", "--example", "s3_pilot", env=env)
-    if args.aws:
-        check_aws(env)  # Fail closed: no writes if plan, credits, identity or bucket checks fail.
+    # Fail closed: no writes if plan, credits, identity or bucket checks fail.
+    preflight = check_aws(env) if args.aws else None
     name = "glider-pilot-" + secrets.token_hex(6)
     with container_scope(name) if args.minio else nullcontext():
         if args.minio:
@@ -117,7 +121,10 @@ def main():
             env.update(AWS_ACCESS_KEY_ID=env["MINIO_ROOT_USER"], AWS_SECRET_ACCESS_KEY=env["MINIO_ROOT_PASSWORD"],
                        GLIDER_S3_ENDPOINT=endpoint, GLIDER_S3_REGION="us-east-1", GLIDER_S3_BUCKET="glider-pilot-test")
         (args.output / "run.json").write_text(json.dumps({
-            "version": 1, "backend": "aws" if args.aws else "minio", "prefix": env["GLIDER_S3_NAMESPACE"],
+            "version": 2, "backend": "aws" if args.aws else "minio", "prefix": env["GLIDER_S3_NAMESPACE"],
+            "started_utc": datetime.now(timezone.utc).isoformat(), "free_plan": preflight,
+            "platform": platform.platform(), "machine": platform.machine(),
+            "rustc": run("rustc", "--version", capture=True).strip(),
             "endpoint": env["GLIDER_S3_ENDPOINT"], "bucket": env["GLIDER_S3_BUCKET"],
             "region": env["GLIDER_S3_REGION"], "git_revision": run("git", "rev-parse", "HEAD", capture=True).strip(),
             "git_status": run("git", "status", "--short", capture=True).strip(),
