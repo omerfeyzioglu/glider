@@ -605,8 +605,10 @@ pagination cutoff and successful recovery with an adequate budget on MinIO.
 
 ## M19 — Establish a representative larger operating envelope
 
-Status: bounded SIFT/MinIO capacity protocol and runner ready; measurements
-and acceptance pending. [Predeclared protocol](benchmarks/M19.md).
+Status: first SIFT/MinIO probe stopped at 2,000 rows: write-queue p95
+78.946 ms >75 ms and maintenance p95/max 105.897 ms >100 ms. Other budgets and
+800 exact-oracle checks passed. No larger step/final soak was run; acceptance
+remains open. [Protocol, attribution and raw evidence](benchmarks/M19.md).
 Does not assume that M17/M18 need implementation.
 
 Steps:
@@ -625,6 +627,18 @@ Done when:
   resource, with exact-oracle checks and failure/recovery tests at that size.
 - One final workload-specific soak and backup/restore rehearsal meet its stated
   budgets after targeted fixes; the small M8 result is not extrapolated.
+
+### M19b — Bound foreground cleanup latency
+
+Status: justified by the M19 first-step failure; implementation pending.
+
+The slowest maintenance event spent 44.703 ms deleting 17 independent obsolete
+keys serially, after publishing a complete snapshot. Compare bounded concurrent
+native deletes against serial cleanup, preserving all-or-uncertain acknowledgement,
+poisoning on partial failure, and fresh recovery counts. Avoid another publication
+participant or new provider-specific bulk-delete operation. Reuse the failed
+baseline, measure the same boundary once after the change, and continue the
+bounded capacity steps only if it passes.
 
 ## M20 — Remove the demonstrated capacity bottleneck
 
