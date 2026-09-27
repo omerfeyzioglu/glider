@@ -106,3 +106,17 @@ recall@10, which is not a general accuracy guarantee or semantic relevance metri
 Full probing restored 100% recall but evaluated 528 distances and could be slower
 than exact. Reports record dirty parent `8d2a6b`, source `9eebcc…`; RSS does not
 isolate index memory. Writes invalidate the non-persistent index. [Results](../benchmarks/ANN.md), [code](../src/ivf.rs), [tests](../tests/ivf.rs).
+
+
+## 2026-09-27 — Bounded durable retry decisions (M15)
+
+Client retries previously could overwrite a newer document after a lost
+acknowledgement. Requests now publish their payload identity, conditional decision
+and mutations together. A 128-commit window bounds receipts and refuses expired
+IDs; it avoids TTL clock assumptions and arbitrary UUID eviction ambiguity.
+Bounded recent ID changes validate observations across delete/reinsert without
+indefinite tombstones. Snapshot versions 4/5 preserve this authoritative state;
+legacy inputs remain readable. Restore guarantees stop at the selected backup
+boundary. The failure and process-exit tests in `tests/retry.rs` and the MinIO
+retry/takeover test exercise this contract. See [DESIGN.md](../DESIGN.md) for
+current semantics and alternatives.

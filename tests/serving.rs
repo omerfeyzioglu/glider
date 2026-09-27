@@ -209,7 +209,7 @@ fn legacy_v1_v2_migrate_through_chunked_backup_and_restore() {
         .unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&root).unwrap()["version"],
-        3
+        5
     );
     db.close().unwrap();
     let restored = Memory::default();
