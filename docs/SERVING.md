@@ -6,7 +6,8 @@
 process owns one bucket/prefix. The initial workload is 2,000 live documents,
 64 dimensions, squared Euclidean distance, k=10, and `selected=true` on every
 100th ID. Exact serving is selected by M12; `SearchMode::Approximate` is rejected.
-No network listener, authentication layer or concurrent request queue is supplied.
+No network listener or authentication layer is supplied. The optional
+[bounded admission worker](ADMISSION.md) serializes concurrent library callers.
 
 Use `ServingOptions::m8()` on every open. It caps live rows at 2,000, serialized
 vector plus metadata at 4,096 bytes/document, and each batch at 100 operations.
@@ -40,7 +41,14 @@ Invalid input and capacity rejection publish nothing and keep the handle usable.
 Do not raise limits to hide growing memory or missed maintenance: establish a
 new measured envelope first. Recovery loads/validates authoritative data before
 checking serving capacity, so the cap does not bound memory for an arbitrarily
-oversized existing database. Process RSS and the backing service remain external
+oversized existing database. Before opening an S3 deployment, use
+`S3Store::with_read_limits(ReadLimits { objects, object_bytes, namespace_bytes })`
+to cap inventory and downloaded envelopes. Include ownership objects, obsolete
+history and old/new snapshots coexisting during compaction. A limit breach fails
+open explicitly without partial state; it does not delete data or automatically
+raise limits. An owned-open failure may leave its claim: inspect it with the
+stopped-owner recovery procedure. These input bounds complement measured RSS;
+they do not directly specify allocator memory. Process RSS and the backing service remain external
 operating limits. These results cover loopback MinIO, not remote-cloud latency.
 
 ## Backup and restore

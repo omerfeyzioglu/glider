@@ -507,7 +507,8 @@ Done when:
 
 ## M16 — Bounded concurrent admission with one committer
 
-Status: controlled-load acceptance passed locally; final CI pending. The
+Status: complete. [PR #43](https://github.com/omerfeyzioglu/glider/pull/43)
+passed [CI](https://github.com/omerfeyzioglu/glider/actions/runs/36325701688). The
 bounded FIFO admits by count and encoded bytes, with one owner worker and
 explicit cancellation/shutdown semantics. Six deterministic failure tests pass.
 The paired MinIO run checked 4,000 exact queries across two processes; the worker
@@ -535,8 +536,13 @@ Done when:
 
 ## M17 — Consistent concurrent read views
 
-Status: planned; enter when overlapping reads/writes are required or M16 shows
-that serialized reads violate the declared latency budget.
+Status: pinned views deferred for the M16 envelope. FIFO exact queries bind to
+one committed boundary; deterministic admission tests prove whole-batch visibility
+and cancellation/shutdown ordering. The controlled run measured filtered/unfiltered
+query p95 of 16.695/1.077 ms against the 50 ms budget. No overlapping-read
+requirement is established. Revisit only when a larger workload requires it;
+this is a serialization decision, not an implemented pinned-view protocol.
+[Evidence and limits](benchmarks/M16.md).
 
 Steps:
 - Compare a simple lock with immutable pinned views on the affected workload.
@@ -557,7 +563,12 @@ Done when:
 
 ## M18 — Maintenance without unbounded foreground stalls
 
-Status: conditional on measured maintenance stalls in the active envelope.
+Status: background maintenance deferred for the M16 envelope. Twelve synchronous
+maintenance events had p95 79.281 ms against the 100 ms budget, with read/write
+budgets also satisfied. Existing crash tests cover publication and cleanup; the
+worker closes admission on uncertain failures. No concurrent reader holds old
+objects. Write queue p95 (73.110 ms versus 75 ms) leaves little margin; revisit
+if M19 exposes a stall. [Evidence and limits](benchmarks/M16.md).
 
 Steps:
 - Attribute admission/read tail latency to snapshot construction, publication
@@ -574,6 +585,21 @@ Done when:
   acknowledged writes and resume safely. Reader-held objects survive cleanup.
 - Maintenance/storage failure has an explicit serving/recovery outcome; a worker
   cannot silently die while admission continues beyond the resource limits.
+
+### M19a — Bound S3 reads before capacity exploration
+
+Status: local validation passed; PR CI pending. Scripted tests cover declared
+and actual body size, inventory count/bytes and early pagination cutoff. The
+MinIO test rejects an oversized snapshot before any GET, then verifies all rows
+with adequate limits. The full MinIO crash/restart suite and cleanup passed.
+
+Demonstrated blocker: serving checks row capacity after recovery, while the S3
+backend previously collected an unrestricted listing and complete object bodies.
+A large namespace could consume resources before explicit rejection. Add opt-in
+inventory count/byte and streamed object byte limits before M19 exploration.
+Limits must fail closed, preserve authoritative state, and retain existing
+uncertain-publication/ownership recovery semantics. Verify header/body oversize,
+pagination cutoff and successful recovery with an adequate budget on MinIO.
 
 ## M19 — Establish a representative larger operating envelope
 

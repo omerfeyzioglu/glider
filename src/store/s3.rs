@@ -38,6 +38,26 @@ pub struct RequestCounts {
 /// Clone before giving the store to Database to observe request deltas afterward.
 #[derive(Debug, Default, Clone)]
 pub struct RequestMetrics(Arc<Mutex<RequestCounts>>);
+
+/// Opt-in bounds on visible namespace inventory and each downloaded envelope.
+/// Includes control/obsolete objects and envelope bytes, not decoded engine RAM.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadLimits {
+    pub objects: usize,
+    pub object_bytes: usize,
+    pub namespace_bytes: u64,
+}
+impl ReadLimits {
+    fn validate(self) -> Result<()> {
+        if self.objects == 0 || self.object_bytes == 0 || self.namespace_bytes == 0 {
+            return Err(Error::Invalid("S3 read limits must be positive".into()));
+        }
+        Ok(())
+    }
+}
+fn read_limit(what: &str) -> Error {
+    Error::Invalid(format!("S3 read limit exceeded: {what}"))
+}
 impl RequestMetrics {
     pub fn snapshot(&self) -> RequestCounts {
         *self.0.lock().unwrap()
@@ -106,6 +126,7 @@ pub struct S3Store {
     runtime: Option<Runtime>,
     metrics: RequestMetrics,
     poisoned: bool,
+    read_limits: Option<ReadLimits>,
 }
 impl S3Store {
     /// Configure endpoint/region/credentials with the builder. This method forces
@@ -157,7 +178,16 @@ impl S3Store {
             runtime: Some(runtime),
             metrics,
             poisoned: false,
+            read_limits: None,
         })
+    }
+    /// Set before opening the engine. Listing rejects an oversized namespace
+    /// without returning a partial inventory; GET checks headers and body chunks.
+    /// Failed owned opens can leave a claim, as with other recovery failures.
+    pub fn with_read_limits(mut self, limits: ReadLimits) -> Result<Self> {
+        limits.validate()?;
+        self.read_limits = Some(limits);
+        Ok(self)
     }
     pub fn metrics(&self) -> RequestMetrics {
         self.metrics.clone()
@@ -210,32 +240,66 @@ impl ObjectStore for S3Store {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.ready()?;
         let path = self.path(key)?;
-        let bytes = self.run(async {
-            match self.remote.get(&path).await {
-                Ok(result) => result.bytes().await.map(Some),
-                Err(object_store::Error::NotFound { .. }) => Ok(None),
-                Err(error) => Err(error),
+        self.runtime.as_ref().unwrap().block_on(async {
+            let result = match self.remote.get(&path).await {
+                Ok(result) => result,
+                Err(object_store::Error::NotFound { .. }) => return Ok(None),
+                Err(error) => return Err(remote_error(error)),
+            };
+            if let Some(limits) = self.read_limits {
+                if result.meta.size > limits.object_bytes as u64 {
+                    return Err(read_limit("object header bytes"));
+                }
+                let mut stream = result.into_stream();
+                let mut bytes = Vec::new();
+                while let Some(chunk) = stream.try_next().await.map_err(remote_error)? {
+                    if chunk.len() > limits.object_bytes.saturating_sub(bytes.len()) {
+                        return Err(read_limit("object body bytes"));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                decode_envelope(&bytes, key).map(Some)
+            } else {
+                let bytes = result.bytes().await.map_err(remote_error)?;
+                decode_envelope(&bytes, key).map(Some)
             }
-        })?;
-        bytes.map(|b| decode_envelope(&b, key)).transpose()
+        })
     }
     fn list(&self) -> Result<Vec<String>> {
         self.ready()?;
-        // Exhaust the SDK's paginated stream before exposing any keys to recovery.
-        let objects: Vec<_> = self.run(self.remote.list(Some(&self.namespace)).try_collect())?;
         let prefix = format!("{}/", self.namespace);
-        let mut keys = Vec::with_capacity(objects.len());
-        for object in objects {
-            let key = object
-                .location
-                .as_ref()
-                .strip_prefix(&prefix)
-                .ok_or_else(|| Error::Corrupt("S3 listing escaped namespace".into()))?;
-            self.path(key)
-                .map_err(|_| Error::Corrupt(format!("unexpected S3 key: {key}")))?;
-            keys.push(key.to_owned());
-        }
-        Ok(keys)
+        // Consume pages incrementally. Never expose a partial listing, including
+        // when a limit or a later page fails. SDK page/transport buffers remain.
+        self.runtime.as_ref().unwrap().block_on(async {
+            let mut objects = self.remote.list(Some(&self.namespace));
+            let mut keys = Vec::new();
+            let mut total_bytes = 0_u64;
+            while let Some(object) = objects.try_next().await.map_err(remote_error)? {
+                if let Some(limits) = self.read_limits {
+                    if keys.len() >= limits.objects {
+                        return Err(read_limit("object count"));
+                    }
+                    if object.size > limits.object_bytes as u64 {
+                        return Err(read_limit("listed object bytes"));
+                    }
+                    total_bytes = total_bytes
+                        .checked_add(object.size)
+                        .ok_or_else(|| read_limit("namespace byte overflow"))?;
+                    if total_bytes > limits.namespace_bytes {
+                        return Err(read_limit("namespace bytes"));
+                    }
+                }
+                let key = object
+                    .location
+                    .as_ref()
+                    .strip_prefix(&prefix)
+                    .ok_or_else(|| Error::Corrupt("S3 listing escaped namespace".into()))?;
+                self.path(key)
+                    .map_err(|_| Error::Corrupt(format!("unexpected S3 key: {key}")))?;
+                keys.push(key.to_owned());
+            }
+            Ok(keys)
+        })
     }
     fn remove(&mut self, key: &str) -> Result<()> {
         self.ready()?;

@@ -17,6 +17,54 @@ fn config() -> Config {
 
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_bounded_open_rejects_inventory_before_loading_snapshot() {
+    let namespace = "bounded-open";
+    let cfg = Config {
+        dimensions: 128,
+        metric: Metric::SquaredEuclidean,
+    };
+    let mut db = Database::open(minio(namespace), cfg).unwrap();
+    db.apply_batch(
+        (0..100)
+            .map(|id| Mutation::Put {
+                id,
+                vector: vec![id as f32; 128],
+                metadata: BTreeMap::new(),
+            })
+            .collect(),
+    )
+    .unwrap();
+    db.compact().unwrap();
+    drop(db);
+    let small = ReadLimits {
+        objects: 16,
+        object_bytes: 4096,
+        namespace_bytes: 8192,
+    };
+    let store = minio(namespace).with_read_limits(small).unwrap();
+    let metrics = store.metrics();
+    assert!(Database::open(store, cfg)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("listed object bytes"));
+    assert_eq!(metrics.snapshot().get, 0);
+    // Rejection is read-only. A correctly budgeted reopen still recovers exact state.
+    let store = minio(namespace)
+        .with_read_limits(ReadLimits {
+            object_bytes: 1024 * 1024,
+            namespace_bytes: 2 * 1024 * 1024,
+            ..small
+        })
+        .unwrap();
+    let db = Database::open(store, cfg).unwrap();
+    for id in 0..100 {
+        assert_eq!(db.get(id).unwrap(), vec![id as f32; 128]);
+    }
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_owner_claim_survives_drop_and_requires_explicit_cleanup() {
     let namespace = "exclusive-owner";
     let mut first = OwnedDatabase::open(minio(namespace), config()).unwrap();
@@ -150,6 +198,96 @@ fn scripted(responses: Vec<HttpResponse>) -> S3Store {
 fn page(key: &str, next: bool) -> String {
     format!("<ListBucketResult><IsTruncated>{next}</IsTruncated>{}<Contents><Key>{key}</Key><LastModified>2026-09-14T00:00:00Z</LastModified><ETag>test</ETag><Size>1</Size></Contents></ListBucketResult>",
         if next { "<NextContinuationToken>next-page</NextContinuationToken>" } else { "" })
+}
+#[test]
+fn read_limits_reject_headers_and_actual_body_without_poisoning() {
+    let bytes = encode_envelope(b"bounded");
+    let limits = ReadLimits {
+        objects: 2,
+        object_bytes: bytes.len(),
+        namespace_bytes: 1024,
+    };
+    let store = scripted(vec![response(200, &bytes)])
+        .with_read_limits(limits)
+        .unwrap();
+    assert_eq!(store.get("object").unwrap(), Some(b"bounded".to_vec()));
+    for dishonest_header in [false, true] {
+        let mut reply = response(200, &bytes);
+        if dishonest_header {
+            reply
+                .headers_mut()
+                .insert("content-length", "1".parse().unwrap());
+        }
+        let store = scripted(vec![reply, response(200, &bytes)])
+            .with_read_limits(ReadLimits {
+                object_bytes: bytes.len() - 1,
+                ..limits
+            })
+            .unwrap();
+        let error = store.get("object").unwrap_err();
+        let expected = if dishonest_header { "body" } else { "header" };
+        assert!(error.to_string().contains(expected), "{error}");
+        assert!(!store.poisoned);
+        assert_eq!(store.metrics().snapshot().get, 1);
+    }
+    assert!(scripted(vec![])
+        .with_read_limits(ReadLimits {
+            objects: 0,
+            ..limits
+        })
+        .is_err());
+}
+
+#[test]
+fn read_limits_stop_listing_without_partial_results_or_more_pages() {
+    for (limits, expected) in [
+        (
+            ReadLimits {
+                objects: 1,
+                object_bytes: 1,
+                namespace_bytes: 8,
+            },
+            "count",
+        ),
+        (
+            ReadLimits {
+                objects: 8,
+                object_bytes: 1,
+                namespace_bytes: 1,
+            },
+            "namespace",
+        ),
+    ] {
+        let store = scripted(vec![
+            response(200, page("test/first", true)),
+            response(200, page("test/second", true)),
+        ])
+        .with_read_limits(limits)
+        .unwrap();
+        assert!(store.list().unwrap_err().to_string().contains(expected));
+        assert_eq!(store.metrics().snapshot().list, 2);
+        assert!(!store.poisoned);
+    }
+    let limits = ReadLimits {
+        objects: 1,
+        object_bytes: 1,
+        namespace_bytes: 1,
+    };
+    let store = scripted(vec![response(200, page("test/first", false))])
+        .with_read_limits(limits)
+        .unwrap();
+    assert_eq!(store.list().unwrap(), vec!["first"]);
+    let store = scripted(vec![response(
+        200,
+        page("test/first", false).replace("<Size>1", "<Size>2"),
+    )])
+    .with_read_limits(limits)
+    .unwrap();
+    assert!(store
+        .list()
+        .unwrap_err()
+        .to_string()
+        .contains("listed object"));
 }
 #[test]
 fn conditional_create_errors_poison_without_retry() {
