@@ -679,6 +679,12 @@ encoding plus the separately reviewed M20a result allocation fix meet the
 mutations/s in the final 50-second workload. Exact state, backup/restore and
 failure recovery pass. [Before/after evidence](benchmarks/M20.md).
 
+The next scoped local probe at 10,000×128 fails write-queue p95 (109.093 ms
+against 75 ms). Synchronous full-snapshot maintenance dominates the affected
+rounds; search, commit, throughput, memory and recovery budgets pass. This is
+the next demonstrated boundary, not an accepted larger envelope or a selected
+background-publication design. [Current attribution](benchmarks/CURRENT_BOUNDARY.md).
+
 Steps:
 - Choose one cause and compare the smallest relevant alternatives: selective
   reads/cache layout for GET/byte cost, compact representation for RAM, indexing
