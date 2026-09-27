@@ -23,7 +23,11 @@ def main():
     parser.add_argument('output', type=Path)
     parser.add_argument('--data', type=Path)
     parser.add_argument('--smoke', action='store_true')
+    parser.add_argument('--m20', action='store_true', help='only the demonstrated 5,000-row boundary and final rehearsal')
+    parser.add_argument('--diagnostic', action='store_true', help='unpaced 20-round real-data M20 attribution only')
     args = parser.parse_args()
+    if args.diagnostic and (args.smoke or not args.m20):
+        parser.error('--diagnostic requires --m20 and real data')
     args.output.mkdir(parents=True, exist_ok=False)
     data = args.data
     if args.smoke:
@@ -50,7 +54,7 @@ def main():
                 dataset='synthetic fixture' if args.smoke else 'SIFT small prefix; rotate137 updates',
                 docker=run('docker','version','--format','{{.Server.Version}}',capture=True).strip(), smoke=args.smoke,
                 cache_control='fresh serving process; uncontrolled OS/MinIO caches, power and competing load',
-                backend_scope='loopback MinIO only; no remote or AWS capacity acceptance')
+                backend_scope='loopback MinIO only; no remote or AWS capacity acceptance', m20=args.m20, diagnostic=args.diagnostic)
     (args.output/'run.json').write_text(json.dumps(info,indent=2)+'\n')
     with container_scope(name):
         env.update(MINIO_ROOT_USER='glider-'+secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
@@ -63,10 +67,10 @@ def main():
             output=args.output/case; output.mkdir(exist_ok=True)
             env['GLIDER_M19_CASE']=case
             report=output/('prepare.json' if operation=='prepare' else 'serve.json')
-            run('target/release/examples/m19_capacity',operation,str(rows),str(rounds),'smoke' if args.smoke else 'paced',str(data),str(report),env=env,timeout=180,stage='M19 '+case+' '+operation)
+            run('target/release/examples/m19_capacity',operation,str(rows),str(rounds),'smoke' if args.smoke or args.diagnostic else 'paced',str(data),str(report),env=env,timeout=180,stage='M19 '+case+' '+operation)
             return json.loads(report.read_text())
         supported=None; breach=None
-        for rows in ([2000] if args.smoke else [2000,5000,10000]):
+        for rows in ([5000] if args.m20 else [2000] if args.smoke else [2000,5000,10000]):
             case='probe-'+str(rows); rounds=2 if args.smoke else 20
             phase(case,rows,rounds,'prepare'); result=phase(case,rows,rounds,'serve')
             if not args.smoke and not result['performance_accepted']:

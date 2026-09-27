@@ -649,7 +649,9 @@ bounded capacity steps only if it passes.
 
 ### M20a — Release spare candidate capacity in completed exact results
 
-Status: local exact-oracle/allocation tests passed; PR CI pending.
+Status: complete. [PR #47](https://github.com/omerfeyzioglu/glider/pull/47)
+passed [CI](https://github.com/omerfeyzioglu/glider/actions/runs/36327642974).
+The regression fails before the change and passes after it.
 
 The 5,000-row investigation found that truncating scored candidates to k retained
 the full Vec capacity in each completed result. A deterministic regression test
@@ -662,10 +664,11 @@ independent memory source; no new soak is needed for the allocation proof.
 
 ## M20 — Remove the demonstrated capacity bottleneck
 
-Status: in progress at the demonstrated 5,000×128 write-queue boundary.
-Investigate lossless single-object snapshot number encoding; first remove the
-independent completed-result allocation obstacle in M20a. No larger envelope
-is accepted yet.
+Status: local acceptance passed; final PR CI pending. Lossless integer snapshot
+encoding plus the separately reviewed M20a result allocation fix meet the
+5,000×128 SIFT/MinIO envelope: queue p95 66.390 ms, RSS 35.469 MiB and 400.751
+mutations/s in the final 50-second workload. Exact state, backup/restore and
+failure recovery pass. [Before/after evidence](benchmarks/M20.md).
 
 Steps:
 - Choose one cause and compare the smallest relevant alternatives: selective

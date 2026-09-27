@@ -411,6 +411,13 @@ Version 1 JSON contains version, sequence, configuration and a strictly ID-sorte
 array of `(id, vector)` entries. Version 2 contains `(id, {vector, metadata})`
 entries, with metadata a required string-to-string map. New single-object
 snapshots use version 4 with the same documents and required retry/revision state.
+Single-object snapshot writers emit exactly represented integral f32 components
+in [-2^24, 2^24] as JSON integers, preserving negative zero and the standard
+floating representation of other values. Existing version-4 readers already
+decode both JSON number forms into the same f32 bits; the schema and version
+remain unchanged. Mutation/retry identity encoding and chunk byte-reuse encoding
+retain their existing representation. This reduces serialization and PUT bytes
+for integral descriptor workloads without rounding vector values.
 Recovery accepts version 1 snapshots with empty metadata and version 2 snapshots
 without retry state. The backend envelope protects its bytes. Deletes are represented by absence; the
 sequence boundary prevents older puts from resurrecting deleted IDs. An empty

@@ -338,3 +338,98 @@ fn uncertain_tail_after_checkpoint_cannot_be_checkpointed_away() {
         assert!(store.0.borrow().objects.contains_key(&segment(sequence)));
     }
 }
+
+#[test]
+fn compact_snapshot_numbers_preserve_float_bits_and_retry_identity() {
+    use glider::retry::{Lookup, Request};
+    let mut values = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        255.0,
+        -255.0,
+        0.5,
+        -0.5,
+        16_777_216.0,
+        -16_777_216.0,
+        16_777_218.0,
+        f32::MIN,
+        f32::MAX,
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
+    ];
+    // Reproducible bit patterns exercise unchanged non-integer serialization.
+    let mut state = 42_u64;
+    for _ in 0..4096 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let value = f32::from_bits((state >> 32) as u32);
+        if value.is_finite() {
+            values.push(value);
+        }
+    }
+    let cfg = Config {
+        dimensions: values.len(),
+        metric: Metric::SquaredEuclidean,
+    };
+    let store = Memory::default();
+    let mut db = Database::open(store.clone(), cfg).unwrap();
+    let request = Request {
+        id: db.request_id().unwrap(),
+        conditions: vec![],
+        mutations: vec![glider::Mutation::Put {
+            id: 1,
+            vector: values.clone(),
+            metadata: BTreeMap::new(),
+        }],
+    };
+    let result = db.apply_request(request.clone()).unwrap();
+    let log = store.0.borrow().objects[&mutation(1)].clone();
+    db.checkpoint().unwrap();
+    let bytes = store.0.borrow().objects[&segment(1)].clone();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["version"], 4);
+    let vector = &json["documents"][0][1]["vector"];
+    assert!(vector[0].is_i64());
+    assert!(vector[4].is_i64());
+    assert!(vector[1].is_f64());
+    assert!(vector[6].is_f64());
+    // This is the same Vec<f32> decoder used by the pre-optimization v4 reader.
+    let decoded: Vec<f32> = serde_json::from_value(vector.clone()).unwrap();
+    assert_eq!(
+        decoded.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        "seed=42"
+    );
+    drop(db);
+    let mut recovered = Database::open(store.clone(), cfg).unwrap();
+    assert_eq!(
+        recovered
+            .get(1)
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        "seed=42 checkpoint recovery"
+    );
+    assert_eq!(
+        recovered.lookup_request(request.id).unwrap(),
+        Lookup::Retained(result)
+    );
+    assert_eq!(recovered.apply_request(request).unwrap(), result);
+    assert_eq!(store.0.borrow().objects[&mutation(1)], log);
+    recovered.compact().unwrap();
+    drop(recovered);
+    let recovered = Database::open(store, cfg).unwrap();
+    assert_eq!(
+        recovered
+            .get(1)
+            .unwrap()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        values.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        "seed=42 compaction recovery"
+    );
+}
