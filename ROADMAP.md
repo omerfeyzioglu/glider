@@ -605,7 +605,9 @@ pagination cutoff and successful recovery with an adequate budget on MinIO.
 
 ## M19 — Establish a representative larger operating envelope
 
-Status: local acceptance passed after M19b; PR CI pending. The supported
+Status: complete for the selected local MinIO workload.
+[PR #46](https://github.com/omerfeyzioglu/glider/pull/46) passed
+[CI](https://github.com/omerfeyzioglu/glider/actions/runs/36327039489). The supported
 SIFT/MinIO envelope is 2,000×128 with four clients and 400 offered mutations/s.
 The first larger row step (5,000) fails write-queue p95; the final 50-second
 workload, full state/oracle checks, backup/restore and failure recovery pass.
@@ -631,7 +633,7 @@ Done when:
 
 ### M19b — Bound foreground cleanup latency
 
-Status: local acceptance passed; PR CI pending. The same 2,000-row probe now
+Status: complete; PR #46 and its CI passed. The same 2,000-row probe now
 passes (write-queue p95 58.017 ms; maintenance p95/max 49.718 ms), with identical
 HTTP counts/bytes and unchanged budgets. The S3 backend issues at most four native DELETEs concurrently;
 other backends default to serial cleanup. Partial failures retain a poisoned
@@ -645,11 +647,24 @@ participant or new provider-specific bulk-delete operation. Reuse the failed
 baseline, measure the same boundary once after the change, and continue the
 bounded capacity steps only if it passes.
 
+### M20a — Release spare candidate capacity in completed exact results
+
+Status: local exact-oracle/allocation tests passed; PR CI pending.
+
+The 5,000-row investigation found that truncating scored candidates to k retained
+the full Vec capacity in each completed result. A deterministic regression test
+observed capacity 8,192 for one returned neighbor. Return a compact allocation
+while preserving exact ordering, ties and temporary scoring behavior. Tests cover
+both metrics, filters with all/some/no matches and k from zero through above the
+row count. Each result must retain only its returned neighbor allocation.
+This is separate from the snapshot encoding change because it addresses an
+independent memory source; no new soak is needed for the allocation proof.
+
 ## M20 — Remove the demonstrated capacity bottleneck
 
-Status: selected from M19’s 5,000×128 write-queue failure. Test lossless compact
-JSON number emission for single-object snapshots, with unchanged retry identity
-and float bits. Local correctness/failure tests pass; targeted before/after
+Status: selected from M19’s 5,000×128 write-queue failure. Lossless compact
+JSON number emission passes latency but exposed the independent result-allocation
+obstacle addressed by M20a. Local correctness/failure tests pass; combined
 measurement and final CI pending. [Protocol](benchmarks/M20.md).
 
 Steps:
