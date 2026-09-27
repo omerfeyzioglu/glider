@@ -758,6 +758,20 @@ Complete visible objects are already durable under the required service contract
 so recovery needs no local synchronization barrier. External tail-object deletion
 remains undetectable, as with the local backend.
 
+`S3Store::with_read_limits` optionally bounds the visible object count, total
+listed envelope bytes and each object envelope. Listing consumes the SDK stream
+incrementally and rejects excess before exposing any inventory to recovery. GET
+checks metadata before body collection and checks each streamed chunk before
+appending it. A read-limit error performs no deletion, does not poison the store
+and never returns partial data. Owned opens can still leave a claim when a
+subsequent listing/recovery check fails; inspect it using the existing stopped
+owner procedure. Limits include ownership keys, obsolete objects and envelopes.
+They must cover the temporary coexistence of old/new snapshots. They bound
+retained input, not exact RSS: SDK page/transport buffers, decoder allocations
+and resident state also consume memory. Defaults preserve the unbounded legacy
+API; deployments must opt in and validate their serving/RSS budgets. This changes
+no persisted format, write acknowledgement or publication protocol.
+
 Cloneable request metrics count transport-level GET, listing-page, PUT, DELETE and other
 attempts, request body bytes, HTTP error responses and transport errors. These
 are not device I/O or latency measurements. MinIO integration tests exercise
