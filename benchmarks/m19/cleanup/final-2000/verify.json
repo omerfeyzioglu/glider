@@ -1,0 +1,296 @@
+{
+  "backup_ms": 100.682167,
+  "backup_restore_accepted": true,
+  "backup_restore_get_bytes": 6377688,
+  "backup_restore_put_bytes": 3826604,
+  "cold_open_ms": 51.295916,
+  "cold_operations": [
+    {
+      "bytes": 13,
+      "key": "owner-root-v1",
+      "kind": "get",
+      "ms": 4.151584
+    },
+    {
+      "bytes": 13,
+      "key": "owner-root-v1",
+      "kind": "get",
+      "ms": 1.163833
+    },
+    {
+      "bytes": 56,
+      "key": "owner-v1-174029fe70bea9fce6dee99472a9ad1f",
+      "kind": "put",
+      "ms": 4.152083
+    },
+    {
+      "bytes": 13,
+      "key": "owner-root-v1",
+      "kind": "get",
+      "ms": 1.093791
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 1.66125
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 1.338833
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "get",
+      "ms": 0.955667
+    },
+    {
+      "bytes": 1273851,
+      "key": "compacted-00000000000000000212",
+      "kind": "get",
+      "ms": 10.518375
+    },
+    {
+      "bytes": 63303,
+      "key": "mutation-00000000000000000213",
+      "kind": "get",
+      "ms": 2.777333
+    },
+    {
+      "bytes": 63120,
+      "key": "mutation-00000000000000000214",
+      "kind": "get",
+      "ms": 0.811834
+    },
+    {
+      "bytes": 63517,
+      "key": "mutation-00000000000000000215",
+      "kind": "get",
+      "ms": 0.742792
+    },
+    {
+      "bytes": 63491,
+      "key": "mutation-00000000000000000216",
+      "kind": "get",
+      "ms": 0.784208
+    },
+    {
+      "bytes": 63128,
+      "key": "mutation-00000000000000000217",
+      "kind": "get",
+      "ms": 0.6538750000000001
+    },
+    {
+      "bytes": 63823,
+      "key": "mutation-00000000000000000218",
+      "kind": "get",
+      "ms": 0.656
+    },
+    {
+      "bytes": 63652,
+      "key": "mutation-00000000000000000219",
+      "kind": "get",
+      "ms": 0.6785829999999999
+    },
+    {
+      "bytes": 63073,
+      "key": "mutation-00000000000000000220",
+      "kind": "get",
+      "ms": 0.6775
+    }
+  ],
+  "failed_backup_passed": true,
+  "lost_ack_takeover_passed": true,
+  "operations": [
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "put",
+      "ms": 29.3255
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 1.1128749999999998
+    },
+    {
+      "bytes": 0,
+      "key": "compacted-00000000000000000212,mutation-00000000000000000213,mutation-00000000000000000214,mutation-00000000000000000215,mutation-00000000000000000216,mutation-00000000000000000217,mutation-00000000000000000218,mutation-00000000000000000219,mutation-00000000000000000220",
+      "kind": "remove_many",
+      "ms": 5.389042
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 1.399875
+    },
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "get",
+      "ms": 17.919874999999998
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "get",
+      "ms": 1.273792
+    },
+    {
+      "bytes": 0,
+      "key": "owner-v1-174029fe70bea9fce6dee99472a9ad1f",
+      "kind": "delete",
+      "ms": 1.384958
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 1.609083
+    },
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "put",
+      "ms": 15.837957999999999
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "put",
+      "ms": 1.6202079999999999
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 0.9618749999999999
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "get",
+      "ms": 0.9918329999999999
+    },
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "get",
+      "ms": 11.042667000000002
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 1.156917
+    },
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "get",
+      "ms": 58.446333
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "get",
+      "ms": 2.159
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 2.204083
+    },
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "put",
+      "ms": 18.178208
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "put",
+      "ms": 3.085959
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 0.9071250000000001
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "get",
+      "ms": 0.610667
+    },
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "get",
+      "ms": 9.395792
+    },
+    {
+      "bytes": 0,
+      "key": "owner-root-v1",
+      "kind": "get",
+      "ms": 2.4114169999999997
+    },
+    {
+      "bytes": 13,
+      "key": "owner-root-v1",
+      "kind": "put",
+      "ms": 2.274833
+    },
+    {
+      "bytes": 56,
+      "key": "owner-v1-99818c05c3b71468dd32e6952278e66d",
+      "kind": "put",
+      "ms": 3.9582080000000004
+    },
+    {
+      "bytes": 13,
+      "key": "owner-root-v1",
+      "kind": "get",
+      "ms": 0.935667
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 2.105291
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 0.940459
+    },
+    {
+      "bytes": 70,
+      "key": "metadata",
+      "kind": "get",
+      "ms": 0.5585
+    },
+    {
+      "bytes": 1275465,
+      "key": "compacted-00000000000000000220",
+      "kind": "get",
+      "ms": 9.019542
+    }
+  ],
+  "oversized_open_rejected_before_get": true,
+  "peak_rss_bytes": 35209216,
+  "phase": "verify",
+  "restore_ms": 134.755292,
+  "rows": 2000,
+  "state_oracle_passed": true,
+  "version": 1
+}

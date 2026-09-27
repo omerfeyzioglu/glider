@@ -130,3 +130,13 @@ failure closes admission while leaving the claim for isolated recovery. This
 adds concurrent callers without another publication participant or a read-view
 protocol. The mutex comparison and conditional M17/M18 decisions are recorded
 in [the M16 evidence](../benchmarks/M16.md).
+
+## 2026-09-27 — Bounded parallel obsolete-object cleanup (M19b)
+
+The SIFT capacity probe attributed a foreground stall to serial native DELETEs
+after snapshot publication. Cleanup now allows four requests in flight, waits
+for completion, and poisons the handle on any partial error. The selected root
+and newer history remain untouched; recovery rebuilds counts and resumes cleanup.
+No new publication participant, retry or persisted format is added. The targeted
+2,000×128 probe passes with identical request counts/bytes; 5,000 rows expose the
+next full-snapshot/queue boundary. [Evidence](../benchmarks/M19.md).

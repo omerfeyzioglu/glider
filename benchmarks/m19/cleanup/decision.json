@@ -1,0 +1,10 @@
+{
+  "supported_probe_rows": 2000,
+  "first_breach_rows": 5000,
+  "final": {
+    "rows": 2000,
+    "performance_accepted": true,
+    "backup_restore_accepted": true
+  },
+  "smoke": false
+}

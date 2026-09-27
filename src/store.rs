@@ -22,6 +22,15 @@ pub trait ObjectStore {
     /// After uncertainty, stabilize or reject access until reopened. The engine
     /// must never reuse reclaimed keys: an old remote DELETE may arrive late.
     fn remove(&mut self, key: &str) -> Result<()>;
+    /// Remove independent, never-reused obsolete keys. Success acknowledges all
+    /// removals; an error may have removed any subset. Implementations may use
+    /// bounded parallelism. Callers must recover before trusting stale counts.
+    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+        for key in keys {
+            self.remove(key)?;
+        }
+        Ok(())
+    }
 }
 
 /// Development backend; callers must ensure exclusive ownership of this path,

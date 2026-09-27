@@ -605,10 +605,11 @@ pagination cutoff and successful recovery with an adequate budget on MinIO.
 
 ## M19 — Establish a representative larger operating envelope
 
-Status: first SIFT/MinIO probe stopped at 2,000 rows: write-queue p95
-78.946 ms >75 ms and maintenance p95/max 105.897 ms >100 ms. Other budgets and
-800 exact-oracle checks passed. No larger step/final soak was run; acceptance
-remains open. [Protocol, attribution and raw evidence](benchmarks/M19.md).
+Status: local acceptance passed after M19b; PR CI pending. The supported
+SIFT/MinIO envelope is 2,000×128 with four clients and 400 offered mutations/s.
+The first larger row step (5,000) fails write-queue p95; the final 50-second
+workload, full state/oracle checks, backup/restore and failure recovery pass.
+Remote capacity acceptance remains open. [Evidence](benchmarks/M19.md).
 Does not assume that M17/M18 need implementation.
 
 Steps:
@@ -630,7 +631,11 @@ Done when:
 
 ### M19b — Bound foreground cleanup latency
 
-Status: justified by the M19 first-step failure; implementation pending.
+Status: local acceptance passed; PR CI pending. The same 2,000-row probe now
+passes (write-queue p95 58.017 ms; maintenance p95/max 49.718 ms), with identical
+HTTP counts/bytes and unchanged budgets. The S3 backend issues at most four native DELETEs concurrently;
+other backends default to serial cleanup. Partial failures retain a poisoned
+handle and recovery rebuilds counters.
 
 The slowest maintenance event spent 44.703 ms deleting 17 independent obsolete
 keys serially, after publishing a complete snapshot. Compare bounded concurrent

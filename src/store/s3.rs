@@ -3,7 +3,7 @@
 use super::{decode_envelope, encode_envelope, ObjectStore};
 use crate::{Error, Result};
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 pub use object_store::aws::AmazonS3Builder;
 use object_store::{
     aws::{AmazonS3, S3ConditionalPut},
@@ -311,6 +311,38 @@ impl ObjectStore for S3Store {
                 other => other,
             }
         })?;
+        self.poisoned = false;
+        Ok(())
+    }
+    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+        self.ready()?;
+        let paths: Vec<_> = keys
+            .iter()
+            .map(|key| self.path(key))
+            .collect::<Result<_>>()?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.poisoned = true;
+        // Keep native single-key DELETE semantics and no automatic retries.
+        // Finish the bounded batch even on error; every key is already obsolete.
+        // A response loss can still leave a late delete, safe by non-reuse.
+        let remote = &self.remote;
+        let results = self.runtime.as_ref().unwrap().block_on(async {
+            futures::stream::iter(paths)
+                .map(|path| async move {
+                    match remote.delete(&path).await {
+                        Err(object_store::Error::NotFound { .. }) => Ok(()),
+                        other => other,
+                    }
+                })
+                .buffer_unordered(4)
+                .collect::<Vec<_>>()
+                .await
+        });
+        for result in results {
+            result.map_err(remote_error)?;
+        }
         self.poisoned = false;
         Ok(())
     }

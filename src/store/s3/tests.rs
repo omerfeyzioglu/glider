@@ -1280,7 +1280,7 @@ fn minio_compaction_preserves_results_with_uncertain_publication_and_deletion() 
 }
 
 #[derive(Debug, Default, Clone)]
-struct DeferredDelete(Arc<Mutex<Option<HttpRequest>>>);
+struct DeferredDelete(Arc<Mutex<Vec<HttpRequest>>>);
 #[derive(Debug)]
 struct DeferredDeleteService {
     inner: HttpClient,
@@ -1298,7 +1298,7 @@ impl HttpConnector for DeferredDelete {
 impl HttpService for DeferredDeleteService {
     async fn call(&self, request: HttpRequest) -> std::result::Result<HttpResponse, HttpError> {
         if request.method() == "DELETE" {
-            *self.deferred.0.lock().unwrap() = Some(request);
+            self.deferred.0.lock().unwrap().push(request);
             return Err(disconnected());
         }
         self.inner.execute(request).await
@@ -1318,11 +1318,16 @@ fn minio_delayed_delete_never_targets_a_new_authoritative_object() {
     db.delete(1).unwrap();
     assert!(db.compact().is_err());
     drop(db);
-    let request = deferred.0.lock().unwrap().take().unwrap();
-    assert!(request
-        .uri()
-        .path()
-        .ends_with("compacted-00000000000000000001"));
+    let requests = std::mem::take(&mut *deferred.0.lock().unwrap());
+    assert_eq!(requests.len(), 2);
+    for key in [
+        "compacted-00000000000000000001",
+        "mutation-00000000000000000002",
+    ] {
+        assert!(requests
+            .iter()
+            .any(|request| request.uri().path().ends_with(key)));
+    }
     let mut db = Database::open(minio(namespace), config()).unwrap();
     db.compact().unwrap();
     db.put(2, vec![3., 4.]).unwrap();
@@ -1332,11 +1337,13 @@ fn minio_delayed_delete_never_targets_a_new_authoritative_object() {
         .connect(&ClientOptions::new().with_allow_http(true))
         .unwrap();
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
-    assert!(rt
-        .block_on(client.execute(request))
-        .unwrap()
-        .status()
-        .is_success());
+    for request in requests.into_iter().rev() {
+        assert!(rt
+            .block_on(client.execute(request))
+            .unwrap()
+            .status()
+            .is_success());
+    }
     let db = Database::open(minio(namespace), config()).unwrap();
     assert_eq!(db.get(1), None);
     assert_eq!(db.get(2), Some([3., 4.].as_slice()));
@@ -1434,4 +1441,91 @@ fn minio_retry_decision_survives_uncertain_put_takeover_and_compaction() {
         assert_eq!(db.get(1), Some([9., 0.].as_slice()));
         db.close().unwrap();
     }
+}
+
+#[derive(Debug, Clone)]
+struct DeleteGate {
+    started: std::sync::mpsc::Sender<futures::channel::oneshot::Sender<u16>>,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl HttpConnector for DeleteGate {
+    fn connect(&self, _: &ClientOptions) -> object_store::Result<HttpClient> {
+        Ok(HttpClient::new(self.clone()))
+    }
+}
+#[async_trait]
+impl HttpService for DeleteGate {
+    async fn call(&self, request: HttpRequest) -> std::result::Result<HttpResponse, HttpError> {
+        assert_eq!(request.method(), "DELETE");
+        use std::sync::atomic::Ordering;
+        assert!(self.active.fetch_add(1, Ordering::SeqCst) < 4);
+        let (send, wait) = futures::channel::oneshot::channel();
+        self.started.send(send).unwrap();
+        let status = wait.await.unwrap();
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(response(
+            status,
+            if status == 500 {
+                "<Error><Code>InternalError</Code></Error>"
+            } else {
+                ""
+            },
+        ))
+    }
+}
+#[test]
+fn parallel_cleanup_bounds_in_flight_deletes_and_poisoning() {
+    use std::{sync::mpsc, time::Duration};
+    for fail in [false, true] {
+        let (started, wait) = mpsc::channel();
+        let mut store = S3Store::with_connector(
+            builder(),
+            "test",
+            DeleteGate {
+                started,
+                active: Arc::default(),
+            },
+        )
+        .unwrap();
+        let worker = std::thread::spawn(move || {
+            let keys: Vec<_> = (0..9).map(|i| format!("obsolete-{i}")).collect();
+            let result = store.remove_many(&keys);
+            (store, result)
+        });
+        let mut first: Vec<_> = (0..4)
+            .map(|_| wait.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
+        // Four uncompleted requests occupy every slot; no fifth request can start.
+        assert!(matches!(wait.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        first.remove(0).send(if fail { 500 } else { 204 }).unwrap();
+        for _ in 0..5 {
+            wait.recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .send(204)
+                .unwrap();
+        }
+        // The public method must still wait for the original three outstanding calls.
+        assert!(!worker.is_finished());
+        for sender in first {
+            sender.send(204).unwrap();
+        }
+        let (mut store, result) = worker.join().unwrap();
+        assert_eq!(result.is_err(), fail);
+        assert_eq!(store.metrics().snapshot().delete, 9);
+        assert_eq!(store.poisoned, fail);
+        if fail {
+            assert!(matches!(
+                store.remove_many(&[]),
+                Err(Error::RecoveryRequired)
+            ));
+        } else {
+            store.remove_many(&[]).unwrap();
+        }
+    }
+    let mut store = scripted(vec![]);
+    assert!(store
+        .remove_many(&["valid".into(), "invalid/key".into()])
+        .is_err());
+    assert_eq!(store.metrics().snapshot().delete, 0);
+    assert!(!store.poisoned);
 }

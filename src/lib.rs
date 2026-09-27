@@ -784,9 +784,9 @@ impl<S: ObjectStore> Database<S> {
         self.visible_objects += 1;
         Ok(())
     }
-    fn tracked_remove(&mut self, key: &str) -> Result<()> {
-        self.store.remove(key)?;
-        self.visible_objects -= 1;
+    fn tracked_remove_many(&mut self, keys: &[String]) -> Result<()> {
+        self.store.remove_many(keys)?;
+        self.visible_objects -= keys.len();
         Ok(())
     }
     fn load_snapshot(&mut self, object: &str, sequence: u64) -> Result<()> {
@@ -1091,9 +1091,7 @@ impl<S: ObjectStore> Database<S> {
                 obsolete.push(object);
             }
         }
-        for object in obsolete {
-            self.tracked_remove(&object)?;
-        }
+        self.tracked_remove_many(&obsolete)?;
         self.poisoned = false;
         Ok(())
     }

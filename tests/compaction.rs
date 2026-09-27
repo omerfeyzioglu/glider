@@ -17,6 +17,7 @@ struct State {
     objects: BTreeMap<String, Vec<u8>>,
     fault: Option<(usize, bool, bool)>, // successful operations before failure, after effect, panic
     trace: Vec<String>,
+    partial_parallel_failure: Option<bool>,
 }
 impl State {
     fn event(&mut self, name: String, effect: impl FnOnce(&mut Self)) -> Result<()> {
@@ -58,6 +59,54 @@ impl ObjectStore for Memory {
         self.0.borrow_mut().event(format!("remove:{key}"), |s| {
             s.objects.remove(key);
         })
+    }
+    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+        let partial = self.0.borrow_mut().partial_parallel_failure.take();
+        if let Some(panic) = partial {
+            for key in keys.iter().rev().step_by(2) {
+                self.remove(key)?;
+            }
+            assert!(!panic, "partial out-of-order cleanup panic");
+            return Err(std::io::Error::other("partial out-of-order cleanup error").into());
+        }
+        for key in keys {
+            self.remove(key)?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn arbitrary_cleanup_subset_failure_preserves_root_and_rebuilds_counts() {
+    for panic in [false, true] {
+        let (store, mut db) = populated();
+        store.0.borrow_mut().partial_parallel_failure = Some(panic);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.compact()));
+        if panic {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap().is_err());
+        }
+        assert_state(&db);
+        assert!(matches!(
+            db.put(3, vec![3., 3.]),
+            Err(Error::RecoveryRequired)
+        ));
+        assert!(store
+            .0
+            .borrow()
+            .objects
+            .contains_key(&object("compacted", 5)));
+        drop(db);
+        let mut recovered = Database::open(store.clone(), config()).unwrap();
+        assert_state(&recovered);
+        assert_eq!(
+            recovered.maintenance_status().visible_objects,
+            store.0.borrow().objects.len()
+        );
+        recovered.compact().unwrap();
+        assert_eq!(recovered.maintenance_status().visible_objects, 2);
+        assert_eq!(store.0.borrow().objects.len(), 2);
     }
 }
 fn populated() -> (Memory, Database<Memory>) {
