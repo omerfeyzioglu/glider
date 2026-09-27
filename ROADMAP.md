@@ -647,7 +647,10 @@ bounded capacity steps only if it passes.
 
 ## M20 — Remove the demonstrated capacity bottleneck
 
-Status: conditional; select scope from M19 evidence, not a feature checklist.
+Status: selected from M19’s 5,000×128 write-queue failure. Test lossless compact
+JSON number emission for single-object snapshots, with unchanged retry identity
+and float bits. Local correctness/failure tests pass; targeted before/after
+measurement and final CI pending. [Protocol](benchmarks/M20.md).
 
 Steps:
 - Choose one cause and compare the smallest relevant alternatives: selective

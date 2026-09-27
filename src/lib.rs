@@ -208,6 +208,28 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| Error::Invalid(e.to_string()))
 }
+/// The existing snapshot schema accepts JSON numbers as f32. Omit the redundant
+/// decimal suffix for exactly represented small integers, preserving negative
+/// zero and the standard representation of every other value. This formatter
+/// is deliberately NOT used for retry identity, log records or chunk byte reuse.
+struct SnapshotNumbers;
+impl serde_json::ser::Formatter for SnapshotNumbers {
+    fn write_f32<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        value: f32,
+    ) -> std::io::Result<()> {
+        let integer = value as i32;
+        if (-16_777_216.0..=16_777_216.0).contains(&value)
+            && integer as f32 == value
+            && !(value == 0.0 && value.is_sign_negative())
+        {
+            serde_json::ser::CompactFormatter.write_i32(writer, integer)
+        } else {
+            serde_json::ser::CompactFormatter.write_f32(writer, value)
+        }
+    }
+}
 struct CountBytes(usize);
 impl std::io::Write for CountBytes {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -873,7 +895,7 @@ impl<S: ObjectStore> Database<S> {
         Ok(())
     }
     fn snapshot_bytes(&self) -> Result<Vec<u8>> {
-        encode(&Segment {
+        let snapshot = Segment {
             version: 4,
             retry: Some(self.retry.clone()),
             sequence: self.sequence,
@@ -883,7 +905,15 @@ impl<S: ObjectStore> Database<S> {
                 .iter()
                 .map(|(&id, document)| (id, document.clone()))
                 .collect(),
-        })
+        };
+        let mut bytes = Vec::new();
+        snapshot
+            .serialize(&mut serde_json::Serializer::with_formatter(
+                &mut bytes,
+                SnapshotNumbers,
+            ))
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        Ok(bytes)
     }
     fn publish_chunked_snapshot(&mut self, kind: &str, max_bytes: usize) -> Result<()> {
         let empty_size = encode(&SnapshotChunk {
