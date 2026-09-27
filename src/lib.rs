@@ -16,6 +16,7 @@
 //! db.delete(42)?;
 //! # Ok::<(), glider::Error>(())
 //! ```
+pub mod admission;
 pub mod ivf;
 pub mod ownership;
 pub mod recovery;

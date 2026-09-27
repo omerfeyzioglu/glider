@@ -120,3 +120,13 @@ legacy inputs remain readable. Restore guarantees stop at the selected backup
 boundary. The failure and process-exit tests in `tests/retry.rs` and the MinIO
 retry/takeover test exercise this contract. See [DESIGN.md](../DESIGN.md) for
 current semantics and alternatives.
+
+## 2026-09-27 — One committer behind bounded admission (M16)
+
+A FIFO limits outstanding commands and encoded bytes, including active work.
+The worker owns all publication, maintenance and reads; client batches retain
+M15 identity. Cancellation has an explicit queued/executing boundary, and worker
+failure closes admission while leaving the claim for isolated recovery. This
+adds concurrent callers without another publication participant or a read-view
+protocol. The mutex comparison and conditional M17/M18 decisions are recorded
+in [the M16 evidence](../benchmarks/M16.md).

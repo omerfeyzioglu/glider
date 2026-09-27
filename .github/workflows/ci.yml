@@ -74,6 +74,11 @@ jobs:
           cargo test --locked --features s3 --example s3_pilot
           python3 tools/s3_pilot.py target/s3-pilot --minio
 
+      - name: Verify bounded concurrent admission
+        run: |
+          cargo test --locked --features s3 --example m16_concurrency
+          python3 tools/m16_benchmark.py target/m16-comparison --smoke
+
       - name: Retain benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -91,4 +96,5 @@ jobs:
             target/filter-smoke/SUMMARY.md
             target/serving-smoke/*.json
             target/s3-pilot/*.json
+            target/m16-comparison/*.json
           if-no-files-found: ignore

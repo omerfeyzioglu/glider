@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "git_revision": "cf31d915e984c2056b0febf0fe5b32c25d701035",
+  "git_status": "M .github/workflows/ci.yml\n M Cargo.toml\n M DESIGN.md\n M ROADMAP.md\n M src/lib.rs\n M src/serving.rs\n?? benchmarks/M16.md\n?? examples/m16_concurrency.rs\n?? src/admission.rs\n?? tests/admission.rs\n?? tools/m16_benchmark.py",
+  "source_sha256": "77f2cd1db7abaed978359e732255497888c2d3ab9714eb6bc46034ed9304fc10",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "cpu_count": 10,
+  "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "minio_image": "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9",
+  "docker": "29.1.3",
+  "smoke": false,
+  "workload": "4 clients, 100-operation batch + 10 queries/client/round, seed 42",
+  "cache_control": "uncontrolled OS/service caches and competing load; same container, separate namespaces/processes"
+}

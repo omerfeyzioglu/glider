@@ -644,6 +644,46 @@ batches to amortize maintenance; small batches, larger rows or other arrival
 rates require new capacity and write-amplification measurements. Operator steps
 are in `docs/SERVING.md` and `docs/RECOVERY.md`.
 
+## Bounded concurrent admission (M16)
+
+`admission::Service` moves one `SingleMachine` to a single blocking worker.
+Cloneable clients share a FIFO of writes, exact queries, revision observations
+and result lookups. At most eight commands and 320 KiB of encoded payload are
+admitted by default, including active work. Count and byte exhaustion returns
+`Overloaded` before retaining a normalized payload; inputs are validated and
+caller-controlled spare capacities are discarded. The queue lock covers bounded
+normalization and bookkeeping, never storage or search. Encoded bytes are an
+admission measure, not allocator RSS. Count, operation/filter limits and payload
+limits also bound container overhead; caller-owned inputs and completed results
+are outside the service's retention budget.
+
+One owner executes commands in enqueue order, with no priority bypass, group
+commit or batching delay. Clients choose their own atomic M15 batches. Due
+maintenance stays synchronous. Each result reports queue wait, execution and
+maintenance separately; client end-to-end latency additionally includes admission
+and response delivery. Admission capacity is released before delivery. Numeric
+workload budgets and the mutex comparison are in `benchmarks/M16.md`; a serial
+batch measurement alone is not concurrent latency evidence.
+
+Ticket cancellation succeeds only while queued, proving that execution and
+publication will not start. Once the worker takes a command, cancellation cannot
+undo it; dropping the response does not stop a PUT. Resolve uncertainty with
+its M15 ID after recovery. A dropped queued ticket is cancelled, but retains its
+charge until the worker removes it. Queries bind results and reported sequence
+to one committed state; there is no simultaneous reader touching the map.
+
+`begin_shutdown` closes admission synchronously and either drains accepted work
+or cancels queued work. Active execution finishes in both modes. `shutdown` joins
+the worker and acknowledges successful ownership release; its time bound depends
+on the configured backend operation deadlines. Dropping the service closes
+admission and cancels queued work, but does not acknowledge shutdown. A worker
+panic or uncertain storage error fails pending work, closes admission, releases
+queue charges and leaves the ownership claim for isolated recovery. Input errors
+and conditional conflicts do not stop a healthy worker. Thread-spawn failure
+can leave the already acquired claim; inspect/recover it as a stopped owner.
+No successful write result is delivered before durable publication. Backup is
+performed after graceful shutdown using the serial serving API.
+
 ## Local backend
 
 Each logical object has a separate body and seal file. The body contains, in order:
