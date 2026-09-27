@@ -1,6 +1,6 @@
 # Bounded AWS bottleneck diagnostic
 
-**Result: failed recovery, verified cleanup.** On 2026-09-27, a snapshot GET
+**Result: failed recovery on an unstable mobile-data connection; verified cleanup.** On 2026-09-27, a snapshot GET
 received HTTP 200 but timed out while reading its body. The initial write and
 fresh-process reopen succeeded; isolated takeover failed validation, so backup
 and restore were not reached. The earlier [M14a success](M14a.md) remains historical
@@ -17,7 +17,9 @@ parameter sweeps, timeout increases, new infrastructure or account upgrades.
 No production latency gate is inferred from local MinIO budgets.
 
 Client: Apple M4, macOS 26.6.2 arm64, Rust 1.98.1 release, development-machine
-network to Frankfurt S3 (`eu-central-1`). Before writes the runner verified FREE,
+network to Frankfurt S3 (`eu-central-1`). After the run, the operator confirmed
+that this was mobile data with an unreliable connection. This is essential
+interpretation context, not a measured network diagnosis. Before writes the runner verified FREE,
 ACTIVE, USD 100 remaining, expiry 2027-03-27, bucket ownership/region and disabled
 versioning. Credentials from `glider-test` stayed in the child environment.
 [Run metadata](aws-diagnostics/live/run.json).
@@ -56,15 +58,19 @@ recovery seconds (over 99% in each). This is not a measurement of AWS internal
 service time and cannot separate provider throughput from the client's network
 path. The evidence does not establish a specific network fault or engine CPU bug.
 
-The large synchronous snapshot upload also produces a multi-second foreground
-pause. With the single worker this would hold queued work; concurrent queue
-latency was not measured here. The local M17/M18 deferrals therefore must not be
-extrapolated to this remote deployment. Before extending cloud capacity claims,
-resolve the deployment's snapshot transfer boundary and declare remote read/write
-budgets. A scoped comparison of smaller bounded snapshot objects versus a smaller
-maintenance pause is justified only against that requirement; pinned views or a
-background publisher are not selected by this diagnostic. Increasing the timeout
-alone would hide the observed transfer/foreground problem.
+The operator's mobile-network context is consistent with the slow body transfers
+and timeout. This run cannot establish an AWS service regression or an
+internet-independent engine bottleneck. Local exact queries remained below
+0.4 ms with zero HTTP attempts; CPU and RSS were not profiled separately. Small
+latency differences are not actionable under this uncontrolled connection.
+
+The synchronous snapshot upload held a batch for several seconds on this path.
+That is a network-sensitive foreground limitation, not sufficient evidence to
+implement M17/M18 or redesign persistence. Keep the existing local decisions;
+require a representative stable deployment path before drawing cloud performance
+or concurrency conclusions. No further AWS run or architecture optimization is
+justified by this unstable-mobile result alone. The existing timeout remained
+unchanged and the failed run is preserved honestly.
 
 ## Failure and cleanup evidence
 

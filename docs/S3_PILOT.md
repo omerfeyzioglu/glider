@@ -6,8 +6,9 @@ not a latency benchmark, capacity test, long soak or proof of provider hardware
 durability. The first AWS correctness run passed; see
 [the acceptance evidence](../benchmarks/M14a.md).
 The later [bounded timing diagnostic](../benchmarks/AWS_DIAGNOSTICS.md) found a
-snapshot body-transfer timeout during takeover; cleanup passed. That run did not
-reach backup/restore and does not establish remote serving acceptance.
+snapshot body-transfer timeout during takeover on operator-confirmed unstable
+mobile data; cleanup passed. It did not reach backup/restore and cannot establish
+a provider or internet-independent engine bottleneck.
 
 ## Local rehearsal
 
