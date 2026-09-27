@@ -662,10 +662,11 @@ independent memory source; no new soak is needed for the allocation proof.
 
 ## M20 — Remove the demonstrated capacity bottleneck
 
-Status: selected from M19’s 5,000×128 write-queue failure. Lossless compact
-JSON number emission passes latency but exposed the independent result-allocation
-obstacle addressed by M20a. Local correctness/failure tests pass; combined
-measurement and final CI pending. [Protocol](benchmarks/M20.md).
+Status: local acceptance passed; final PR CI pending. Lossless integer snapshot
+encoding plus the separately reviewed M20a result allocation fix meet the
+5,000×128 SIFT/MinIO envelope: queue p95 66.390 ms, RSS 35.469 MiB and 400.751
+mutations/s in the final 50-second workload. Exact state, backup/restore and
+failure recovery pass. [Before/after evidence](benchmarks/M20.md).
 
 Steps:
 - Choose one cause and compare the smallest relevant alternatives: selective

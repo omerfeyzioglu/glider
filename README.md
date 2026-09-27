@@ -325,6 +325,10 @@ service.close()?;
 # Ok::<(), glider::Error>(())
 ```
 
+The [M20 SIFT envelope](benchmarks/M20.md) additionally validates 5,000×128
+descriptors with four callers on local MinIO; configuration and scope are in
+[serving operations](docs/SERVING.md#larger-sift-descriptor-envelope).
+
 Use 100-operation batches for the measured M8 maintenance envelope. This
 serial library API has no HTTP listener or background scheduler. See
 [serving operations](docs/SERVING.md) for status, backup/restore, failure handling,

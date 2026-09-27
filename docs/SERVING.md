@@ -25,6 +25,25 @@ An error during scheduled maintenance occurs before that batch is published;
 an error during batch publication may have committed the entire batch. Stop
 writes whenever `status().recovery_required` is true.
 
+## Larger SIFT descriptor envelope
+
+[M20](../benchmarks/M20.md) validates 5,000 live SIFT small descriptors at
+128 dimensions, squared Euclidean exact k=10, with a 1% equality group. Four
+clients each submit one 100-overwrite batch and ten queries per second through
+[bounded admission](ADMISSION.md). Set `Config.dimensions` to 128 and
+`ServingOptions { max_documents: 5000, ..ServingOptions::m8() }`; retain the
+default eight-command/320 KiB admission limits. Before opening, configure
+`ReadLimits { objects: 128, object_bytes: 16 * 1024 * 1024,
+namespace_bytes: 32 * 1024 * 1024 }` on the S3 store.
+
+The final local MinIO rehearsal met write/query/queue/maintenance p95 limits of
+150/50/75/100 ms, >=350 acknowledged logical mutations/s, <=64 MiB process RSS,
+and <=1,000 ms fresh-process recovery. Backup/restore and uncertain-outcome
+recovery were verified at this size. The benchmark record defines exact traffic,
+byte/request budgets and measurement boundaries. This evidence is specific to
+integral descriptors and local MinIO; other data shapes, arrival rates and
+remote deployments need their own capacity acceptance.
+
 ## Status and limits
 
 Record `status()` alongside process memory metrics:
