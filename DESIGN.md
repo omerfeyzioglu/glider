@@ -399,8 +399,8 @@ safe to submit there, but cannot prove absence in the quarantined source. Backup
 and restore preserve only the backup boundary: no request beyond it is promised
 known, and its revisions/IDs cannot be treated as a continuation of discarded
 future history. Clients must reconcile across an explicitly announced rollback.
-Concurrent callers must serialize through the owner (currently exclusive
-borrowing or a caller mutex); concurrent duplicates then share one outcome.
+Concurrent callers serialize through the owner using bounded admission,
+exclusive borrowing or a caller mutex; concurrent duplicates share one outcome.
 No unlimited exactly-once or cross-rollback delivery guarantee is provided.
 
 ## Immutable checkpoint segments (M3)

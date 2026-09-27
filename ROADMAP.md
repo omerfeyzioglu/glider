@@ -664,7 +664,10 @@ independent memory source; no new soak is needed for the allocation proof.
 
 ## M20 — Remove the demonstrated capacity bottleneck
 
-Status: local acceptance passed; final PR CI pending. Lossless integer snapshot
+Status: complete for the selected local MinIO envelope.
+[PR #48](https://github.com/omerfeyzioglu/glider/pull/48) passed
+[CI](https://github.com/omerfeyzioglu/glider/actions/runs/36327978017), including
+the 5,000-row correctness/recovery smoke. Lossless integer snapshot
 encoding plus the separately reviewed M20a result allocation fix meet the
 5,000×128 SIFT/MinIO envelope: queue p95 66.390 ms, RSS 35.469 MiB and 400.751
 mutations/s in the final 50-second workload. Exact state, backup/restore and
