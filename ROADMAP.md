@@ -4,6 +4,33 @@ This roadmap describes the current development direction, not a fixed feature
 commitment. Milestones may change when measurements or correctness findings
 justify it.
 
+## Working method
+
+- Start from a concrete failure, measured bottleneck or explicit scaling requirement.
+  Declare acceptance limits before implementation; separate queue, storage and
+  compute time. Correctness work requires failure tests, not an artificial benchmark.
+- Reuse valid baselines. Run one targeted comparison per decision with enough
+  samples for the claimed statistic; stop at the first useful boundary and proceed
+  when evidence is sufficient. Avoid parameter sweeps,
+  repeated soaks and unrelated measurements. Retain dataset/query fingerprints,
+  seed where applicable, configuration, revision, backend/environment, latency,
+  requests/bytes, CPU and peak memory where relevant; see [BENCHMARKS.md](BENCHMARKS.md).
+- Keep deterministic correctness and failure coverage in CI. Bundle related
+  measurement, implementation, tests and concise evidence into one logical PR;
+  follow [AGENTS.md](AGENTS.md) for branch, reading and documentation rules, and
+  verify CI before merging. Avoid documentation-only follow-up churn.
+- A demonstrated blocker may justify a small intermediate milestone with its own
+  evidence and acceptance criteria; resolve it before resuming dependent work.
+  Record the changed plan; never mark unmet criteria complete.
+  Update [DESIGN.md](DESIGN.md) for architectural decisions
+  and changed guarantees.
+- Measure PUT/GET/LIST/DELETE counts and bytes separately from client/network,
+  queue, compute and maintenance time. Separate physical work from any price model;
+  MinIO timing is not AWS latency or billing evidence. Use AWS only for a named
+  provider-dependent question through the [guarded pilot](docs/S3_PILOT.md), with
+  Free-plan verification and cleanup. Keep fault matrices on MinIO; unstable
+  mobile-network observations cannot establish provider or engine regressions.
+
 ## M1 — Durable exact vector store
 
 Status: complete
@@ -132,15 +159,6 @@ The next milestones target one machine with one authoritative writer and an
 object store. They do not assume shared disk, POSIX locks, or multiple writers.
 The goal is a usable capacity envelope with explicit durability, recovery,
 accuracy, latency and resource limits, not feature parity with another engine.
-
-For each milestone, reproduce the relevant bottleneck first, retain a small
-baseline, make the change, and rerun only the affected workload and correctness
-checks. Record backend, data/query fingerprints, seed, configuration, code
-revision, requests/bytes, latency, CPU and peak memory where relevant. Keep CI
-focused on deterministic correctness and failure cases; do not turn every change
-into a full benchmark run. Insert or reorder a small milestone when a measured
-bottleneck or correctness failure changes the priority. Persist architectural
-decisions and changed guarantees in `DESIGN.md`.
 
 ## M8 — Define the single-machine operating envelope
 
@@ -390,26 +408,9 @@ serial contract; no concurrent request queue latency is claimed.
 ## Next: safe concurrent use and a measured capacity boundary
 
 M8–M13 establish a serial contract for 2,000 synthetic vectors, not a general
-production capacity claim. M14–M20 below record the next development stages; conditional work stays
+production capacity claim. M14–M20 record the next stages; conditional work stays
 deferred when its entry condition is absent. One owner continues to publish
 authoritative state unless a later measured decision explicitly changes that.
-
-Execution rules:
-- Start each milestone with the concrete failure or bottleneck, the smallest
-  reproducer, and its acceptance limits. Correctness work needs failure tests,
-  not an artificial performance benchmark. Set numeric performance budgets
-  before optimizing; distinguish queue delay from storage and execution time.
-- Reuse valid archived baselines. Run one targeted before/after comparison for
-  a performance decision, with enough samples to support the claimed statistic.
-  Expand only to resolve a specific uncertainty; avoid full parameter matrices,
-  repeated full soaks, and unrelated benchmarks. Preserve required CI gates.
-- If a blocker appears, insert a small Mxxa step with evidence and acceptance
-  criteria, update this roadmap, resolve it, then resume the dependent work.
-  Do not silently expand a milestone or mark unmet criteria complete.
-- Keep context small: read changed/relevant sections, inspect failing output,
-  and record only the decision, reproducible evidence and durable guarantees.
-  Follow AGENTS.md: a branch and PR per logical change, verified CI, and tests
-  plus DESIGN.md updates when behavior or architecture changes.
 
 ## M14 — Bound and diagnose MinIO CI failures
 
@@ -713,20 +714,6 @@ M21–M24 are planned, not implemented. Preserve M1–M20 evidence and scope lim
 Do not import another engine or copy a reference architecture without a separate
 justified decision. Independent read/write arrivals, working-set size and object
 costs must drive prioritization rather than feature count.
-
-Working cadence:
-- Bundle tightly related measurement, implementation, failure tests and concise
-  evidence into one logical PR; use separate PRs for independent mechanisms.
-- Reuse valid baselines. Use one targeted experiment per decision, stop at the
-  first useful boundary, and proceed when evidence is sufficient. Avoid repeated
-  soaks, parameter sweeps and documentation-only follow-up churn.
-- Measure PUT/GET/LIST/DELETE counts and bytes separately from client/network,
-  queue, compute and maintenance time. Report physical work and any price model
-  separately; MinIO timings are not AWS latency or billing evidence.
-- Use AWS only to resolve a named provider-dependent uncertainty, through the
-  guarded Free-plan procedure with fresh prefixes and verified cleanup. Keep
-  fault matrices on MinIO; unstable mobile-network observations cannot establish
-  provider or engine performance regressions.
 
 ## M21 — Establish the large-data workload and cost decision
 
