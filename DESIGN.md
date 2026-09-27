@@ -154,21 +154,43 @@ Mutation path
    -> rebuildable in-memory and ANN indexes
 ```
 
-The planned evolution is incremental:
+The next target is a large collection on one machine, exceeding its configured
+RAM budget, with object storage as the durable source and bounded NVMe/RAM caches.
+The M8–M20 resident workloads are correctness/performance baselines, not the
+architectural capacity target. Cache loss must not lose acknowledged writes;
+local storage is disposable acceleration, never an acknowledgement substitute
+for durable object publication. NVMe/RAM tiering precedes multi-node execution.
 
-1. Keep the current exact search as the correctness baseline and benchmark it
-   with reproducible datasets, queries, seeds, metrics, and storage backends.
-2. Add and validate an S3-compatible object-storage backend. The local backend
-   remains the reference implementation of the object contract.
-3. Add immutable segments and compaction. Compaction may reorganize physical
-   objects, but must preserve logical results and must never make a partial
-   segment authoritative.
-4. Add filtering and an ANN candidate index. ANN is an optimization only: tests
-   and benchmarks compare it with exact search using recall@k, latency, and
-   resource/bytes-read measurements.
-5. Consider concurrent writers, sharding, and replication only after the
-   single-writer durability and recovery model has measured limits and explicit
-   coordination semantics.
+The target read path selects immutable segments/blocks through bounded metadata
+and derived indexes, then consults RAM, NVMe and object storage as needed. Opening
+must not require materializing all vectors. Immutable identity and integrity
+checks bind cached bytes to the selected committed generation. Cache budgets must
+include metadata and in-flight reads, and eviction/cold starts must preserve
+logical results. The existing streaming reader is a useful baseline, not this
+completed serving/cache implementation.
+
+The target write path retains explicit durable acknowledgement and recovery.
+Routine maintenance should rewrite affected bounded data, rather than the full
+collection at a fixed mutation count. Independently addressable segments and a
+versioned publication manifest are candidates; their exact layout is not yet
+selected. Compression, update locality, object request counts, replay cost and
+write amplification must be compared before committing to a format. If maintenance
+overlaps writes, its generation boundary, backlog, memory, reclamation and crash
+behavior must be explicit. More background threads alone do not reduce total work.
+
+Read latency, write acknowledgement latency, index visibility and object-store
+cost are separate targets. One experiment should answer a specific decision,
+using retained evidence and relevant failure tests; do not require every mechanism
+to fail a tiny resident workload before evaluating its large-data necessity.
+Exact search remains the quality oracle even if production serving needs selective
+ANN. Concurrent writers, sharding and replication require a demonstrated remaining
+single-machine limit and explicit coordination semantics.
+
+[Turbopuffer](https://turbopuffer.com/docs/architecture) and
+[OpenData](https://github.com/opendata-oss/opendata) are references for economics
+and operating behavior. OpenData's SlateDB foundation is not an adoption decision
+for glider's owned storage engine. The next measurable stages are M21–M24 in
+`ROADMAP.md`; none of the target cache/segment behavior above is claimed implemented.
 
 ### Target invariants
 

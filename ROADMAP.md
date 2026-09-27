@@ -390,7 +390,7 @@ serial contract; no concurrent request queue latency is claimed.
 ## Next: safe concurrent use and a measured capacity boundary
 
 M8–M13 establish a serial contract for 2,000 synthetic vectors, not a general
-production capacity claim. M14–M20 below are planned; conditional work stays
+production capacity claim. M14–M20 below record the next development stages; conditional work stays
 deferred when its entry condition is absent. One owner continues to publish
 authoritative state unless a later measured decision explicitly changes that.
 
@@ -703,6 +703,115 @@ Done when:
   durability, recovery or query quality, and relevant failure tests plus CI pass.
 - The chosen mechanism and rejected alternatives are documented. Unjustified
   ANN, multi-writer or other branches remain deferred, not marked implemented.
+
+## Next: large-data economics on one machine
+
+The target is a durable, low-cost, fast object-storage-native vector engine,
+with bounded RAM and NVMe caching before multiple machines. Small tests verify
+invariants and isolate causes; fitting a small resident corpus is not the goal.
+M21–M24 are planned, not implemented. Preserve M1–M20 evidence and scope limits.
+Do not import another engine or copy a reference architecture without a separate
+justified decision. Independent read/write arrivals, working-set size and object
+costs must drive prioritization rather than feature count.
+
+Working cadence:
+- Bundle tightly related measurement, implementation, failure tests and concise
+  evidence into one logical PR; use separate PRs for independent mechanisms.
+- Reuse valid baselines. Use one targeted experiment per decision, stop at the
+  first useful boundary, and proceed when evidence is sufficient. Avoid repeated
+  soaks, parameter sweeps and documentation-only follow-up churn.
+- Measure PUT/GET/LIST/DELETE counts and bytes separately from client/network,
+  queue, compute and maintenance time. Report physical work and any price model
+  separately; MinIO timings are not AWS latency or billing evidence.
+- Use AWS only to resolve a named provider-dependent uncertainty, through the
+  guarded Free-plan procedure with fresh prefixes and verified cleanup. Keep
+  fault matrices on MinIO; unstable mobile-network observations cannot establish
+  provider or engine performance regressions.
+
+## M21 — Establish the large-data workload and cost decision
+
+Status: planned. Start from the demonstrated 10,000-row foreground snapshot
+boundary, not another full run of the passing 5,000-row workload.
+
+Steps:
+- Specify one representative vector dataset, dimensionality, filter/update mix,
+  independent read/write arrivals and numeric latency/quality/resource budgets
+  before new acceptance measurements. Select a corpus exceeding a fixed engine
+  RAM budget, without requiring a large paid deployment to expose that condition.
+- Separate durable write acknowledgement from query-visible/indexed state;
+  retain existing guarantees unless an explicit architectural decision changes them.
+- Add a bounded independent-query diagnostic: the current clients wait for their
+  own write before issuing queries, which can hide read arrivals during maintenance.
+  Record overloads and arrival lateness instead of allowing an unbounded generator.
+- Attribute write amplification, full-materialization memory/recovery, query
+  GET amplification and cold/warm behavior. Compare at most the relevant small
+  alternatives for snapshot transfer versus changed-data publication. A compressed
+  full snapshot can be a baseline, not proof of scalable maintenance.
+
+Done when: the workload, numeric gates, measured/structural limits and next
+layout decision are recorded. Distinguish demonstrated bottlenecks from untested
+scaling risks. No ANN/cache/background implementation is required just to close
+this measurement milestone; equally, resident-query speed cannot close the
+larger-than-RAM requirement.
+
+## M22 — Bound segment publication and maintenance work
+
+Status: planned; exact layout follows M21 evidence.
+
+Steps:
+- Compare incrementally reusable segments with bounded sorted delta segments;
+  select the smallest layout that supports changed-data writes and selective
+  reads. Splitting a full rewrite into chunks alone is insufficient.
+- Version segment and manifest formats; state the authoritative publication
+  boundary, log/retry retention, delete semantics, compatibility and reclamation.
+- Bound rewrite tasks, object/manifest growth, replay and temporary coexistence.
+  If foreground budgets require overlapping maintenance, define a bounded worker
+  and fixed generation protocol with backpressure; do not introduce another
+  uncoordinated publisher or silently weaken acknowledgement.
+
+Done when: a targeted larger-data workload meets M21's declared write, request,
+byte and recovery gates, with publication/cleanup crash tests and exact results.
+At fixed changed data, increasing the base must not require routine full-base
+rewrites. Report unavoidable compaction amplification rather than claiming none.
+
+## M23 — Serve through bounded NVMe and RAM caches
+
+Status: planned; segment identity and read granularity coordinate with M22.
+
+Steps:
+- Open/read without loading every vector into RAM. Fetch addressable data on
+  demand through bounded RAM and disposable NVMe caches, with object storage
+  remaining authoritative. Bound metadata, prefetch and concurrent read buffers.
+- Test cache misses, eviction, restart, missing/corrupt cached files and total
+  cache loss. Cache errors may refetch within explicit request/deadline budgets;
+  authoritative corruption must still fail closed. Local files cannot acknowledge
+  writes or become an implicit recovery dependency.
+- Measure cold, NVMe-warm, RAM-hot and cache-pressure cases with one fixed budget;
+  record hit rates, S3 requests/bytes, occupancy and end-to-end latency. Label OS
+  page-cache effects; do not call a fresh process a guaranteed cold disk cache.
+
+Done when: a corpus exceeding the configured RAM budget meets the declared
+correctness, latency and resource gates; locality reduces remote requests and
+losing either cache changes performance only. No multi-node work is required.
+
+## M24 — Selective retrieval and single-machine cost acceptance
+
+Status: planned; reuse validated M21–M23 evidence.
+
+Steps:
+- Evaluate selective filtering/ANN on addressable segments when required by the
+  larger-data GET/byte/latency gates. The small M12 exact-serving alternative does
+  not close this workload. Use a stated recall/short-result target and exact oracle.
+- Bound index metadata/build/update work and validate generation visibility,
+  missing/corrupt derived indexes and recovery. Keep unsupported query modes explicit.
+- Run one selected-envelope read/write/recovery/backup acceptance with cold/warm
+  cache behavior and a reproducible request/byte cost model. Use one bounded AWS
+  check only for the unresolved provider-dependent question, not a cloud sweep.
+
+Done when: the chosen larger-than-RAM single-machine envelope has measured
+quality, latency, resource and storage-work acceptance plus failure/recovery
+evidence. Remote acceptance remains explicitly pending if that evidence is absent.
+Then identify the next actual limit before considering more machines.
 
 ## Beyond the single-machine target
 
