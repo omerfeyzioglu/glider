@@ -49,7 +49,7 @@ fn read_vectors(path: &str, expected: usize) -> Result<Vec<Vec<f32>>> {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             if v.iter().any(|f| !f.is_finite()) {
                 return Err("nonfinite fvecs".into());
