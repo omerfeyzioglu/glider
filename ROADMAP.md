@@ -649,7 +649,9 @@ bounded capacity steps only if it passes.
 
 ### M20a — Release spare candidate capacity in completed exact results
 
-Status: local exact-oracle/allocation tests passed; PR CI pending.
+Status: complete. [PR #47](https://github.com/omerfeyzioglu/glider/pull/47)
+passed [CI](https://github.com/omerfeyzioglu/glider/actions/runs/36327642974).
+The regression fails before the change and passes after it.
 
 The 5,000-row investigation found that truncating scored candidates to k retained
 the full Vec capacity in each completed result. A deterministic regression test
