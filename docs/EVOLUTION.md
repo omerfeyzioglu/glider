@@ -140,3 +140,13 @@ and newer history remain untouched; recovery rebuilds counts and resumes cleanup
 No new publication participant, retry or persisted format is added. The targeted
 2,000×128 probe passes with identical request counts/bytes; 5,000 rows expose the
 next full-snapshot/queue boundary. [Evidence](../benchmarks/M19.md).
+
+## 2026-09-27 — AWS timing diagnostic under unstable mobile connectivity
+
+The bounded pilot recorded a snapshot body timeout and a multi-second synchronous
+maintenance pause; cleanup verified all test prefixes empty. The operator confirmed
+an unreliable mobile-data connection. Transport occupied over 99% of write/recovery
+time while local queries stayed below 0.4 ms. This does not establish a provider or
+internet-independent engine bottleneck, so it does not justify architectural
+optimization or changing local M17/M18 decisions. Cloud performance conclusions
+need a representative stable connection. [Evidence](../benchmarks/AWS_DIAGNOSTICS.md).

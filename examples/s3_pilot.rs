@@ -13,6 +13,7 @@ use glider::{
 use object_store::ClientOptions;
 use serde_json::json;
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     env, fs,
     time::{Duration, Instant},
@@ -29,8 +30,30 @@ const CONFIG: Config = Config {
 struct Probe {
     budget: Budget,
     root: String,
+    operations: RefCell<Vec<serde_json::Value>>,
 }
 impl Probe {
+    fn timed<T>(&self, operation: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let before = self.budget.snapshot();
+        let started = Instant::now();
+        let result = f();
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.;
+        let after = self.budget.snapshot();
+        self.operations.borrow_mut().push(json!({
+            "operation": operation, "elapsed_ms": elapsed_ms, "succeeded": result.is_ok(),
+            "requests": after.requests - before.requests,
+            "request_bytes": after.request_body_bytes - before.request_body_bytes,
+            "response_bytes": after.response_body_bytes - before.response_body_bytes,
+        }));
+        result
+    }
+    fn batch(&self, db: &mut SingleMachine<S3Store>, mutations: Vec<Mutation>) -> Result<()> {
+        let before = db.status().maintenance_time;
+        let result = self.timed("batch", || Ok(db.apply_batch(mutations)?));
+        self.operations.borrow_mut().last_mut().unwrap()["maintenance_ms"] =
+            json!((db.status().maintenance_time - before).as_secs_f64() * 1000.);
+        result
+    }
     fn store(&self, name: &str) -> Result<S3Store> {
         assert!(NAMES.contains(&name));
         let endpoint = env::var("GLIDER_S3_ENDPOINT")?;
@@ -88,7 +111,7 @@ fn put(id: u64, vector: Vec<f32>) -> Mutation {
 fn initial() -> Rows {
     (0..2000).map(|id| (id, vector(id))).collect()
 }
-fn check(db: &SingleMachine<S3Store>, rows: &Rows) -> Result<()> {
+fn check(probe: &Probe, db: &SingleMachine<S3Store>, rows: &Rows) -> Result<()> {
     assert_eq!(db.status().documents, rows.len());
     for (&id, v) in rows {
         let (actual, metadata) = db.get(id).ok_or("missing row")?;
@@ -116,11 +139,10 @@ fn check(db: &SingleMachine<S3Store>, rows: &Rows) -> Result<()> {
             } else {
                 vec![]
             };
-            assert_eq!(
-                db.query(&q, 10, &filter, SearchMode::Exact)?,
-                expected,
-                "seed=42"
-            );
+            let actual = probe.timed(if filtered { "filtered_query" } else { "query" }, || {
+                Ok(db.query(&q, 10, &filter, SearchMode::Exact)?)
+            })?;
+            assert_eq!(actual, expected, "seed=42");
         }
     }
     Ok(())
@@ -145,38 +167,56 @@ fn write(probe: &Probe, marker: &str) -> Result<()> {
         Some(b"original".to_vec())
     );
     assert_eq!(probe.store("objects")?.list()?, vec!["immutable"]);
-    let mut db = probe.open("live")?;
+    let mut db = probe.timed("initialize", || probe.open("live"))?;
     let rows = initial();
     for chunk in rows.iter().collect::<Vec<_>>().chunks(100) {
-        db.apply_batch(chunk.iter().map(|(&id, v)| put(id, v.to_vec())).collect())?;
+        probe.batch(
+            &mut db,
+            chunk.iter().map(|(&id, v)| put(id, v.to_vec())).collect(),
+        )?;
     }
-    check(&db, &rows)?;
+    check(probe, &db, &rows)?;
     db.close()?;
     Ok(())
 }
 fn recover(probe: &Probe) -> Result<()> {
     // A new OS process reconstructs the first phase's acknowledged state.
     let mut rows = initial();
-    let mut db = probe.open("live")?;
-    check(&db, &rows)?;
-    db.apply_batch(vec![put(0, vector(8000)), Mutation::Delete { id: 1 }])?;
+    let mut db = probe.timed("reopen", || probe.open("live"))?;
+    check(probe, &db, &rows)?;
+    probe.batch(
+        &mut db,
+        vec![put(0, vector(8000)), Mutation::Delete { id: 1 }],
+    )?;
     rows.insert(0, vector(8000));
     rows.remove(&1);
     assert!(db.get(1).is_none());
-    check(&db, &rows)?;
+    check(probe, &db, &rows)?;
     probe.budget.lose_next_mutation_response();
-    assert!(db.apply_batch(vec![put(2, vector(9000))]).is_err());
+    assert!(probe.batch(&mut db, vec![put(2, vector(9000))]).is_err());
     assert!(db.status().recovery_required);
-    check(&db, &rows)?; // Failed acknowledgement cannot change this handle's view.
+    check(probe, &db, &rows)?; // Failed acknowledgement cannot change this handle's view.
     drop(db);
-    stage_isolated_namespace(&probe.store("live")?, probe.store("takeover")?, CONFIG)?;
+    probe.timed("isolated_takeover", || {
+        Ok(stage_isolated_namespace(
+            &probe.store("live")?,
+            probe.store("takeover")?,
+            CONFIG,
+        )?)
+    })?;
     rows.insert(2, vector(9000)); // Fault was injected after the server completed the PUT.
-    let mut db = probe.open("takeover")?;
-    check(&db, &rows)?;
-    db.backup_to(probe.store("backup")?)?;
-    stage_isolated_namespace(&probe.store("backup")?, probe.store("restored")?, CONFIG)?;
-    let restored = probe.open("restored")?;
-    check(&restored, &rows)?;
+    let mut db = probe.timed("open_takeover", || probe.open("takeover"))?;
+    check(probe, &db, &rows)?;
+    probe.timed("backup", || Ok(db.backup_to(probe.store("backup")?)?))?;
+    probe.timed("restore", || {
+        Ok(stage_isolated_namespace(
+            &probe.store("backup")?,
+            probe.store("restored")?,
+            CONFIG,
+        )?)
+    })?;
+    let restored = probe.timed("open_restored", || probe.open("restored"))?;
+    check(probe, &restored, &rows)?;
     restored.close()?;
     db.close()?;
     Ok(())
@@ -217,6 +257,7 @@ fn main() -> Result<()> {
     let probe = Probe {
         budget: Budget::new(requests, mib * 1024 * 1024, seconds),
         root,
+        operations: RefCell::new(Vec::new()),
     };
     let start = Instant::now();
     let result = match args[1].as_str() {
@@ -227,7 +268,9 @@ fn main() -> Result<()> {
     fs::write(
         &args[2],
         serde_json::to_vec_pretty(&json!({
-            "version":1, "phase":args[1], "passed":result.is_ok(), "prefix":probe.root,
+            "version":2, "measurement_protocol":"pilot-client-timing-v1",
+            "phase":args[1], "passed":result.is_ok(), "prefix":probe.root,
+            "http_timings":probe.budget.timings(), "operations":probe.operations,
             "counts":probe.budget.snapshot(), "elapsed_seconds":start.elapsed().as_secs_f64(),
             "limits":{"requests":requests,"payload_bytes":mib*1024*1024,"seconds":seconds},
             "rows":2000,"dimensions":64,"seed":42,"generator":"mod65536-v1"

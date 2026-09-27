@@ -5,6 +5,10 @@ AWS S3 Standard general-purpose bucket before further provider assumptions. It i
 not a latency benchmark, capacity test, long soak or proof of provider hardware
 durability. The first AWS correctness run passed; see
 [the acceptance evidence](../benchmarks/M14a.md).
+The later [bounded timing diagnostic](../benchmarks/AWS_DIAGNOSTICS.md) found a
+snapshot body-transfer timeout during takeover on operator-confirmed unstable
+mobile data; cleanup passed. It did not reach backup/restore and cannot establish
+a provider or internet-independent engine bottleneck.
 
 ## Local rehearsal
 
@@ -89,6 +93,20 @@ appear in HTTP error counters and are asserted by the workload.
 revision and working-tree status. Phase reports record pass/fail, counts,
 elapsed time, workload identity and limits. Timing is observational and includes
 the client's network; do not apply loopback MinIO latency gates to AWS.
+
+Version-2 reports add `pilot-client-timing-v1` diagnostics without extra requests
+or larger budgets. Each admitted HTTP attempt records only operation/object kind,
+status, payload sizes, time to headers and time through complete body consumption.
+Times include connection setup, client network and server work; they cannot
+isolate AWS service time. Samples are in completion order, with start offsets;
+overlapping DELETE durations must not be summed as wall time. Errors and the
+deliberately lost response remain labeled. No URL, credential or header is saved.
+Logical timers separate initial open, batches (with included maintenance time),
+fresh-process reopen, takeover, backup, restore and exact queries. Query timers
+exclude oracle construction/comparison, and batch timers exclude input generation.
+Reports preserve all samples; the small fixed workload supports attribution,
+not stable tail percentiles, concurrency capacity or a production SLO. Run metadata
+includes client platform, Rust version and the sanitized successful Free-plan check.
 
 All five test namespaces must be empty before writing. A local ownership marker
 then authorizes cleanup of only these generated namespaces. Cleanup uses its own

@@ -36,7 +36,9 @@ class PilotTests(unittest.TestCase):
         env = {"GLIDER_S3_BUCKET": "glider-pilot-test", "GLIDER_S3_REGION": "eu-central-1"}
         responses = [json.dumps(self.plan()), json.dumps({"LocationConstraint": "eu-central-1"}), ""]
         with patch.object(p, "run", side_effect=responses) as run:
-            p.check_aws(env)
+            evidence = p.check_aws(env)
+        self.assertEqual(evidence["accountPlanType"], "FREE")
+        self.assertNotIn("accountId", evidence)
         self.assertIn("--expected-bucket-owner", run.call_args.args)
         for last in [{"Status": "Enabled"}, {"Status": "Suspended"}]:
             with patch.object(p, "run", side_effect=responses[:2] + [json.dumps(last)]), self.assertRaises(ValueError):
