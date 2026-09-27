@@ -445,12 +445,14 @@ Done when:
 
 ### M14a — Bounded real-S3 correctness pilot before further expansion
 
-Status: local preparation and CI passed in
-[PR #39](https://github.com/omerfeyzioglu/glider/pull/39); real AWS acceptance
-remains open. See
-[docs/S3_PILOT.md](docs/S3_PILOT.md). The runner's MinIO rehearsal verifies
-conditional publication, separate-process recovery, lost mutation acknowledgement,
-isolated takeover, exact filtered results, backup/restore and cleanup.
+Status: complete. Tooling and MinIO CI passed in
+[PR #39](https://github.com/omerfeyzioglu/glider/pull/39). The bounded AWS run
+at `29df242` passed conditional publication, separate-process recovery, lost
+mutation acknowledgement, isolated takeover, exact filtered results and
+backup/restore; cleanup verified all five generated namespaces empty.
+[Evidence](benchmarks/M14a.md): 177 HTTP attempts and 21,699,343 payload bytes.
+This is provider correctness acceptance, not a latency or capacity claim.
+See [docs/S3_PILOT.md](docs/S3_PILOT.md) for the guarded procedure.
 
 Run the first AWS validation after M14, before treating MinIO behavior as provider
 evidence. Daily development, failure matrices and PR CI continue on MinIO.

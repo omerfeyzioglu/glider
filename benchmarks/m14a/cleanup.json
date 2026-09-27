@@ -1,0 +1,22 @@
+{
+  "counts": {
+    "http_errors": 0,
+    "request_body_bytes": 0,
+    "requests": 29,
+    "response_body_bytes": 9889
+  },
+  "dimensions": 64,
+  "elapsed_seconds": 5.257661875,
+  "generator": "mod65536-v1",
+  "limits": {
+    "payload_bytes": 10485760,
+    "requests": 2000,
+    "seconds": 60
+  },
+  "passed": true,
+  "phase": "cleanup",
+  "prefix": "glider-pilot/ca0482038b2e3b859345a7b92e78c7c0",
+  "rows": 2000,
+  "seed": 42,
+  "version": 1
+}

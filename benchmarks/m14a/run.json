@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "backend": "aws",
+  "prefix": "glider-pilot/ca0482038b2e3b859345a7b92e78c7c0",
+  "endpoint": "https://s3.eu-central-1.amazonaws.com",
+  "bucket": "glider-pilot-test-t1g1p",
+  "region": "eu-central-1",
+  "git_revision": "29df242a403c89978a98c39aaea1b6462967fcdf",
+  "git_status": ""
+}
