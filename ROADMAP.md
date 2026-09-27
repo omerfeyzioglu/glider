@@ -588,7 +588,9 @@ Done when:
 
 ### M19a — Bound S3 reads before capacity exploration
 
-Status: local validation passed; PR CI pending. Scripted tests cover declared
+Status: complete. [PR #44](https://github.com/omerfeyzioglu/glider/pull/44)
+passed [CI](https://github.com/omerfeyzioglu/glider/actions/runs/36326086242).
+Scripted tests cover declared
 and actual body size, inventory count/bytes and early pagination cutoff. The
 MinIO test rejects an oversized snapshot before any GET, then verifies all rows
 with adequate limits. The full MinIO crash/restart suite and cleanup passed.
@@ -603,7 +605,9 @@ pagination cutoff and successful recovery with an adequate budget on MinIO.
 
 ## M19 — Establish a representative larger operating envelope
 
-Status: planned; does not assume that M17/M18 need implementation.
+Status: bounded SIFT/MinIO capacity protocol and runner ready; measurements
+and acceptance pending. [Predeclared protocol](benchmarks/M19.md).
+Does not assume that M17/M18 need implementation.
 
 Steps:
 - Select one intended deployment workload: representative dimensions, dataset,

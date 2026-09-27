@@ -37,3 +37,7 @@ required-features = ["s3"]
 [[example]]
 name = "m16_concurrency"
 required-features = ["s3"]
+
+[[example]]
+name = "m19_capacity"
+required-features = ["s3"]
