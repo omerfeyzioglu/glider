@@ -185,6 +185,9 @@ unchanged request ID and optional document revision conditions. Its durable
 outcome survives restart, compaction and isolated takeover within a bounded
 128-commit window. See [the retry contract and example](docs/RETRIES.md).
 
+For concurrent callers, [bounded admission](docs/ADMISSION.md) provides one
+commit worker, count/byte limits, cancellation and explicit shutdown.
+
 ## Recovery checkpoints (M3)
 
 Call `db.checkpoint()?` to persist the current live state as one immutable segment.

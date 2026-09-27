@@ -475,13 +475,12 @@ Done when:
 
 ## M15 — Safe client retries and conditional updates
 
-Status: implemented; final CI/MinIO acceptance pending. `apply_request` publishes
-bounded retry receipts and conditional decisions atomically with mutations;
-version 4 snapshots and version 5 manifests preserve them. The 128-commit
-window explicitly expires IDs and document observations. Local retry tests cover
-lost acknowledgements, process exits, restart, compaction, isolated takeover,
-concurrent duplicates, rollback boundaries, corruption and retention limits.
-See [the client contract](docs/RETRIES.md) and `tests/retry.rs`.
+Status: complete. [PR #42](https://github.com/omerfeyzioglu/glider/pull/42)
+passed [CI](https://github.com/omerfeyzioglu/glider/actions/runs/36323811350),
+including the MinIO uncertain-PUT/takeover/backup test, existing crash matrix,
+serving recovery and pilot rehearsal. Twelve local retry tests cover process
+exits, conflicts, expiration, corruption, concurrent duplicates and retention
+bounds. See [the client contract](docs/RETRIES.md) and `tests/retry.rs`.
 
 Problem: a lost acknowledgement leaves clients unsure whether a batch committed;
 repeating an old request can overwrite newer data even when replay is idempotent.
@@ -508,7 +507,12 @@ Done when:
 
 ## M16 — Bounded concurrent admission with one committer
 
-Status: planned; depends on M15's request contract.
+Status: controlled-load acceptance passed locally; final CI pending. The
+bounded FIFO admits by count and encoded bytes, with one owner worker and
+explicit cancellation/shutdown semantics. Six deterministic failure tests pass.
+The paired MinIO run checked 4,000 exact queries across two processes; the worker
+met all latency, throughput, RSS and recovery budgets.
+[Workload and raw evidence](benchmarks/M16.md).
 
 Problem: the serial API has no queue limits or latency contract for many callers.
 

@@ -3,7 +3,10 @@ use crate::{
     ownership::OwnedDatabase, recovery::stage_isolated_namespace, store::ObjectStore, Config,
     Error, MaintenanceLimits, MaintenanceStatus, Mutation, Neighbor, Result,
 };
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServingOptions {
@@ -43,6 +46,7 @@ pub struct ServingStatus {
     pub max_documents: usize,
     pub recovery_required: bool,
     pub maintenance_runs: u64,
+    pub maintenance_time: Duration,
     pub storage_errors: u64,
     pub backup_errors: u64,
     /// The M8 policy has no enabled derived ANN generation.
@@ -56,6 +60,7 @@ pub struct SingleMachine<S: ObjectStore> {
     db: OwnedDatabase<S>,
     options: ServingOptions,
     maintenance_runs: u64,
+    maintenance_time: Duration,
     storage_errors: u64,
     backup_errors: u64,
 }
@@ -78,9 +83,13 @@ impl<S: ObjectStore> SingleMachine<S> {
             db,
             options,
             maintenance_runs: 0,
+            maintenance_time: Duration::ZERO,
             storage_errors: 0,
             backup_errors: 0,
         })
+    }
+    pub fn config(&self) -> Config {
+        self.db.config()
     }
     pub fn status(&self) -> ServingStatus {
         ServingStatus {
@@ -89,6 +98,7 @@ impl<S: ObjectStore> SingleMachine<S> {
             max_documents: self.options.max_documents,
             recovery_required: self.db.poisoned,
             maintenance_runs: self.maintenance_runs,
+            maintenance_time: self.maintenance_time,
             storage_errors: self.storage_errors,
             backup_errors: self.backup_errors,
             search_mode: SearchMode::Exact,
@@ -205,10 +215,12 @@ impl<S: ObjectStore> SingleMachine<S> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
         }
+        let started = Instant::now();
         let result = match self.options.chunk_bytes {
             Some(bytes) => self.db.compact_chunked(bytes),
             None => self.db.compact(),
         };
+        self.maintenance_time += started.elapsed();
         if result.is_ok() {
             self.maintenance_runs += 1;
         } else {
