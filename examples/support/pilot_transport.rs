@@ -230,30 +230,49 @@ mod tests {
             ("DELETE", "ownership")
         );
     }
-    #[test]
-    fn incomplete_request_is_recorded_on_drop() {
-        let budget = Budget::new(1, 100, 60);
-        {
-            let _timer = TimedRequest {
-                budget: budget.clone(),
-                started: Instant::now(),
-                sample: HttpTiming {
-                    operation: "GET",
-                    object_kind: "metadata",
-                    started_ms: 0.,
-                    headers_ms: None,
-                    total_ms: 0.,
-                    status: None,
-                    outcome: "transport_or_body_error",
-                    request_bytes: 0,
-                    response_bytes: 0,
-                },
-            };
+    #[derive(Debug)]
+    struct ResponseProbe(bool);
+    #[async_trait]
+    impl HttpService for ResponseProbe {
+        async fn call(&self, _: HttpRequest) -> Result<HttpResponse, HttpError> {
+            if self.0 {
+                return Err(failure("injected connection failure"));
+            }
+            Ok(HttpResponse::new(HttpResponseBody::from(vec![0; 4])))
         }
-        let samples = budget.timings();
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].outcome, "transport_or_body_error");
-        assert!(samples[0].headers_ms.is_none());
+    }
+    #[test]
+    fn failed_http_attempts_preserve_headers_and_received_bytes() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for fails_before_headers in [false, true] {
+            let budget = Budget::new(1, 3, 60);
+            let service = Service {
+                inner: HttpClient::new(ResponseProbe(fails_before_headers)),
+                budget: budget.clone(),
+            };
+            let request = HttpRequest::new(object_store::client::HttpRequestBody::empty());
+            // Either connection failure or the real streamed body budget check fails.
+            assert!(runtime.block_on(service.call(request)).is_err());
+            let samples = budget.timings();
+            assert_eq!(samples.len(), 1);
+            let sample = &samples[0];
+            assert_eq!(sample.outcome, "transport_or_body_error");
+            assert_eq!(sample.headers_ms.is_none(), fails_before_headers);
+            assert_eq!(
+                sample.status,
+                if fails_before_headers {
+                    None
+                } else {
+                    Some(200)
+                }
+            );
+            assert_eq!(
+                sample.response_bytes,
+                if fails_before_headers { 0 } else { 4 }
+            );
+            assert_eq!(sample.response_bytes, budget.snapshot().response_body_bytes);
+            assert_eq!(budget.snapshot().requests, 1);
+        }
     }
     #[test]
     fn all_clones_share_request_limits() {

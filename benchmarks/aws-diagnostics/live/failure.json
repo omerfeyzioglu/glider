@@ -1,0 +1,7 @@
+{
+  "stage": "S3 pilot recover",
+  "status": "failed",
+  "elapsed_seconds": 40.826,
+  "timeout_seconds": 310,
+  "output": "Error: Io(Custom { kind: Other, error: Generic { store: \"S3\", source: RetryError(RetryErrorImpl { method: GET, uri: Some(https://s3.eu-central-1.amazonaws.com/glider-pilot-test-t1g1p/glider-pilot/f7fdbe6384be14fe6d66b0ffc18bade1/takeover/compacted-00000000000000000016), retries: 0, max_retries: 0, elapsed: 10.00233225s, retry_timeout: 180s, inner: Http(HttpError { kind: Timeout, source: reqwest::Error { kind: Body, source: reqwest::Error { kind: Body, source: TimedOut } } }) }) } })\n"
+}

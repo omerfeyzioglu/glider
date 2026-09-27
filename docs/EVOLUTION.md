@@ -140,3 +140,13 @@ and newer history remain untouched; recovery rebuilds counts and resumes cleanup
 No new publication participant, retry or persisted format is added. The targeted
 2,000×128 probe passes with identical request counts/bytes; 5,000 rows expose the
 next full-snapshot/queue boundary. [Evidence](../benchmarks/M19.md).
+
+## 2026-09-27 — Remote snapshot transfer limits the bounded AWS pilot
+
+HTTP and logical-operation timing exposed a 10-second snapshot body timeout
+during isolated takeover and a 4.716-second synchronous maintenance pause.
+Resident queries issued no HTTP requests; transport occupied over 99% of the
+write/recovery phases. Cleanup verified all test prefixes empty. This identifies
+a remote transfer/foreground boundary, without attributing it to AWS internals
+or changing timeouts. Local capacity and conditional concurrency deferrals must
+not be treated as remote serving acceptance. [Evidence](../benchmarks/AWS_DIAGNOSTICS.md).

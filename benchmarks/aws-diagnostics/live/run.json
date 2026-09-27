@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "backend": "aws",
+  "prefix": "glider-pilot/f7fdbe6384be14fe6d66b0ffc18bade1",
+  "started_utc": "2026-09-27T15:22:14.693651+00:00",
+  "free_plan": {
+    "accountPlanType": "FREE",
+    "accountPlanStatus": "ACTIVE",
+    "accountPlanRemainingCredits": {
+      "amount": 100.0,
+      "unit": "USD"
+    },
+    "accountPlanExpirationDate": "2027-03-27T12:37:44.523000+00:00"
+  },
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "endpoint": "https://s3.eu-central-1.amazonaws.com",
+  "bucket": "glider-pilot-test-t1g1p",
+  "region": "eu-central-1",
+  "git_revision": "c8e9d19fc48befd5f53500605561718552d02623",
+  "git_status": ""
+}

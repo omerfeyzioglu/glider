@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "backend": "minio",
+  "prefix": "glider-pilot/2becb34b44026e0ae3e1fbccc05fafb7",
+  "started_utc": "2026-09-27T15:21:24.712211+00:00",
+  "free_plan": null,
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "endpoint": "http://127.0.0.1:65357",
+  "bucket": "glider-pilot-test",
+  "region": "us-east-1",
+  "git_revision": "f2a1ebef2c316a2c5f03b2ab2e0d877bfd299563",
+  "git_status": "M docs/S3_PILOT.md\n M examples/s3_pilot.rs\n M examples/support/pilot_transport.rs\n M tests/test_s3_pilot.py\n M tools/s3_pilot.py"
+}

@@ -1,0 +1,863 @@
+{
+  "counts": {
+    "http_errors": 3,
+    "request_body_bytes": 2671145,
+    "requests": 56,
+    "response_body_bytes": 11065
+  },
+  "dimensions": 64,
+  "elapsed_seconds": 0.170233167,
+  "generator": "mod65536-v1",
+  "http_timings": [
+    {
+      "headers_ms": 3.560917,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 302,
+      "started_ms": 1.0089579999999998,
+      "status": 200,
+      "total_ms": 3.564292
+    },
+    {
+      "headers_ms": 1.659209,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 299,
+      "started_ms": 4.717833000000001,
+      "status": 200,
+      "total_ms": 1.665125
+    },
+    {
+      "headers_ms": 1.476208,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 303,
+      "started_ms": 6.525708,
+      "status": 200,
+      "total_ms": 1.482375
+    },
+    {
+      "headers_ms": 1.327291,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 301,
+      "started_ms": 8.135333,
+      "status": 200,
+      "total_ms": 1.332583
+    },
+    {
+      "headers_ms": 2.867625,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 303,
+      "started_ms": 9.608583000000001,
+      "status": 200,
+      "total_ms": 2.874084
+    },
+    {
+      "headers_ms": 4.010375,
+      "object_kind": "other",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 56,
+      "response_bytes": 0,
+      "started_ms": 12.958667,
+      "status": 200,
+      "total_ms": 4.013833
+    },
+    {
+      "headers_ms": 1.4779579999999999,
+      "object_kind": "other",
+      "operation": "PUT",
+      "outcome": "http_error",
+      "request_bytes": 59,
+      "response_bytes": 504,
+      "started_ms": 17.030791999999998,
+      "status": 412,
+      "total_ms": 1.482833
+    },
+    {
+      "headers_ms": 3.214125,
+      "object_kind": "other",
+      "operation": "GET",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 56,
+      "started_ms": 18.663042,
+      "status": 200,
+      "total_ms": 3.222833
+    },
+    {
+      "headers_ms": 3.29725,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 557,
+      "started_ms": 22.221375000000002,
+      "status": 200,
+      "total_ms": 3.304834
+    },
+    {
+      "headers_ms": 1.4665,
+      "object_kind": "ownership",
+      "operation": "GET",
+      "outcome": "http_error",
+      "request_bytes": 0,
+      "response_bytes": 469,
+      "started_ms": 25.742667,
+      "status": 404,
+      "total_ms": 1.478208
+    },
+    {
+      "headers_ms": 3.485959,
+      "object_kind": "ownership",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 61,
+      "response_bytes": 0,
+      "started_ms": 27.275375,
+      "status": 200,
+      "total_ms": 3.490084
+    },
+    {
+      "headers_ms": 2.755542,
+      "object_kind": "ownership",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 104,
+      "response_bytes": 0,
+      "started_ms": 30.882,
+      "status": 200,
+      "total_ms": 2.759042
+    },
+    {
+      "headers_ms": 0.770166,
+      "object_kind": "ownership",
+      "operation": "GET",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 61,
+      "started_ms": 33.699792,
+      "status": 200,
+      "total_ms": 0.77775
+    },
+    {
+      "headers_ms": 0.614792,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 840,
+      "started_ms": 34.542333,
+      "status": 200,
+      "total_ms": 0.6203339999999999
+    },
+    {
+      "headers_ms": 0.5526249999999999,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 840,
+      "started_ms": 35.262625,
+      "status": 200,
+      "total_ms": 0.559375
+    },
+    {
+      "headers_ms": 0.434625,
+      "object_kind": "metadata",
+      "operation": "GET",
+      "outcome": "http_error",
+      "request_bytes": 0,
+      "response_bytes": 459,
+      "started_ms": 35.897833,
+      "status": 404,
+      "total_ms": 0.442041
+    },
+    {
+      "headers_ms": 1.938375,
+      "object_kind": "metadata",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 117,
+      "response_bytes": 0,
+      "started_ms": 36.435207999999996,
+      "status": 200,
+      "total_ms": 1.940041
+    },
+    {
+      "headers_ms": 1.7842500000000001,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74473,
+      "response_bytes": 0,
+      "started_ms": 40.097916999999995,
+      "status": 200,
+      "total_ms": 1.786333
+    },
+    {
+      "headers_ms": 2.223667,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74427,
+      "response_bytes": 0,
+      "started_ms": 43.087125,
+      "status": 200,
+      "total_ms": 2.227625
+    },
+    {
+      "headers_ms": 2.171167,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74572,
+      "response_bytes": 0,
+      "started_ms": 46.62075,
+      "status": 200,
+      "total_ms": 2.174375
+    },
+    {
+      "headers_ms": 2.1397500000000003,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74427,
+      "response_bytes": 0,
+      "started_ms": 50.048207999999995,
+      "status": 200,
+      "total_ms": 2.143459
+    },
+    {
+      "headers_ms": 3.5274170000000002,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74565,
+      "response_bytes": 0,
+      "started_ms": 53.478375,
+      "status": 200,
+      "total_ms": 3.531292
+    },
+    {
+      "headers_ms": 2.6607499999999997,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74436,
+      "response_bytes": 0,
+      "started_ms": 58.292249999999996,
+      "status": 200,
+      "total_ms": 2.663834
+    },
+    {
+      "headers_ms": 2.191834,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74589,
+      "response_bytes": 0,
+      "started_ms": 62.086000000000006,
+      "status": 200,
+      "total_ms": 2.195459
+    },
+    {
+      "headers_ms": 2.660417,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74413,
+      "response_bytes": 0,
+      "started_ms": 65.510417,
+      "status": 200,
+      "total_ms": 2.662792
+    },
+    {
+      "headers_ms": 1.9577079999999998,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74590,
+      "response_bytes": 0,
+      "started_ms": 69.435833,
+      "status": 200,
+      "total_ms": 1.9598749999999998
+    },
+    {
+      "headers_ms": 2.388958,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74462,
+      "response_bytes": 0,
+      "started_ms": 72.870583,
+      "status": 200,
+      "total_ms": 2.391791
+    },
+    {
+      "headers_ms": 4.943083,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74664,
+      "response_bytes": 0,
+      "started_ms": 77.259167,
+      "status": 200,
+      "total_ms": 4.94775
+    },
+    {
+      "headers_ms": 2.863792,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74547,
+      "response_bytes": 0,
+      "started_ms": 84.342208,
+      "status": 200,
+      "total_ms": 2.866708
+    },
+    {
+      "headers_ms": 8.663666000000001,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74671,
+      "response_bytes": 0,
+      "started_ms": 88.474208,
+      "status": 200,
+      "total_ms": 8.669
+    },
+    {
+      "headers_ms": 2.941417,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74518,
+      "response_bytes": 0,
+      "started_ms": 99.14841700000001,
+      "status": 200,
+      "total_ms": 2.945459
+    },
+    {
+      "headers_ms": 2.9135839999999997,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74673,
+      "response_bytes": 0,
+      "started_ms": 103.16725,
+      "status": 200,
+      "total_ms": 2.9161669999999997
+    },
+    {
+      "headers_ms": 3.113,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74539,
+      "response_bytes": 0,
+      "started_ms": 107.79175000000001,
+      "status": 200,
+      "total_ms": 3.11675
+    },
+    {
+      "headers_ms": 16.356125,
+      "object_kind": "snapshot",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 1179737,
+      "response_bytes": 0,
+      "started_ms": 126.253875,
+      "status": 200,
+      "total_ms": 16.364334
+    },
+    {
+      "headers_ms": 1.913292,
+      "object_kind": "inventory",
+      "operation": "LIST",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 5771,
+      "started_ms": 142.709875,
+      "status": 200,
+      "total_ms": 1.928375
+    },
+    {
+      "headers_ms": 1.120125,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 144.865708,
+      "status": 204,
+      "total_ms": 1.122084
+    },
+    {
+      "headers_ms": 1.504583,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 145.103667,
+      "status": 204,
+      "total_ms": 1.505958
+    },
+    {
+      "headers_ms": 1.4332500000000001,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 145.18866699999998,
+      "status": 204,
+      "total_ms": 1.433708
+    },
+    {
+      "headers_ms": 1.794917,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 144.917167,
+      "status": 204,
+      "total_ms": 1.7956249999999998
+    },
+    {
+      "headers_ms": 0.924375,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 146.66037500000002,
+      "status": 204,
+      "total_ms": 0.926167
+    },
+    {
+      "headers_ms": 0.872375,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 146.731,
+      "status": 204,
+      "total_ms": 0.873042
+    },
+    {
+      "headers_ms": 1.640709,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 146.02558299999998,
+      "status": 204,
+      "total_ms": 1.641292
+    },
+    {
+      "headers_ms": 1.42,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 146.693958,
+      "status": 204,
+      "total_ms": 1.421084
+    },
+    {
+      "headers_ms": 0.8464160000000001,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 147.694208,
+      "status": 204,
+      "total_ms": 0.847833
+    },
+    {
+      "headers_ms": 0.9115,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 147.6395,
+      "status": 204,
+      "total_ms": 0.911958
+    },
+    {
+      "headers_ms": 0.870209,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 148.138625,
+      "status": 204,
+      "total_ms": 0.871417
+    },
+    {
+      "headers_ms": 1.3012080000000001,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 147.718375,
+      "status": 204,
+      "total_ms": 1.3017079999999999
+    },
+    {
+      "headers_ms": 0.7069580000000001,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 148.577167,
+      "status": 204,
+      "total_ms": 0.7075830000000001
+    },
+    {
+      "headers_ms": 0.7983340000000001,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 148.609375,
+      "status": 204,
+      "total_ms": 0.7991250000000001
+    },
+    {
+      "headers_ms": 1.452042,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 149.046125,
+      "status": 204,
+      "total_ms": 1.4535
+    },
+    {
+      "headers_ms": 1.432875,
+      "object_kind": "mutation",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 149.082042,
+      "status": 204,
+      "total_ms": 1.4332909999999999
+    },
+    {
+      "headers_ms": 3.531208,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74684,
+      "response_bytes": 0,
+      "started_ms": 151.364208,
+      "status": 200,
+      "total_ms": 3.53525
+    },
+    {
+      "headers_ms": 2.518583,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74523,
+      "response_bytes": 0,
+      "started_ms": 156.040375,
+      "status": 200,
+      "total_ms": 2.522083
+    },
+    {
+      "headers_ms": 2.454209,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74687,
+      "response_bytes": 0,
+      "started_ms": 159.924,
+      "status": 200,
+      "total_ms": 2.456917
+    },
+    {
+      "headers_ms": 2.484166,
+      "object_kind": "mutation",
+      "operation": "PUT",
+      "outcome": "success",
+      "request_bytes": 74551,
+      "response_bytes": 0,
+      "started_ms": 163.898667,
+      "status": 200,
+      "total_ms": 2.488375
+    },
+    {
+      "headers_ms": 0.731125,
+      "object_kind": "ownership",
+      "operation": "DELETE",
+      "outcome": "success",
+      "request_bytes": 0,
+      "response_bytes": 0,
+      "started_ms": 169.331167,
+      "status": 204,
+      "total_ms": 0.73375
+    }
+  ],
+  "limits": {
+    "payload_bytes": 26214400,
+    "requests": 2000,
+    "seconds": 150
+  },
+  "measurement_protocol": "pilot-client-timing-v1",
+  "operations": [
+    {
+      "elapsed_ms": 12.764707999999999,
+      "operation": "initialize",
+      "request_bytes": 282,
+      "requests": 8,
+      "response_bytes": 2669,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.03825,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74473,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.393792,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74427,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.42825,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74572,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.367917,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74427,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 4.783,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74565,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.899416,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74436,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.302583,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74589,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.843625,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74413,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.207208,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74590,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.845625,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74462,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 6.897208999999999,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74664,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 4.909834,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74547,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 9.949417,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74671,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 4.853375,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74518,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.9462919999999997,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74673,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 4.840542,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74539,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 43.913624999999996,
+      "maintenance_ms": 38.854333999999994,
+      "operation": "batch",
+      "request_bytes": 1254421,
+      "requests": 19,
+      "response_bytes": 5771,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.624,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74523,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.776834,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74687,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 3.855542,
+      "maintenance_ms": 0.0,
+      "operation": "batch",
+      "request_bytes": 74551,
+      "requests": 1,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 0.17925,
+      "operation": "query",
+      "request_bytes": 0,
+      "requests": 0,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 0.138416,
+      "operation": "filtered_query",
+      "request_bytes": 0,
+      "requests": 0,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 0.15341700000000003,
+      "operation": "query",
+      "request_bytes": 0,
+      "requests": 0,
+      "response_bytes": 0,
+      "succeeded": true
+    },
+    {
+      "elapsed_ms": 0.08366699999999999,
+      "operation": "filtered_query",
+      "request_bytes": 0,
+      "requests": 0,
+      "response_bytes": 0,
+      "succeeded": true
+    }
+  ],
+  "passed": true,
+  "phase": "write",
+  "prefix": "glider-pilot/2becb34b44026e0ae3e1fbccc05fafb7",
+  "rows": 2000,
+  "seed": 42,
+  "version": 2
+}

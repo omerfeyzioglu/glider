@@ -454,6 +454,13 @@ backup/restore; cleanup verified all five generated namespaces empty.
 This is provider correctness acceptance, not a latency or capacity claim.
 See [docs/S3_PILOT.md](docs/S3_PILOT.md) for the guarded procedure.
 
+Later remote diagnostic: the current 2,000×64 pilot exposed a snapshot GET body
+timeout and a 4.716-second synchronous maintenance pause; cleanup passed.
+[Evidence](benchmarks/AWS_DIAGNOSTICS.md). Historical correctness acceptance and
+local capacity results do not establish current remote serving readiness. Remote
+snapshot transfer and foreground latency remain unresolved; M17/M18 deferrals
+below are scoped to their measured local workloads.
+
 Run the first AWS validation after M14, before treating MinIO behavior as provider
 evidence. Daily development, failure matrices and PR CI continue on MinIO.
 Use a dedicated S3 Standard bucket from the existing machine; EC2 and broad

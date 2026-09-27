@@ -5,6 +5,9 @@ AWS S3 Standard general-purpose bucket before further provider assumptions. It i
 not a latency benchmark, capacity test, long soak or proof of provider hardware
 durability. The first AWS correctness run passed; see
 [the acceptance evidence](../benchmarks/M14a.md).
+The later [bounded timing diagnostic](../benchmarks/AWS_DIAGNOSTICS.md) found a
+snapshot body-transfer timeout during takeover; cleanup passed. That run did not
+reach backup/restore and does not establish remote serving acceptance.
 
 ## Local rehearsal
 
