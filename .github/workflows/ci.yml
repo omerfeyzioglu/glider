@@ -79,6 +79,9 @@ jobs:
           cargo test --locked --features s3 --example m16_concurrency
           python3 tools/m16_benchmark.py target/m16-comparison --smoke
 
+      - name: Verify capacity workload and recovery smoke
+        run: python3 tools/m19_benchmark.py target/m19-study --smoke
+
       - name: Retain benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -97,4 +100,5 @@ jobs:
             target/serving-smoke/*.json
             target/s3-pilot/*.json
             target/m16-comparison/*.json
+            target/m19-study/**/*.json
           if-no-files-found: ignore

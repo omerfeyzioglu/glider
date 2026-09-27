@@ -1,0 +1,285 @@
+{
+  "elapsed_ms": 254.203583,
+  "operations": [
+    {
+      "bytes": 63543,
+      "key": "mutation-00000000000000000001",
+      "kind": "put",
+      "ms": 7.67325
+    },
+    {
+      "bytes": 63786,
+      "key": "mutation-00000000000000000002",
+      "kind": "put",
+      "ms": 6.197083
+    },
+    {
+      "bytes": 64064,
+      "key": "mutation-00000000000000000003",
+      "kind": "put",
+      "ms": 4.906917
+    },
+    {
+      "bytes": 64095,
+      "key": "mutation-00000000000000000004",
+      "kind": "put",
+      "ms": 4.316834
+    },
+    {
+      "bytes": 64239,
+      "key": "mutation-00000000000000000005",
+      "kind": "put",
+      "ms": 4.2739579999999995
+    },
+    {
+      "bytes": 64302,
+      "key": "mutation-00000000000000000006",
+      "kind": "put",
+      "ms": 4.648541
+    },
+    {
+      "bytes": 64067,
+      "key": "mutation-00000000000000000007",
+      "kind": "put",
+      "ms": 3.23575
+    },
+    {
+      "bytes": 64242,
+      "key": "mutation-00000000000000000008",
+      "kind": "put",
+      "ms": 4.852375
+    },
+    {
+      "bytes": 64333,
+      "key": "mutation-00000000000000000009",
+      "kind": "put",
+      "ms": 4.02525
+    },
+    {
+      "bytes": 64261,
+      "key": "mutation-00000000000000000010",
+      "kind": "put",
+      "ms": 3.8387909999999996
+    },
+    {
+      "bytes": 64263,
+      "key": "mutation-00000000000000000011",
+      "kind": "put",
+      "ms": 4.040375
+    },
+    {
+      "bytes": 64488,
+      "key": "mutation-00000000000000000012",
+      "kind": "put",
+      "ms": 4.443834
+    },
+    {
+      "bytes": 64481,
+      "key": "mutation-00000000000000000013",
+      "kind": "put",
+      "ms": 4.033959
+    },
+    {
+      "bytes": 64345,
+      "key": "mutation-00000000000000000014",
+      "kind": "put",
+      "ms": 3.734916
+    },
+    {
+      "bytes": 64454,
+      "key": "mutation-00000000000000000015",
+      "kind": "put",
+      "ms": 4.670584
+    },
+    {
+      "bytes": 64594,
+      "key": "mutation-00000000000000000016",
+      "kind": "put",
+      "ms": 4.421083
+    },
+    {
+      "bytes": 1015453,
+      "key": "compacted-00000000000000000016",
+      "kind": "put",
+      "ms": 19.113958
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 3.045959
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000001",
+      "kind": "delete",
+      "ms": 1.027125
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000002",
+      "kind": "delete",
+      "ms": 1.034458
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000003",
+      "kind": "delete",
+      "ms": 0.758167
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000004",
+      "kind": "delete",
+      "ms": 0.697333
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000005",
+      "kind": "delete",
+      "ms": 0.7649999999999999
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000006",
+      "kind": "delete",
+      "ms": 0.67875
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000007",
+      "kind": "delete",
+      "ms": 0.6857500000000001
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000008",
+      "kind": "delete",
+      "ms": 0.7355
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000009",
+      "kind": "delete",
+      "ms": 0.651667
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000010",
+      "kind": "delete",
+      "ms": 0.6839580000000001
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000011",
+      "kind": "delete",
+      "ms": 0.670834
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000012",
+      "kind": "delete",
+      "ms": 0.697375
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000013",
+      "kind": "delete",
+      "ms": 0.644541
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000014",
+      "kind": "delete",
+      "ms": 0.6225
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000015",
+      "kind": "delete",
+      "ms": 0.598125
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000016",
+      "kind": "delete",
+      "ms": 0.6599579999999999
+    },
+    {
+      "bytes": 64528,
+      "key": "mutation-00000000000000000017",
+      "kind": "put",
+      "ms": 4.02475
+    },
+    {
+      "bytes": 64260,
+      "key": "mutation-00000000000000000018",
+      "kind": "put",
+      "ms": 4.068834000000001
+    },
+    {
+      "bytes": 64499,
+      "key": "mutation-00000000000000000019",
+      "kind": "put",
+      "ms": 4.393917
+    },
+    {
+      "bytes": 64519,
+      "key": "mutation-00000000000000000020",
+      "kind": "put",
+      "ms": 3.1359589999999997
+    },
+    {
+      "bytes": 1270695,
+      "key": "compacted-00000000000000000020",
+      "kind": "put",
+      "ms": 51.107082999999996
+    },
+    {
+      "bytes": 0,
+      "key": "",
+      "kind": "list",
+      "ms": 0.99
+    },
+    {
+      "bytes": 0,
+      "key": "compacted-00000000000000000016",
+      "kind": "delete",
+      "ms": 0.6180829999999999
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000017",
+      "kind": "delete",
+      "ms": 0.730166
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000018",
+      "kind": "delete",
+      "ms": 0.6335
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000019",
+      "kind": "delete",
+      "ms": 0.59075
+    },
+    {
+      "bytes": 0,
+      "key": "mutation-00000000000000000020",
+      "kind": "delete",
+      "ms": 0.586167
+    },
+    {
+      "bytes": 0,
+      "key": "owner-v1-0dbb09039b0d3889f310c8aad6bc09ce",
+      "kind": "delete",
+      "ms": 0.600125
+    }
+  ],
+  "peak_rss_bytes": 27688960,
+  "phase": "prepare",
+  "rows": 2000,
+  "version": 1
+}
