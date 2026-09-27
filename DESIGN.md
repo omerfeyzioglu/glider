@@ -35,7 +35,10 @@ Document IDs are u64. Vectors have one positive, persisted dimension and finite
 f32 components. Each live document also has a map of UTF-8 string keys to string
 values. The persisted metric enum supports squared Euclidean and Manhattan
 distance, accumulated in f64. Exact search scans all live documents, sorts by
-ascending distance then ID, and returns at most k results. Filtered exact search
+ascending distance then ID, and returns at most k results. Exact query results
+retain allocation only for the returned neighbors; temporary scoring still
+uses O(matching rows) memory. Holding many completed results remains a caller
+resource choice. Filtered exact search
 requires every specified key/value equality to hold; missing keys do not match.
 An empty filter includes every document. A put replaces both the vector and the
 complete metadata map; a delete removes both.

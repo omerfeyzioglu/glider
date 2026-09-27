@@ -1330,7 +1330,9 @@ impl<S: ObjectStore> Database<S> {
             results.truncate(k);
         }
         results.sort_by(order);
-        Ok(results)
+        // Completed results may outlive the query. Do not transfer the full
+        // scoring allocation to a caller retaining only k neighbors.
+        Ok(results.into_boxed_slice().into_vec())
     }
     fn commit(&mut self, mutation: Mutation) -> Result<()> {
         if self.poisoned {
