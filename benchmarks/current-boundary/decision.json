@@ -1,0 +1,6 @@
+{
+  "supported_probe_rows": null,
+  "first_breach_rows": 10000,
+  "final": null,
+  "smoke": false
+}
