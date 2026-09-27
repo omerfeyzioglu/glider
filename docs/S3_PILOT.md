@@ -3,7 +3,8 @@
 Daily tests and CI use disposable MinIO. After M14, this small pilot checks a real
 AWS S3 Standard general-purpose bucket before further provider assumptions. It is
 not a latency benchmark, capacity test, long soak or proof of provider hardware
-durability. AWS acceptance remains pending until an actual AWS report passes.
+durability. The first AWS correctness run passed; see
+[the acceptance evidence](../benchmarks/M14a.md).
 
 ## Local rehearsal
 
