@@ -250,14 +250,14 @@ fn encoded_len<T: Serialize>(value: &T) -> Result<usize> {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Segment {
+struct Segment<D = Document, R = retry::State> {
     version: u32,
     sequence: u64,
     config: Config,
     // A sorted array, not a JSON map: duplicate IDs must be rejected on decode.
-    documents: Vec<(u64, Document)>,
+    documents: Vec<(u64, D)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    retry: Option<retry::State>,
+    retry: Option<R>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -897,13 +897,13 @@ impl<S: ObjectStore> Database<S> {
     fn snapshot_bytes(&self) -> Result<Vec<u8>> {
         let snapshot = Segment {
             version: 4,
-            retry: Some(self.retry.clone()),
+            retry: Some(&self.retry),
             sequence: self.sequence,
             config: self.config,
             documents: self
                 .documents
                 .iter()
-                .map(|(&id, document)| (id, document.clone()))
+                .map(|(&id, document)| (id, document))
                 .collect(),
         };
         let mut bytes = Vec::new();

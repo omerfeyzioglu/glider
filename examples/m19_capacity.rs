@@ -281,12 +281,14 @@ fn main() -> Result<()> {
         )?)
         .unwrap();
     let paced = args[4] == "paced";
+    let mut rss_phases = BTreeMap::from([("inputs", rss())]);
     let raw = store("source")?;
     let metrics = raw.inner.metrics();
     let observed = raw.seen.clone();
     let start = Instant::now();
     let mut db = Db::open(raw, CONFIG, options())?;
     let cold_open_ms = ms(start.elapsed());
+    rss_phases.insert("cold_open", rss());
     let cold_http = metrics.snapshot();
     let cold_operations = std::mem::take(&mut observed.lock().unwrap().operations);
     if args[1] == "prepare" {
@@ -399,6 +401,7 @@ fn main() -> Result<()> {
     };
     drop(target);
     service.shutdown(Shutdown::Drain)?;
+    rss_phases.insert("serving", rss());
     let after = metrics.snapshot();
     writes.sort_by_key(|w| w.result.value.sequence);
     queries.sort_by_key(|q| (q.result.value.sequence, q.id));
@@ -443,6 +446,7 @@ fn main() -> Result<()> {
             }
         }
     }
+    rss_phases.insert("oracle", rss());
     let recovered_store = store("source")?;
     let recovery_metrics = recovered_store.inner.metrics();
     let start = Instant::now();
@@ -458,6 +462,7 @@ fn main() -> Result<()> {
         assert_eq!(*metadata, tags(id));
     }
     recovered.close()?;
+    rss_phases.insert("warm_reopen", rss());
     let write_ms = stats(writes.iter().map(|w| w.e2e).collect());
     let query_ms = stats(queries.iter().map(|q| q.e2e).collect());
     let queue_ms = stats(
@@ -517,7 +522,7 @@ fn main() -> Result<()> {
     fs::write(
         std::path::Path::new(&args[6]).with_file_name("profile.json"),
         serde_json::to_vec_pretty(&json!({
-            "cold_open_ms":cold_open_ms,"cold_operations":cold_operations,"cold_gets":cold_http.get,"cold_lists":cold_http.list,
+            "cold_open_ms":cold_open_ms,"cold_operations":cold_operations,"cold_gets":cold_http.get,"cold_lists":cold_http.list,"rss_phases":rss_phases,
             "operations":observed.lock().unwrap().operations
         }))?,
     )?;
