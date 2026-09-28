@@ -171,10 +171,17 @@ completed serving/cache implementation.
 
 The target write path retains explicit durable acknowledgement and recovery.
 Routine maintenance should rewrite affected bounded data, rather than the full
-collection at a fixed mutation count. Independently addressable segments and a
-versioned publication manifest are candidates; their exact layout is not yet
-selected. Compression, update locality, object request counts, replay cost and
-write amplification must be compared before committing to a format. If maintenance
+collection at a fixed mutation count. M21 selects addressable immutable base
+blocks and bounded ID-sorted delta runs with per-run vector-partition summaries
+as the next layout to implement. A versioned root will name block identities,
+sequence and retry state; immutable mutation logs remain authoritative until a
+complete root covers them. Readers need a bounded latest-ID directory to hide
+stale base candidates and an exact path for quality checks. Block identity and
+digest will bind disposable RAM/NVMe cache entries to a pinned root. This is a
+target decision, not a claim that the layout or cache exists today. The measured
+10,000-row independent-arrival boundary and alternatives are in
+`benchmarks/M21.md`. Segment/root format versions, publication, cleanup and
+compatibility must be defined before implementation. If maintenance
 overlaps writes, its generation boundary, backlog, memory, reclamation and crash
 behavior must be explicit. More background threads alone do not reduce total work.
 

@@ -27,6 +27,8 @@ def main():
     scope.add_argument('--m20', action='store_true', help='only the demonstrated 5,000-row boundary and final rehearsal')
     scope.add_argument('--probe-only', type=int, choices=[2000, 5000, 10000],
                        help='one bounded row step, without a final acceptance rehearsal')
+    scope.add_argument('--independent', action='store_true',
+                       help='M21: one 10,000-row diagnostic with independent query arrivals')
     parser.add_argument('--diagnostic', action='store_true', help='unpaced 20-round real-data M20 attribution only')
     args = parser.parse_args()
     if args.diagnostic and (args.smoke or not args.m20):
@@ -58,7 +60,7 @@ def main():
                 docker=run('docker','version','--format','{{.Server.Version}}',capture=True).strip(), smoke=args.smoke,
                 cache_control='fresh serving process; uncontrolled OS/MinIO caches, power and competing load',
                 backend_scope='loopback MinIO only; no remote or AWS capacity acceptance', m20=args.m20, diagnostic=args.diagnostic,
-                probe_only=args.probe_only)
+                probe_only=args.probe_only, independent=args.independent)
     (args.output/'run.json').write_text(json.dumps(info,indent=2)+'\n')
     with container_scope(name):
         env.update(MINIO_ROOT_USER='glider-'+secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
@@ -74,20 +76,25 @@ def main():
             run('target/release/examples/m19_capacity',operation,str(rows),str(rounds),'smoke' if args.smoke or args.diagnostic else 'paced',str(data),str(report),env=env,timeout=180,stage='M19 '+case+' '+operation)
             return json.loads(report.read_text())
         supported=None; breach=None
-        for rows in ([args.probe_only] if args.probe_only else [5000] if args.m20 else [2000] if args.smoke else [2000,5000,10000]):
+        for rows in ([10000] if args.independent else [args.probe_only] if args.probe_only else [5000] if args.m20 else [2000] if args.smoke else [2000,5000,10000]):
             case='probe-'+str(rows); rounds=2 if args.smoke else 20
-            phase(case,rows,rounds,'prepare'); result=phase(case,rows,rounds,'serve')
+            phase(case,rows,rounds,'prepare'); result=phase(case,rows,rounds,'independent' if args.independent else 'serve')
+            if args.independent:
+                break
             if not args.smoke and not result['performance_accepted']:
                 breach=rows; break
             supported=rows
         final=None
-        if supported is not None and not args.probe_only:
+        if supported is not None and not args.probe_only and not args.independent:
             case='final-'+str(supported); rounds=2 if args.smoke else 50
             phase(case,supported,rounds,'prepare'); result=phase(case,supported,rounds,'serve')
             phase(case,supported,rounds,'verify')
             verification=json.loads((args.output/case/'verify.json').read_text())
             final=dict(rows=supported,performance_accepted=result['performance_accepted'],backup_restore_accepted=verification['backup_restore_accepted'])
-        decision=dict(supported_probe_rows=supported,first_breach_rows=breach,final=final,smoke=args.smoke)
+        decision=(dict(phase='independent', rows=10000, accepted=False,
+                       reason='M21 attribution only; larger-than-RAM acceptance remains pending',
+                       smoke=args.smoke) if args.independent else
+                  dict(supported_probe_rows=supported,first_breach_rows=breach,final=final,smoke=args.smoke))
         (args.output/'decision.json').write_text(json.dumps(decision,indent=2)+'\n')
     print('M19 bounded study finished and MinIO removed:',json.dumps(decision))
 
