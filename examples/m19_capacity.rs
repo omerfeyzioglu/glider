@@ -68,6 +68,11 @@ struct Observed {
     inner: S3Store,
     seen: Arc<Mutex<Observation>>,
 }
+struct OpenObservation {
+    ms: f64,
+    http: glider::store::s3::RequestCounts,
+    operations: Vec<Value>,
+}
 impl Observed {
     fn note(&self, kind: &str, key: &str, bytes: usize, start: Instant) {
         self.seen
@@ -328,9 +333,11 @@ fn main() -> Result<()> {
             &args[6],
             metrics,
             observed,
-            cold_open_ms,
-            cold_http,
-            cold_operations,
+            OpenObservation {
+                ms: cold_open_ms,
+                http: cold_http,
+                operations: cold_operations,
+            },
         );
     }
     let initial_sequence = db.status().maintenance.sequence;
@@ -574,9 +581,7 @@ fn independent_traffic(
     report: &str,
     metrics: glider::store::s3::RequestMetrics,
     observed: Arc<Mutex<Observation>>,
-    cold_open_ms: f64,
-    cold_http: glider::store::s3::RequestCounts,
-    cold_operations: Vec<Value>,
+    cold_open: OpenObservation,
 ) -> Result<()> {
     let initial_sequence = db.status().maintenance.sequence;
     let service = Service::start(db, Limits::default())?;
@@ -815,9 +820,9 @@ fn independent_traffic(
         "filtered_query_ms":stats(queries.iter().filter(|q|q.filtered).map(|q|q.e2e).collect()),
         "unfiltered_query_ms":stats(queries.iter().filter(|q|!q.filtered).map(|q|q.e2e).collect()),
         "maintenance_ms":stats(writes.iter().filter(|w|!w.result.maintenance.is_zero()).map(|w|ms(w.result.maintenance)).collect()),
-        "oracle_checks":queries.len(),"recovery_passed":true,"cold_open_ms":cold_open_ms,
-        "cold_open_gets":cold_http.get,"cold_open_lists":cold_http.list,
-        "cold_open_get_bytes":cold_operations.iter().filter(|o|o["kind"]=="get").map(|o|o["bytes"].as_u64().unwrap()).sum::<u64>(),
+        "oracle_checks":queries.len(),"recovery_passed":true,"cold_open_ms":cold_open.ms,
+        "cold_open_gets":cold_open.http.get,"cold_open_lists":cold_open.http.list,
+        "cold_open_get_bytes":cold_open.operations.iter().filter(|o|o["kind"]=="get").map(|o|o["bytes"].as_u64().unwrap()).sum::<u64>(),
         "recovery_ms":recovery_ms,"recovery_gets":recovery_http.get,"recovery_lists":recovery_http.list,"recovery_get_bytes":recovery_get_bytes,
         "elapsed_seconds":elapsed_seconds,"peak_rss_bytes":rss(),
         "http":{"get":after.get-before.get,"list":after.list-before.list,"put":after.put-before.put,"delete":after.delete-before.delete,
