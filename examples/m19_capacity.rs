@@ -1,4 +1,5 @@
 //! Bounded SIFT capacity study; run through tools/m19_benchmark.py.
+#![recursion_limit = "256"]
 use glider::{
     admission::{Client, Limits, QueryResult, Service, Shutdown, Timed},
     retry::{Outcome, Request, RequestId},
@@ -66,6 +67,11 @@ struct Observation {
 struct Observed {
     inner: S3Store,
     seen: Arc<Mutex<Observation>>,
+}
+struct OpenObservation {
+    ms: f64,
+    http: glider::store::s3::RequestCounts,
+    operations: Vec<Value>,
 }
 impl Observed {
     fn note(&self, kind: &str, key: &str, bytes: usize, start: Instant) {
@@ -308,7 +314,7 @@ fn main() -> Result<()> {
     if args[1] == "verify" {
         return verify(db, &args[6], observed, cold_open_ms, cold_operations);
     }
-    if args[1] != "serve" {
+    if args[1] != "serve" && args[1] != "independent" {
         return Err("invalid phase".into());
     }
     for id in 0..rows() {
@@ -320,6 +326,20 @@ fn main() -> Result<()> {
     let before = metrics.snapshot();
     assert!(db.apply_batch(vec![put(rows(), 0)]).is_err());
     assert_eq!(metrics.snapshot(), before);
+    if args[1] == "independent" {
+        return independent_traffic(
+            db,
+            rounds,
+            &args[6],
+            metrics,
+            observed,
+            OpenObservation {
+                ms: cold_open_ms,
+                http: cold_http,
+                operations: cold_operations,
+            },
+        );
+    }
     let initial_sequence = db.status().maintenance.sequence;
     let mode = "worker";
     let service = Service::start(db, Limits::default())?;
@@ -550,6 +570,268 @@ fn main() -> Result<()> {
         query_ms["p95"],
         paced && passed
     );
+    Ok(())
+}
+
+/// M21 diagnostic: read arrivals do not wait for a write from the same client.
+/// Each producer keeps at most one request outstanding and skips late slots.
+fn independent_traffic(
+    db: Db,
+    rounds: u64,
+    report: &str,
+    metrics: glider::store::s3::RequestMetrics,
+    observed: Arc<Mutex<Observation>>,
+    cold_open: OpenObservation,
+) -> Result<()> {
+    let initial_sequence = db.status().maintenance.sequence;
+    let service = Service::start(db, Limits::default())?;
+    let target = Target(service.client());
+    let before = metrics.snapshot();
+    let boundary = Arc::new(AtomicU64::new(initial_sequence));
+    let barrier = Arc::new(Barrier::new(9));
+    let began = Instant::now() + Duration::from_millis(100);
+    let mut writers = Vec::new();
+    for client in 0..4_u64 {
+        let (target, boundary, barrier) = (target.clone(), boundary.clone(), barrier.clone());
+        writers.push(std::thread::spawn(
+            move || -> Result<(Vec<Write>, u64, u64)> {
+                let mut writes = Vec::new();
+                let mut overloaded = 0;
+                let mut skipped = 0;
+                barrier.wait();
+                for round in 0..rounds {
+                    let due = began + Duration::from_secs(round);
+                    let late = wait_until(due, true);
+                    if late > 1000. {
+                        skipped += 1;
+                        continue;
+                    }
+                    let mut nonce = [0; 16];
+                    nonce[..8].copy_from_slice(&client.to_le_bytes());
+                    nonce[8..].copy_from_slice(&round.to_le_bytes());
+                    let request = Request {
+                        id: RequestId {
+                            boundary: boundary.load(Ordering::Acquire),
+                            nonce,
+                        },
+                        conditions: vec![],
+                        mutations: batch(client, round),
+                    };
+                    let start = Instant::now();
+                    let ticket = match target.0.write(request) {
+                        Ok(ticket) => ticket,
+                        Err(glider::admission::Error::Overloaded) => {
+                            overloaded += 1;
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let result = ticket.wait()?;
+                    if result.value.conflict.is_some() {
+                        return Err(format!(
+                            "unexpected conditional conflict: writer={client} round={round}"
+                        )
+                        .into());
+                    }
+                    boundary.fetch_max(result.value.sequence, Ordering::Release);
+                    writes.push(Write {
+                        client,
+                        round,
+                        result,
+                        e2e: ms(start.elapsed()),
+                        late,
+                    });
+                }
+                Ok((writes, overloaded, skipped))
+            },
+        ));
+    }
+    let mut readers = Vec::new();
+    for reader in 0..4_u64 {
+        let (target, barrier) = (target.clone(), barrier.clone());
+        readers.push(std::thread::spawn(
+            move || -> Result<(Vec<Query>, u64, u64)> {
+                let mut queries = Vec::new();
+                let mut overloaded = 0;
+                let mut skipped = 0;
+                barrier.wait();
+                for tick in 0..rounds * 10 {
+                    let due = began + Duration::from_millis(tick * 100);
+                    let late = wait_until(due, true);
+                    if late > 100. {
+                        skipped += 1;
+                        continue;
+                    }
+                    let id = reader * rounds * 10 + tick;
+                    let filtered = id.is_multiple_of(2);
+                    let start = Instant::now();
+                    let ticket = match target.0.query(
+                        vector(1_000_000 + id, 0),
+                        10,
+                        if filtered {
+                            vec![("selected".into(), "true".into())]
+                        } else {
+                            vec![]
+                        },
+                    ) {
+                        Ok(ticket) => ticket,
+                        Err(glider::admission::Error::Overloaded) => {
+                            overloaded += 1;
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let result = ticket.wait()?;
+                    queries.push(Query {
+                        id,
+                        filtered,
+                        result,
+                        e2e: ms(start.elapsed()),
+                        late,
+                    });
+                }
+                Ok((queries, overloaded, skipped))
+            },
+        ));
+    }
+    barrier.wait();
+    let mut writes = Vec::new();
+    let mut queries = Vec::new();
+    let (mut write_overloaded, mut write_skipped, mut query_overloaded, mut query_skipped) =
+        (0, 0, 0, 0);
+    for writer in writers {
+        let (events, overloaded, skipped) = writer.join().map_err(|_| "writer panic")??;
+        writes.extend(events);
+        write_overloaded += overloaded;
+        write_skipped += skipped;
+    }
+    for reader in readers {
+        let (events, overloaded, skipped) = reader.join().map_err(|_| "reader panic")??;
+        queries.extend(events);
+        query_overloaded += overloaded;
+        query_skipped += skipped;
+    }
+    let elapsed_seconds = began.elapsed().as_secs_f64();
+    drop(target);
+    service.shutdown(Shutdown::Drain)?;
+    let after = metrics.snapshot();
+    writes.sort_by_key(|w| w.result.value.sequence);
+    queries.sort_by_key(|q| (q.result.value.sequence, q.id));
+    let mut model: BTreeMap<_, _> = (0..rows()).map(|id| (id, vector(id, 0))).collect();
+    let mut applied = 0;
+    for query in &queries {
+        while applied < writes.len()
+            && writes[applied].result.value.sequence <= query.result.value.sequence
+        {
+            for mutation in batch(writes[applied].client, writes[applied].round) {
+                if let Mutation::Put { id, vector, .. } = mutation {
+                    model.insert(id, vector);
+                }
+            }
+            applied += 1;
+        }
+        let q = vector(1_000_000 + query.id, 0);
+        let mut expected: Vec<_> = model
+            .iter()
+            .filter(|(id, _)| !query.filtered || id.is_multiple_of(100))
+            .map(|(&id, v)| Neighbor {
+                id,
+                distance: v
+                    .iter()
+                    .zip(&q)
+                    .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                    .sum(),
+            })
+            .collect();
+        expected.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        expected.truncate(10);
+        assert_eq!(
+            query.result.value.neighbors, expected,
+            "independent query={} sequence={}",
+            query.id, query.result.value.sequence
+        );
+    }
+    for write in &writes[applied..] {
+        for mutation in batch(write.client, write.round) {
+            if let Mutation::Put { id, vector, .. } = mutation {
+                model.insert(id, vector);
+            }
+        }
+    }
+    let recovery_store = store("source")?;
+    let recovery_metrics = recovery_store.inner.metrics();
+    let recovery_observed = recovery_store.seen.clone();
+    let recovery_start = Instant::now();
+    let reopened = Db::open(recovery_store, CONFIG, options())?;
+    let recovery_ms = ms(recovery_start.elapsed());
+    let recovery_http = recovery_metrics.snapshot();
+    let recovery_get_bytes: u64 = recovery_observed
+        .lock()
+        .unwrap()
+        .operations
+        .iter()
+        .filter(|o| o["kind"] == "get")
+        .map(|o| o["bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        reopened.status().maintenance.sequence,
+        initial_sequence + writes.len() as u64
+    );
+    for (id, vector) in model {
+        let (actual, metadata) = reopened.get(id).unwrap();
+        assert_eq!(actual, vector, "recovered id={id}");
+        assert_eq!(*metadata, tags(id));
+    }
+    reopened.close()?;
+    let operations = std::mem::take(&mut observed.lock().unwrap().operations);
+    let snapshot_put_bytes: u64 = operations
+        .iter()
+        .filter(|o| {
+            o["kind"] == "put"
+                && o["key"]
+                    .as_str()
+                    .is_some_and(|k| k.starts_with("compacted-") || k.starts_with("segment-"))
+        })
+        .map(|o| o["bytes"].as_u64().unwrap())
+        .sum();
+    let mutation_put_bytes: u64 = operations
+        .iter()
+        .filter(|o| {
+            o["kind"] == "put"
+                && o["key"]
+                    .as_str()
+                    .is_some_and(|k| k.starts_with("mutation-"))
+        })
+        .map(|o| o["bytes"].as_u64().unwrap())
+        .sum();
+    let document = json!({
+        "version":1,"phase":"independent","rows":rows(),"dimensions":128,"rounds":rounds,
+        "backend":"loopback-minio","dataset":"SIFTsmall-prefix-rotate137-v1","metric":"squared_euclidean","k":10,
+        "offered":{"write_batches":rounds*4,"logical_mutations":rounds*400,"queries":rounds*40},
+        "acknowledged":{"write_batches":writes.len(),"logical_mutations":writes.len()*100,"queries":queries.len()},
+        "overloaded":{"writes":write_overloaded,"queries":query_overloaded},
+        "late_slots_skipped":{"writes":write_skipped,"queries":query_skipped},
+        "write_arrival_lateness_ms":stats(writes.iter().map(|w|w.late).collect()),
+        "query_arrival_lateness_ms":stats(queries.iter().map(|q|q.late).collect()),
+        "write_ms":stats(writes.iter().map(|w|w.e2e).collect()),
+        "write_queue_ms":stats(writes.iter().map(|w|ms(w.result.queue_wait)).collect()),
+        "query_ms":stats(queries.iter().map(|q|q.e2e).collect()),
+        "query_queue_ms":stats(queries.iter().map(|q|ms(q.result.queue_wait)).collect()),
+        "filtered_query_ms":stats(queries.iter().filter(|q|q.filtered).map(|q|q.e2e).collect()),
+        "unfiltered_query_ms":stats(queries.iter().filter(|q|!q.filtered).map(|q|q.e2e).collect()),
+        "maintenance_ms":stats(writes.iter().filter(|w|!w.result.maintenance.is_zero()).map(|w|ms(w.result.maintenance)).collect()),
+        "oracle_checks":queries.len(),"recovery_passed":true,"cold_open_ms":cold_open.ms,
+        "cold_open_gets":cold_open.http.get,"cold_open_lists":cold_open.http.list,
+        "cold_open_get_bytes":cold_open.operations.iter().filter(|o|o["kind"]=="get").map(|o|o["bytes"].as_u64().unwrap()).sum::<u64>(),
+        "recovery_ms":recovery_ms,"recovery_gets":recovery_http.get,"recovery_lists":recovery_http.list,"recovery_get_bytes":recovery_get_bytes,
+        "elapsed_seconds":elapsed_seconds,"peak_rss_bytes":rss(),
+        "http":{"get":after.get-before.get,"list":after.list-before.list,"put":after.put-before.put,"delete":after.delete-before.delete,
+            "request_body_bytes":after.request_body_bytes-before.request_body_bytes,
+            "http_errors":after.http_errors-before.http_errors,"transport_errors":after.transport_errors-before.transport_errors},
+        "logical_put_bytes":{"snapshot":snapshot_put_bytes,"mutation":mutation_put_bytes},
+        "operations":operations,
+    });
+    fs::write(report, serde_json::to_vec_pretty(&document)?)?;
     Ok(())
 }
 

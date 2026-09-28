@@ -710,15 +710,17 @@ Done when:
 The target is a durable, low-cost, fast object-storage-native vector engine,
 with bounded RAM and NVMe caching before multiple machines. Small tests verify
 invariants and isolate causes; fitting a small resident corpus is not the goal.
-M21–M24 are planned, not implemented. Preserve M1–M20 evidence and scope limits.
+M21 has a local measurement and layout decision awaiting PR CI; M22–M24 are
+planned, not implemented. Preserve M1–M20 evidence and scope limits.
 Do not import another engine or copy a reference architecture without a separate
 justified decision. Independent read/write arrivals, working-set size and object
 costs must drive prioritization rather than feature count.
 
 ## M21 — Establish the large-data workload and cost decision
 
-Status: planned. Start from the demonstrated 10,000-row foreground snapshot
-boundary, not another full run of the passing 5,000-row workload.
+Status: local measurement and layout decision recorded in
+[benchmarks/M21.md](benchmarks/M21.md); PR CI pending. The independent-arrival
+10,000-row run breached the 75 ms write-queue p95 gate at 99.921 ms.
 
 Steps:
 - Specify one representative vector dataset, dimensionality, filter/update mix,
@@ -743,7 +745,9 @@ larger-than-RAM requirement.
 
 ## M22 — Bound segment publication and maintenance work
 
-Status: planned; exact layout follows M21 evidence.
+Status: planned; M21 selected addressable base blocks and bounded sorted delta
+runs with vector-partition summaries, jointly with M23's selective-read/cache
+requirements. Persisted formats and publication protocol remain to be designed.
 
 Steps:
 - Compare incrementally reusable segments with bounded sorted delta segments;

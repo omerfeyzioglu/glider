@@ -1,0 +1,7 @@
+{
+  "phase": "independent",
+  "rows": 10000,
+  "accepted": false,
+  "reason": "M21 attribution only; larger-than-RAM acceptance remains pending",
+  "smoke": false
+}
