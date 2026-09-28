@@ -180,8 +180,13 @@ stale base candidates and an exact path for quality checks. Block identity and
 digest will bind disposable RAM/NVMe cache entries to a pinned root. This is a
 target decision, not a claim that the layout or cache exists today. The measured
 10,000-row independent-arrival boundary and alternatives are in
-`benchmarks/M21.md`. Segment/root format versions, publication, cleanup and
-compatibility must be defined before implementation. If maintenance
+`benchmarks/M21.md`. The experimental `experimental-segmented` API defines
+metadata v2 and root/block/index/log v1 in a fresh namespace. It acknowledges
+immutable logs, publishes a fixed sequence through an immutable root generation
+after its packs/index, and replays newer contiguous logs; uncertain publication
+requires reopen. It has no long-term run compaction, cache, selective search or
+production serving integration, so the larger-than-RAM target remains unaccepted.
+If maintenance
 overlaps writes, its generation boundary, backlog, memory, reclamation and crash
 behavior must be explicit. More background threads alone do not reduce total work.
 

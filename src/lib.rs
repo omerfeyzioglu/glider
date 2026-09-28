@@ -21,6 +21,8 @@ pub mod ivf;
 pub mod ownership;
 pub mod recovery;
 pub mod retry;
+#[cfg(any(test, feature = "experimental-segmented"))]
+pub mod segmented;
 pub mod serving;
 pub mod store;
 pub mod streaming;
