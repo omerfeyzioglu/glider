@@ -184,11 +184,13 @@ target decision, not a claim that the layout or cache exists today. The measured
 metadata v2 and root/block/index/log v1 in a fresh namespace. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
-requires reopen. It has no long-term run compaction, cache, selective search or
-production serving integration, so the larger-than-RAM target remains unaccepted.
-If maintenance
-overlaps writes, its generation boundary, backlog, memory, reclamation and crash
-behavior must be explicit. More background threads alone do not reduce total work.
+requires reopen. It can coalesce adjacent small ID indexes through another root
+generation, reusing immutable blocks and dropping fully unreferenced packs.
+Mixed live/stale packs still require staged physical reclamation. It has no
+cache, selective search or production serving integration, so the
+larger-than-RAM target remains unaccepted. If maintenance overlaps writes, its
+generation boundary, backlog, memory, reclamation and crash behavior must be
+explicit. More background threads alone do not reduce total work.
 
 Read latency, write acknowledgement latency, index visibility and object-store
 cost are separate targets. One experiment should answer a specific decision,

@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--segmented-only", action="store_true", help="run only the M22 segmented publication recovery test")
     parser.add_argument("--segmented-capacity", type=Path, help="save one experimental segmented SIFT1M load/recovery probe")
     parser.add_argument("--data", type=Path, help="directory containing verified SIFT1M prefix and query files")
+    parser.add_argument("--consolidate-runs", action="store_true", help="enable bounded run-index consolidation in the capacity probe")
     args = parser.parse_args()
     range_only = args.range_only
     segmented_only = args.segmented_only
@@ -38,6 +39,8 @@ def main():
         parser.error("--segmented-capacity requires --data")
     if args.data and not capacity:
         parser.error("--data requires --segmented-capacity")
+    if args.consolidate_runs and not capacity:
+        parser.error("--consolidate-runs requires --segmented-capacity")
     search_output = args.search_smoke
     compaction_output = args.compaction_benchmarks
     if compaction_output:
@@ -98,10 +101,12 @@ def main():
             return
         if capacity:
             namespace = "segmented-capacity-" + secrets.token_hex(6)
-            raw = run("target/release/examples/m22_capacity",
-                str(args.data / "sift1m_base_250000.fvecs"),
-                str(args.data / "sift1m_query.fvecs"), "250000", namespace,
-                env=env, capture=True, timeout=1800)
+            command = ["target/release/examples/m22_capacity",
+                       str(args.data / "sift1m_base_250000.fvecs"),
+                       str(args.data / "sift1m_query.fvecs"), "250000", namespace]
+            if args.consolidate_runs:
+                command.append("--consolidate")
+            raw = run(*command, env=env, capture=True, timeout=1800)
             result = json.loads(raw)
             if result["rows"] != 250000 or not result["exact_oracle_passed"]:
                 raise ValueError("segmented capacity probe did not verify")
