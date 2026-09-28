@@ -19,7 +19,12 @@ def main():
     parser.add_argument("--segment-benchmarks", type=Path, help="save local/S3 recovery measurements with and without a checkpoint in a new directory")
     parser.add_argument("--compaction-benchmarks", type=Path, help="save local/S3 checkpoint recovery measurements before and after compaction in a new directory")
     parser.add_argument("--search-smoke", type=Path, help="validate the M5 search matrix against the disposable MinIO service")
+    parser.add_argument("--range-only", action="store_true", help="run only the M22 addressable-range integration test")
     args = parser.parse_args()
+    range_only = args.range_only
+    if range_only and any((args.benchmark_smoke, args.segment_benchmarks,
+                           args.compaction_benchmarks, args.search_smoke)):
+        parser.error("--range-only cannot be combined with benchmark outputs")
     search_output = args.search_smoke
     compaction_output = args.compaction_benchmarks
     if compaction_output:
@@ -35,7 +40,8 @@ def main():
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
-    run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
+    if not range_only:
+        run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
         run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
@@ -51,6 +57,11 @@ def main():
                    AWS_SECRET_ACCESS_KEY=env["MINIO_ROOT_PASSWORD"],
                    GLIDER_S3_ENDPOINT=endpoint, GLIDER_S3_BUCKET="glider-test")
         args = ("cargo", "test", "--locked", "--features", "s3", "--lib")
+        if range_only:
+            run(*args, "store::s3::tests::minio_addressable_payload_range_checks_length_and_bounds",
+                "--", "--ignored", "--nocapture", env=env)
+            print("M22 addressable-range MinIO test passed.", flush=True)
+            return
         run(*args, "store::s3::tests::minio_", "--", "--ignored", "--nocapture", env=env)
         run(*args, "store::s3::tests::server_restart_prepare", "--", "--ignored", env=env)
         run("docker", "kill", "--signal", "KILL", name, capture=True)

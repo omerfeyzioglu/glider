@@ -256,6 +256,17 @@ strongly consistent, though ordering is not required. The S3-compatible
 backend collects all listing pages and provides this object contract using native
 complete-object publication.
 
+`ObjectStore::get_range` reads one bounded slice of an immutable payload by
+key, offset, length and expected complete payload length. The S3 backend checks
+the complete envelope size and response length but does not read the envelope's
+whole-object checksum for each slice. A caller must compare returned bytes with
+the SHA-256 digest committed for that logical block before decoding or caching
+them. Full `get` retains whole-envelope validation; the local backend's range
+default uses it. This read API creates no new acknowledgement or durable format,
+and no serving path uses it yet. The intended M22 physical segment may bundle
+small addressable blocks in one larger PUT; M23's cache key includes object key,
+range and committed block digest.
+
 `metadata` is the first durable object: UTF-8 JSON containing format version 1
 and the configuration. Each mutation-log object is immutable UTF-8 JSON with a
 format version and sequence. Versions 1 and 2 contain one put or delete; version

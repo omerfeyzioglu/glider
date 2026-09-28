@@ -45,6 +45,21 @@ fn config() -> Config {
 fn open(root: &Path, fault: &Rc<RefCell<Fault>>) -> Result<LocalStore> {
     LocalStore::open_inner(root, fault.clone())
 }
+
+#[test]
+fn payload_range_defaults_to_validated_full_object() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = LocalStore::open(temp.path().join("ranges")).unwrap();
+    store.create("object", b"abcdefghij").unwrap();
+    assert_eq!(
+        store.get_range("object", 3, 4, 10).unwrap(),
+        Some(b"defg".to_vec())
+    );
+    assert_eq!(store.get_range("missing", 0, 1, 10).unwrap(), None);
+    assert!(store.get_range("object", 0, 1, 9).is_err());
+    assert!(store.get_range("object", usize::MAX, 2, 10).is_err());
+    assert!(store.get_range("object", 0, 0, 10).is_err());
+}
 fn publication_points() -> Vec<String> {
     let mut points = Vec::new();
     for operation in [

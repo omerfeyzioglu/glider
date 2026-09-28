@@ -12,7 +12,8 @@ use object_store::{
         ReqwestConnector,
     },
     path::Path,
-    ClientOptions, ObjectStore as RemoteStore, ObjectStoreExt, PutMode, PutOptions, RetryConfig,
+    ClientOptions, GetOptions, ObjectStore as RemoteStore, ObjectStoreExt, PutMode, PutOptions,
+    RetryConfig,
 };
 use std::{
     future::Future,
@@ -263,6 +264,65 @@ impl ObjectStore for S3Store {
                 let bytes = result.bytes().await.map_err(remote_error)?;
                 decode_envelope(&bytes, key).map(Some)
             }
+        })
+    }
+    fn get_range(
+        &self,
+        key: &str,
+        offset: usize,
+        length: usize,
+        expected_payload_len: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        self.ready()?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| Error::Invalid("range overflow".into()))?;
+        if length == 0 || end > expected_payload_len {
+            return Err(Error::Invalid("range outside expected payload".into()));
+        }
+        let envelope_len = expected_payload_len
+            .checked_add(48)
+            .ok_or_else(|| Error::Invalid("envelope length overflow".into()))?;
+        if self
+            .read_limits
+            .is_some_and(|limits| envelope_len > limits.object_bytes)
+        {
+            return Err(read_limit("object header bytes"));
+        }
+        let start = u64::try_from(offset)
+            .ok()
+            .and_then(|n| n.checked_add(16))
+            .ok_or_else(|| Error::Invalid("range offset overflow".into()))?;
+        let end = u64::try_from(end)
+            .ok()
+            .and_then(|n| n.checked_add(16))
+            .ok_or_else(|| Error::Invalid("range end overflow".into()))?;
+        let path = self.path(key)?;
+        self.runtime.as_ref().unwrap().block_on(async {
+            let result = match self
+                .remote
+                .get_opts(&path, GetOptions::new().with_range(Some(start..end)))
+                .await
+            {
+                Ok(result) => result,
+                Err(object_store::Error::NotFound { .. }) => return Ok(None),
+                Err(error) => return Err(remote_error(error)),
+            };
+            if result.meta.size != envelope_len as u64 {
+                return Err(Error::Corrupt(format!("object length mismatch: {key}")));
+            }
+            let mut stream = result.into_stream();
+            let mut bytes = Vec::with_capacity(length);
+            while let Some(chunk) = stream.try_next().await.map_err(remote_error)? {
+                if chunk.len() > length.saturating_sub(bytes.len()) {
+                    return Err(Error::Corrupt(format!("oversized range response: {key}")));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            if bytes.len() != length {
+                return Err(Error::Corrupt(format!("short range response: {key}")));
+            }
+            Ok(Some(bytes))
         })
     }
     fn list(&self) -> Result<Vec<String>> {
