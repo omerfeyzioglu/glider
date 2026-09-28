@@ -90,7 +90,7 @@ fn main() -> Result<()> {
         return Err("usage: m22_capacity BASE.fvecs QUERY.fvecs ROWS NAMESPACE".into());
     }
     let rows: usize = args[3].parse()?;
-    if rows == 0 || rows % 100 != 0 {
+    if rows == 0 || !rows.is_multiple_of(100) {
         return Err("rows must be a positive multiple of 100".into());
     }
     let config = Config {
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
                 if id == 0 || id == (rows / 2) as u64 || id == (rows - 1) as u64 {
                     samples.insert(id, vector.clone());
                 }
-                let metadata = if id % 100 == 0 {
+                let metadata = if id.is_multiple_of(100) {
                     BTreeMap::from([("cohort".into(), "one-percent".into())])
                 } else {
                     BTreeMap::new()
