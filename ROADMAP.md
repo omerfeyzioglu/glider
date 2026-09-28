@@ -750,7 +750,7 @@ Status: in progress; M21 selected addressable base blocks and bounded sorted
 delta runs with vector-partition summaries, jointly with M23's selective-read
 and cache requirements. The range-read contract and experimental segmented
 publication protocol are in [benchmarks/M22.md](benchmarks/M22.md). Production
-serving, long-term compaction and acceptance remain pending.
+serving, physical data reclamation and acceptance remain pending.
 
 Steps:
 - Compare incrementally reusable segments with bounded sorted delta segments;

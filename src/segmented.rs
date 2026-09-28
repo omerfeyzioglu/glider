@@ -13,6 +13,7 @@ use std::{
 pub(crate) const MAX_BLOCK_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_PACK_BYTES: usize = 1024 * 1024;
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CONSOLIDATION_INDEX_BYTES: usize = 1024 * 1024;
 const INDEX_MAGIC: &[u8; 8] = b"GLRIDX01";
 const MAX_TAIL_OBJECTS: usize = 64;
 
@@ -238,8 +239,9 @@ impl Root {
                 || run.first_sequence > run.last_sequence
                 || run.last_sequence > self.sequence
                 || run.blocks.is_empty()
-                || run.index_len == 0
+                || run.index_len < 48
                 || run.index_len > MAX_INDEX_BYTES
+                || !(run.index_len - 24).is_multiple_of(24)
                 || !valid_digest(&run.index_sha256)
             {
                 return Err(Error::Corrupt("invalid segmented run reference".into()));
@@ -395,6 +397,16 @@ fn log_key(sequence: u64) -> String {
     format!("sglog-{sequence:020}")
 }
 
+fn attempt_id() -> Result<String> {
+    let mut nonce = [0_u8; 16];
+    getrandom::getrandom(&mut nonce).map_err(|error| {
+        Error::Io(std::io::Error::other(format!(
+            "OS randomness unavailable: {error}"
+        )))
+    })?;
+    Ok(nonce.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn numbered_key(key: &str, prefix: &str) -> Result<u64> {
     let sequence = key
         .strip_prefix(prefix)
@@ -485,6 +497,10 @@ pub struct SegmentedDatabase<S> {
 }
 
 impl<S: ObjectStore> SegmentedDatabase<S> {
+    pub fn run_count(&self) -> usize {
+        self.root.runs.len()
+    }
+
     pub fn open(mut store: S, config: Config) -> Result<Self> {
         config.validate()?;
         let mut keys = store.list()?;
@@ -937,13 +953,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if !blocks.is_empty() && self.root.runs.len() >= 64 {
             return Err(Error::MaintenanceRequired);
         }
-        let mut nonce = [0_u8; 16];
-        getrandom::getrandom(&mut nonce).map_err(|error| {
-            Error::Io(std::io::Error::other(format!(
-                "OS randomness unavailable: {error}"
-            )))
-        })?;
-        let attempt = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        let attempt = attempt_id()?;
         self.seal = Some(SealState {
             attempt,
             boundary,
@@ -1054,6 +1064,133 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.seal_step()?;
         }
         Ok(())
+    }
+
+    /// Coalesce one adjacent pair of small runs when the older index is no
+    /// larger than the newer index's size tier. The new index
+    /// reuses authenticated immutable blocks and drops block references with
+    /// no surviving ID. Physical packs with mixed live/stale rows remain.
+    /// The <=1 MiB index cap bounds this synchronous maintenance step; larger
+    /// data reclamation needs a separate staged protocol.
+    pub fn consolidate_runs_step(&mut self) -> Result<bool> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        if self.seal.is_some() {
+            return Err(Error::MaintenanceRequired);
+        }
+        let runs = &self.root.runs;
+        let pair = (0..runs.len().saturating_sub(1)).rev().find(|&i| {
+            let left = (runs[i].index_len - 24) / 24;
+            let right = (runs[i + 1].index_len - 24) / 24;
+            left.ilog2() <= right.ilog2()
+                && runs[i]
+                    .index_len
+                    .checked_add(runs[i + 1].index_len)
+                    .is_some_and(|bytes| bytes <= MAX_CONSOLIDATION_INDEX_BYTES)
+        });
+        let Some(pair) = pair else {
+            return Ok(false);
+        };
+        let first = &self.root.runs[pair];
+        let second = &self.root.runs[pair + 1];
+        let left = read_run_index(&self.store, first)?;
+        let right = read_run_index(&self.store, second)?;
+        let mut latest_pair = BTreeMap::new();
+        for entry in left.entries {
+            if self.latest.get(&entry.id).is_some_and(|at| at.run == pair) {
+                latest_pair.insert(entry.id, (pair, entry));
+            }
+        }
+        for entry in right.entries {
+            if self
+                .latest
+                .get(&entry.id)
+                .is_some_and(|at| at.run == pair + 1)
+            {
+                latest_pair.insert(entry.id, (pair + 1, entry));
+            }
+        }
+        let mut blocks = Vec::new();
+        let mut block_map = BTreeMap::new();
+        let mut entries = Vec::new();
+        for (id, (run_ordinal, mut entry)) in latest_pair {
+            if pair == 0 && entry.deleted {
+                continue;
+            }
+            let ordinal = *block_map
+                .entry((run_ordinal, entry.block))
+                .or_insert_with(|| {
+                    let reference =
+                        self.root.runs[run_ordinal].blocks[entry.block as usize].clone();
+                    blocks.push(reference);
+                    u32::try_from(blocks.len() - 1).expect("bounded block reference count")
+                });
+            entry.block = ordinal;
+            debug_assert_eq!(id, entry.id);
+            entries.push(entry);
+        }
+        let mut root = self.root.clone();
+        root.generation = root
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let attempt = attempt_id()?;
+        let replacement = if entries.is_empty() {
+            None
+        } else {
+            let index = RunIndex {
+                sequence: second.last_sequence,
+                entries: entries.clone(),
+            };
+            let bytes = index.encode(first.first_sequence, blocks.len())?;
+            let object = format!("sgindex-{attempt}");
+            Some((
+                RunRef {
+                    first_sequence: first.first_sequence,
+                    last_sequence: second.last_sequence,
+                    index_object: object,
+                    index_len: bytes.len(),
+                    index_sha256: format!("{:x}", Sha256::digest(&bytes)),
+                    blocks,
+                },
+                bytes,
+            ))
+        };
+        root.runs.splice(
+            pair..pair + 2,
+            replacement.as_ref().map(|(run, _)| run.clone()),
+        );
+        root.validate(self.config)?;
+        let root_bytes = encode(&root)?;
+        if let Some((run, bytes)) = &replacement {
+            self.poisoned = true;
+            self.create_staged(&run.index_object, bytes)?;
+            self.poisoned = false;
+        }
+        self.poisoned = true;
+        self.create_staged(&root_key(root.generation), &root_bytes)?;
+        self.poisoned = false;
+        let replacement_count = usize::from(replacement.is_some());
+        self.latest.retain(|id, location| {
+            if location.run == pair || location.run == pair + 1 {
+                if let Ok(index) = entries.binary_search_by_key(id, |entry| entry.id) {
+                    location.run = pair;
+                    location.entry = entries[index];
+                    true
+                } else {
+                    false
+                }
+            } else {
+                if location.run > pair + 1 {
+                    location.run -= 2 - replacement_count;
+                }
+                true
+            }
+        });
+        self.root = root;
+        self.schedule_obsolete();
+        Ok(true)
     }
 
     /// Remove at most `max_objects` objects after the selected root has made
@@ -1355,6 +1492,77 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn run_consolidation_discards_shadowed_rows_and_oldest_tombstones() {
+        let config = Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        for (index, mutation) in [
+            Mutation::Put {
+                id: 1,
+                vector: vec![1., 0.],
+                metadata: BTreeMap::new(),
+            },
+            Mutation::Put {
+                id: 2,
+                vector: vec![2., 0.],
+                metadata: BTreeMap::new(),
+            },
+            Mutation::Delete { id: 1 },
+            Mutation::Put {
+                id: 3,
+                vector: vec![3., 0.],
+                metadata: BTreeMap::new(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary: index as u64,
+                    nonce: [index as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: vec![mutation],
+            })
+            .unwrap();
+            db.seal_delta().unwrap();
+        }
+        assert_eq!(db.root.runs.len(), 4);
+        assert!(db.consolidate_runs_step().unwrap());
+        assert!(db.consolidate_runs_step().unwrap());
+        assert!(db.consolidate_runs_step().unwrap());
+        assert_eq!(db.root.runs.len(), 1);
+        assert_eq!(db.root.sequence, 4);
+        assert!(!db.consolidate_runs_step().unwrap());
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(2).unwrap().unwrap().vector, vec![2., 0.]);
+        assert_eq!(
+            db.search_exact(&[2., 0.], 10, &[]).unwrap(),
+            vec![
+                Neighbor {
+                    id: 2,
+                    distance: 0.
+                },
+                Neighbor {
+                    id: 3,
+                    distance: 1.
+                },
+            ]
+        );
+        while db.cleanup_step(16).unwrap() != 0 {}
+        drop(db);
+        let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(3).unwrap().unwrap().vector, vec![3., 0.]);
+        assert_eq!(db.root.runs.len(), 1);
+    }
+
     #[cfg(feature = "s3")]
     #[test]
     #[ignore = "requires disposable MinIO from tools/test_s3.py"]
@@ -1549,6 +1757,30 @@ mod tests {
             assert_eq!(reopened.get(42).unwrap().unwrap().vector, vec![1., 2.]);
             assert_eq!(reopened.get(7).unwrap().unwrap().vector, vec![3., 4.]);
             while reopened.cleanup_step(8).unwrap() != 0 {}
+            if prefix != "sgpack-" {
+                assert_eq!(reopened.root.runs.len(), 2);
+                drop(reopened);
+                let mut uncertain_consolidation = SegmentedDatabase::open(
+                    UncertainCreate {
+                        inner: store(),
+                        fail_prefix: "sgroot-00000000000000000003",
+                        fired: false,
+                        fail_remove_once: false,
+                    },
+                    config,
+                )
+                .unwrap();
+                assert!(matches!(
+                    uncertain_consolidation.consolidate_runs_step(),
+                    Err(Error::Io(_))
+                ));
+                drop(uncertain_consolidation);
+                reopened = SegmentedDatabase::open(store(), config).unwrap();
+                assert_eq!(reopened.root.runs.len(), 1);
+                assert_eq!(reopened.get(42).unwrap().unwrap().vector, vec![1., 2.]);
+                assert_eq!(reopened.get(7).unwrap().unwrap().vector, vec![3., 4.]);
+                while reopened.cleanup_step(8).unwrap() != 0 {}
+            }
             let required_pack = reopened.root.runs[0].blocks[0].object.clone();
             drop(reopened);
             let mut damaged = store();

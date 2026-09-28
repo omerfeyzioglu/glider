@@ -86,9 +86,12 @@ fn top10(data_path: &str, rows: usize, query: &[f32]) -> Result<Vec<Neighbor>> {
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().collect();
-    if args.len() != 5 {
-        return Err("usage: m22_capacity BASE.fvecs QUERY.fvecs ROWS NAMESPACE".into());
+    if !(args.len() == 5 || (args.len() == 6 && args[5] == "--consolidate")) {
+        return Err(
+            "usage: m22_capacity BASE.fvecs QUERY.fvecs ROWS NAMESPACE [--consolidate]".into(),
+        );
     }
+    let consolidate = args.len() == 6;
     let rows: usize = args[3].parse()?;
     if rows == 0 || !rows.is_multiple_of(100) {
         return Err("rows must be a positive multiple of 100".into());
@@ -107,6 +110,8 @@ fn main() -> Result<()> {
     let mut seal_steps = 0;
     let mut seal_max_ms = 0_f64;
     let mut cleanup_calls = 0;
+    let mut consolidation_steps = 0;
+    let mut consolidation_max_ms = 0_f64;
     let start = Instant::now();
     for batch in 0..rows / 100 {
         let mutations = (0..100)
@@ -153,9 +158,24 @@ fn main() -> Result<()> {
             while db.cleanup_step(32)? != 0 {
                 cleanup_calls += 1;
             }
+            if consolidate {
+                loop {
+                    let step = Instant::now();
+                    if !db.consolidate_runs_step()? {
+                        break;
+                    }
+                    consolidation_steps += 1;
+                    consolidation_max_ms =
+                        consolidation_max_ms.max(step.elapsed().as_secs_f64() * 1000.);
+                    while db.cleanup_step(32)? != 0 {
+                        cleanup_calls += 1;
+                    }
+                }
+            }
         }
     }
     let load_ms = start.elapsed().as_secs_f64() * 1000.;
+    let run_count = db.run_count();
     let write_counts = write_metrics.snapshot();
     let load_rss = rss();
     drop(db);
@@ -184,6 +204,8 @@ fn main() -> Result<()> {
             "version":1,"rows":rows,"dimensions":128,"backend":"local_minio",
             "load_ms":load_ms,"load_peak_rss_bytes":load_rss,"seal_steps":seal_steps,
             "seal_step_max_ms":seal_max_ms,"cleanup_calls":cleanup_calls,
+            "consolidate":consolidate,"consolidation_steps":consolidation_steps,
+            "consolidation_max_ms":consolidation_max_ms,"run_count":run_count,
             "write_put":write_counts.put,"write_delete":write_counts.delete,
             "write_list":write_counts.list,"write_get":write_counts.get,
             "write_uploaded_bytes":write_counts.request_body_bytes,
