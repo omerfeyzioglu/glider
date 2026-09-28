@@ -710,7 +710,7 @@ Done when:
 The target is a durable, low-cost, fast object-storage-native vector engine,
 with bounded RAM and NVMe caching before multiple machines. Small tests verify
 invariants and isolate causes; fitting a small resident corpus is not the goal.
-M21 has a local measurement and layout decision awaiting PR CI; M22–M24 are
+M21 has a merged measurement and layout decision; M22–M24 are
 planned, not implemented. Preserve M1–M20 evidence and scope limits.
 Do not import another engine or copy a reference architecture without a separate
 justified decision. Independent read/write arrivals, working-set size and object
@@ -718,8 +718,9 @@ costs must drive prioritization rather than feature count.
 
 ## M21 — Establish the large-data workload and cost decision
 
-Status: local measurement and layout decision recorded in
-[benchmarks/M21.md](benchmarks/M21.md); PR CI pending. The independent-arrival
+Status: accepted after [PR #54 CI](https://github.com/omerfeyzioglu/glider/actions/runs/36412910918)
+passed. Measurement and layout decision are recorded in
+[benchmarks/M21.md](benchmarks/M21.md). The independent-arrival
 10,000-row run breached the 75 ms write-queue p95 gate at 99.921 ms.
 
 Steps:
@@ -745,9 +746,11 @@ larger-than-RAM requirement.
 
 ## M22 — Bound segment publication and maintenance work
 
-Status: planned; M21 selected addressable base blocks and bounded sorted delta
-runs with vector-partition summaries, jointly with M23's selective-read/cache
-requirements. Persisted formats and publication protocol remain to be designed.
+Status: in progress; M21 selected addressable base blocks and bounded sorted
+delta runs with vector-partition summaries, jointly with M23's selective-read
+and cache requirements. The range-read contract and packed-block design are in
+[benchmarks/M22.md](benchmarks/M22.md); segmented publication and acceptance
+remain pending.
 
 Steps:
 - Compare incrementally reusable segments with bounded sorted delta segments;

@@ -16,6 +16,31 @@ use std::{
 /// is an error, never an excuse to serve a partially recovered database.
 pub trait ObjectStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    /// Read a bounded payload slice from an immutable object. The caller must
+    /// authenticate the returned slice against a committed block digest. The
+    /// expected complete payload length binds this slice to the named object;
+    /// unlike `get`, a range read does not validate the whole-object checksum.
+    fn get_range(
+        &self,
+        key: &str,
+        offset: usize,
+        length: usize,
+        expected_payload_len: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| Error::Invalid("range overflow".into()))?;
+        if length == 0 || end > expected_payload_len {
+            return Err(Error::Invalid("range outside expected payload".into()));
+        }
+        let Some(bytes) = self.get(key)? else {
+            return Ok(None);
+        };
+        if bytes.len() != expected_payload_len {
+            return Err(Error::Corrupt(format!("object length mismatch: {key}")));
+        }
+        Ok(Some(bytes[offset..end].to_vec()))
+    }
     fn list(&self) -> Result<Vec<String>>;
     fn create(&mut self, key: &str, value: &[u8]) -> Result<()>;
     /// Durably remove an object; absence is success. Errors may have removed it.

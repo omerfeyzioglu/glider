@@ -17,6 +17,33 @@ fn config() -> Config {
 
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_addressable_payload_range_checks_length_and_bounds() {
+    let mut store = minio("addressable-range");
+    let body: Vec<u8> = (0..1_048_576).map(|n| ((n * 17) % 251) as u8).collect();
+    store.create("block-object", &body).unwrap();
+    let metrics = store.metrics();
+    let before = metrics.snapshot();
+    assert_eq!(
+        store
+            .get_range("block-object", 262_144, 131_072, body.len())
+            .unwrap(),
+        Some(body[262_144..393_216].to_vec())
+    );
+    assert_eq!(metrics.snapshot().get - before.get, 1);
+    assert_eq!(store.get_range("missing", 0, 1, body.len()).unwrap(), None);
+    assert!(matches!(
+        store.get_range("block-object", 0, 1, body.len() - 1),
+        Err(crate::Error::Corrupt(_))
+    ));
+    let before = metrics.snapshot();
+    assert!(store
+        .get_range("block-object", body.len(), 1, body.len())
+        .is_err());
+    assert_eq!(metrics.snapshot(), before);
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_bounded_open_rejects_inventory_before_loading_snapshot() {
     let namespace = "bounded-open";
     let cfg = Config {

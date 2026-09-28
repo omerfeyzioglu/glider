@@ -147,6 +147,16 @@ impl<S: ObjectStore> ObjectStore for OwnedStore<S> {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.inner.get(key)
     }
+    fn get_range(
+        &self,
+        key: &str,
+        offset: usize,
+        length: usize,
+        expected_payload_len: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        self.inner
+            .get_range(key, offset, length, expected_payload_len)
+    }
     fn list(&self) -> Result<Vec<String>> {
         Ok(self
             .inner
