@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Run S3 integration tests in an isolated, disposable MinIO container."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import secrets
 
 # The legacy Quay repository no longer permits anonymous pulls. This digest
@@ -20,11 +22,22 @@ def main():
     parser.add_argument("--compaction-benchmarks", type=Path, help="save local/S3 checkpoint recovery measurements before and after compaction in a new directory")
     parser.add_argument("--search-smoke", type=Path, help="validate the M5 search matrix against the disposable MinIO service")
     parser.add_argument("--range-only", action="store_true", help="run only the M22 addressable-range integration test")
+    parser.add_argument("--segmented-only", action="store_true", help="run only the M22 segmented publication recovery test")
+    parser.add_argument("--segmented-capacity", type=Path, help="save one experimental segmented SIFT1M load/recovery probe")
+    parser.add_argument("--data", type=Path, help="directory containing verified SIFT1M prefix and query files")
     args = parser.parse_args()
     range_only = args.range_only
-    if range_only and any((args.benchmark_smoke, args.segment_benchmarks,
-                           args.compaction_benchmarks, args.search_smoke)):
-        parser.error("--range-only cannot be combined with benchmark outputs")
+    segmented_only = args.segmented_only
+    capacity = args.segmented_capacity
+    targeted = sum((range_only, segmented_only, capacity is not None))
+    if targeted > 1 or (targeted and any((
+            args.benchmark_smoke, args.segment_benchmarks,
+            args.compaction_benchmarks, args.search_smoke))):
+        parser.error("targeted M22 tests cannot be combined with other modes")
+    if capacity and not args.data:
+        parser.error("--segmented-capacity requires --data")
+    if args.data and not capacity:
+        parser.error("--data requires --segmented-capacity")
     search_output = args.search_smoke
     compaction_output = args.compaction_benchmarks
     if compaction_output:
@@ -39,8 +52,24 @@ def main():
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
-    run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
-    if not range_only:
+    if capacity:
+        expected = {
+            "sift1m_base_250000.fvecs": "fab6b3f6c68d8bca09c72b0ee84a8126b80aebc635765fb52c0ab3efbda51960",
+            "sift1m_query.fvecs": "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc",
+        }
+        for filename, digest in expected.items():
+            hasher = hashlib.sha256()
+            with (args.data / filename).open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    hasher.update(chunk)
+            if hasher.hexdigest() != digest:
+                raise ValueError(f"unexpected SIFT1M digest: {filename}")
+        run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
+            "--example", "m22_capacity", env=env)
+        capacity.mkdir(parents=True, exist_ok=False)
+    else:
+        run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
+    if not (range_only or segmented_only or capacity):
         run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
@@ -56,21 +85,49 @@ def main():
         env.update(AWS_ACCESS_KEY_ID=env["MINIO_ROOT_USER"],
                    AWS_SECRET_ACCESS_KEY=env["MINIO_ROOT_PASSWORD"],
                    GLIDER_S3_ENDPOINT=endpoint, GLIDER_S3_BUCKET="glider-test")
-        args = ("cargo", "test", "--locked", "--features", "s3", "--lib")
+        test_args = ("cargo", "test", "--locked", "--features", "s3", "--lib")
         if range_only:
-            run(*args, "store::s3::tests::minio_addressable_payload_range_checks_length_and_bounds",
+            run(*test_args, "store::s3::tests::minio_addressable_payload_range_checks_length_and_bounds",
                 "--", "--ignored", "--nocapture", env=env)
             print("M22 addressable-range MinIO test passed.", flush=True)
             return
-        run(*args, "store::s3::tests::minio_", "--", "--ignored", "--nocapture", env=env)
-        run(*args, "store::s3::tests::server_restart_prepare", "--", "--ignored", env=env)
+        if segmented_only:
+            run(*test_args, "segmented::tests::minio_segmented_publication_recovers_before_and_after_root_create",
+                "--", "--ignored", "--nocapture", env=env)
+            print("M22 segmented publication MinIO recovery test passed.", flush=True)
+            return
+        if capacity:
+            namespace = "segmented-capacity-" + secrets.token_hex(6)
+            raw = run("target/release/examples/m22_capacity",
+                str(args.data / "sift1m_base_250000.fvecs"),
+                str(args.data / "sift1m_query.fvecs"), "250000", namespace,
+                env=env, capture=True, timeout=1800)
+            result = json.loads(raw)
+            if result["rows"] != 250000 or not result["exact_oracle_passed"]:
+                raise ValueError("segmented capacity probe did not verify")
+            result["dataset_sha256"] = expected
+            result["minio_image"] = IMAGE
+            result["environment"] = platform.platform()
+            result["hardware"] = (run("sysctl", "-n", "machdep.cpu.brand_string", capture=True).strip()
+                                  if platform.system() == "Darwin" else platform.processor())
+            result["rustc"] = run("rustc", "--version", capture=True).strip()
+            result["docker_server_version"] = run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip()
+            with (capacity / "run.json").open("x") as output_file:
+                json.dump(result, output_file, indent=2, sort_keys=True)
+                output_file.write("\n")
+            print(f"M22 experimental capacity probe saved to {capacity / 'run.json'}.", flush=True)
+            return
+        run(*test_args, "segmented::tests::minio_segmented_publication_recovers_before_and_after_root_create",
+            "--", "--ignored", "--nocapture", env=env)
+        run(*test_args, "store::s3::tests::minio_", "--", "--ignored", "--nocapture", env=env)
+        run(*test_args, "store::s3::tests::server_restart_prepare", "--", "--ignored", env=env)
         run("docker", "kill", "--signal", "KILL", name, capture=True)
         run("docker", "start", name, capture=True)
         # Docker may assign another ephemeral host port when starting again.
         port = run("docker", "port", name, "9000/tcp", capture=True).strip().split(":")[-1]
         env["GLIDER_S3_ENDPOINT"] = "http://127.0.0.1:" + port
         ready(env["GLIDER_S3_ENDPOINT"], name)
-        run(*args, "store::s3::tests::server_restart_verify", "--", "--ignored", env=env)
+        run(*test_args, "store::s3::tests::server_restart_verify", "--", "--ignored", env=env)
         env.update(GLIDER_S3_REGION="us-east-1", GLIDER_S3_NAMESPACE="failure-matrix")
         run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix",
             "s3_process_crash_matrix", "--", "--ignored", "--nocapture", env=env)

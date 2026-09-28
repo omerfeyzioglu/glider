@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+experimental-segmented = []
 s3 = ["dep:object_store", "dep:tokio", "dep:futures", "dep:async-trait"]
 
 [dependencies]
@@ -41,3 +42,7 @@ required-features = ["s3"]
 [[example]]
 name = "m19_capacity"
 required-features = ["s3"]
+
+[[example]]
+name = "m22_capacity"
+required-features = ["s3", "experimental-segmented"]
