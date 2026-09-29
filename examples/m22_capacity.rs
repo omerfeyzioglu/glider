@@ -2,7 +2,10 @@
 use glider::{
     retry::{Request, RequestId},
     segmented::SegmentedDatabase,
-    store::s3::{AmazonS3Builder, ReadLimits, S3Store},
+    store::{
+        s3::{AmazonS3Builder, ReadLimits, S3Store},
+        ObjectStore,
+    },
     Config, Metric, Mutation, Neighbor,
 };
 use serde_json::json;
@@ -10,7 +13,7 @@ use std::{
     collections::BTreeMap,
     env,
     fs::File,
-    io::{BufReader, Read},
+    io::{BufReader, Read, Seek, SeekFrom},
     time::Instant,
 };
 
@@ -61,11 +64,23 @@ fn rss() -> u64 {
     }
 }
 
-fn top10(data_path: &str, rows: usize, query: &[f32]) -> Result<Vec<Neighbor>> {
+fn top10(
+    data_path: &str,
+    rows: usize,
+    query: &[f32],
+    overwrite_half: bool,
+) -> Result<Vec<Neighbor>> {
     let mut input = BufReader::new(File::open(data_path)?);
+    let mut replacements = BufReader::new(File::open(data_path)?);
     let mut best = Vec::new();
     for id in 0..rows {
-        let vector = row(&mut input)?;
+        let original = row(&mut input)?;
+        let vector = if overwrite_half && id.is_multiple_of(2) {
+            replacements.seek(SeekFrom::Start((((id + 137) % rows) * 516) as u64))?;
+            row(&mut replacements)?
+        } else {
+            original
+        };
         let distance: f64 = query
             .iter()
             .zip(vector)
@@ -86,15 +101,21 @@ fn top10(data_path: &str, rows: usize, query: &[f32]) -> Result<Vec<Neighbor>> {
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().collect();
-    if !(args.len() == 5 || (args.len() == 6 && args[5] == "--consolidate")) {
-        return Err(
-            "usage: m22_capacity BASE.fvecs QUERY.fvecs ROWS NAMESPACE [--consolidate]".into(),
-        );
+    if args.len() < 5 || args.len() > 8 {
+        return Err("usage: m22_capacity BASE.fvecs QUERY.fvecs ROWS NAMESPACE [--consolidate] [--overwrite-half] [--reclaim-packs]".into());
     }
-    let consolidate = args.len() == 6;
+    let consolidate = args.iter().any(|arg| arg == "--consolidate");
+    let overwrite_half = args.iter().any(|arg| arg == "--overwrite-half");
+    let reclaim_packs = args.iter().any(|arg| arg == "--reclaim-packs");
+    if (overwrite_half && !consolidate) || (reclaim_packs && !overwrite_half) {
+        return Err("overwrite requires consolidation; reclamation requires overwrite".into());
+    }
     let rows: usize = args[3].parse()?;
     if rows == 0 || !rows.is_multiple_of(100) {
         return Err("rows must be a positive multiple of 100".into());
+    }
+    if overwrite_half && !rows.is_multiple_of(200) {
+        return Err("half overwrite requires a multiple of 200 rows".into());
     }
     let config = Config {
         dimensions: 128,
@@ -112,6 +133,8 @@ fn main() -> Result<()> {
     let mut cleanup_calls = 0;
     let mut consolidation_steps = 0;
     let mut consolidation_max_ms = 0_f64;
+    let mut reclamation_steps = 0;
+    let mut reclamation_max_ms = 0_f64;
     let start = Instant::now();
     for batch in 0..rows / 100 {
         let mutations = (0..100)
@@ -174,11 +197,106 @@ fn main() -> Result<()> {
             }
         }
     }
+    if overwrite_half {
+        let mut replacement_file = BufReader::new(File::open(&args[1])?);
+        for batch in 0..rows / 200 {
+            let mutations = (0..100)
+                .map(|offset| {
+                    let id = 2 * (batch * 100 + offset);
+                    replacement_file.seek(SeekFrom::Start((((id + 137) % rows) * 516) as u64))?;
+                    let vector = row(&mut replacement_file)?;
+                    if samples.contains_key(&(id as u64)) {
+                        samples.insert(id as u64, vector.clone());
+                    }
+                    let metadata = if id.is_multiple_of(100) {
+                        BTreeMap::from([("cohort".into(), "one-percent".into())])
+                    } else {
+                        BTreeMap::new()
+                    };
+                    Ok(Mutation::Put {
+                        id: id as u64,
+                        vector,
+                        metadata,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let sequence = rows / 100 + batch + 1;
+            let outcome = db.apply_request(Request {
+                id: RequestId {
+                    boundary: (sequence - 1) as u64,
+                    nonce: (sequence as u128).to_le_bytes(),
+                },
+                conditions: Vec::new(),
+                mutations,
+            })?;
+            if outcome.sequence != sequence as u64 {
+                return Err("unexpected overwrite sequence".into());
+            }
+            if (batch + 1).is_multiple_of(64) || batch + 1 == rows / 200 {
+                db.start_seal()?;
+                while {
+                    let step = Instant::now();
+                    let progressed = db.seal_step()?;
+                    if progressed {
+                        seal_steps += 1;
+                        seal_max_ms = seal_max_ms.max(step.elapsed().as_secs_f64() * 1000.);
+                    }
+                    progressed
+                } {}
+                while db.cleanup_step(32)? != 0 {
+                    cleanup_calls += 1;
+                }
+                loop {
+                    let step = Instant::now();
+                    if !db.consolidate_runs_step()? {
+                        break;
+                    }
+                    consolidation_steps += 1;
+                    consolidation_max_ms =
+                        consolidation_max_ms.max(step.elapsed().as_secs_f64() * 1000.);
+                    while db.cleanup_step(32)? != 0 {
+                        cleanup_calls += 1;
+                    }
+                }
+                if reclaim_packs {
+                    loop {
+                        if !db.start_reclaim()? {
+                            break;
+                        }
+                        loop {
+                            let step = Instant::now();
+                            if !db.reclaim_step()? {
+                                break;
+                            }
+                            reclamation_steps += 1;
+                            reclamation_max_ms =
+                                reclamation_max_ms.max(step.elapsed().as_secs_f64() * 1000.);
+                        }
+                        while db.cleanup_step(32)? != 0 {
+                            cleanup_calls += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
     let load_ms = start.elapsed().as_secs_f64() * 1000.;
     let run_count = db.run_count();
     let write_counts = write_metrics.snapshot();
     let load_rss = rss();
     drop(db);
+    let audit_store = store(&args[4])?;
+    let audit_metrics = audit_store.metrics();
+    let keys = audit_store.list()?;
+    let mut visible_payload_bytes = 0_u64;
+    for key in &keys {
+        visible_payload_bytes += audit_store
+            .get(key)?
+            .ok_or("listed segmented object missing during audit")?
+            .len() as u64;
+    }
+    let audit_counts = audit_metrics.snapshot();
+    drop(audit_store);
     let second_store = store(&args[4])?;
     let reopen_metrics = second_store.metrics();
     let start = Instant::now();
@@ -194,7 +312,7 @@ fn main() -> Result<()> {
     let actual = reopened.search_exact(&query, 10, &[])?;
     let exact_ms = start.elapsed().as_secs_f64() * 1000.;
     let exact_counts = reopen_metrics.snapshot();
-    let oracle = top10(&args[1], rows, &query)?;
+    let oracle = top10(&args[1], rows, &query, overwrite_half)?;
     if actual != oracle {
         return Err("segmented exact result disagrees with independent oracle".into());
     }
@@ -206,6 +324,10 @@ fn main() -> Result<()> {
             "seal_step_max_ms":seal_max_ms,"cleanup_calls":cleanup_calls,
             "consolidate":consolidate,"consolidation_steps":consolidation_steps,
             "consolidation_max_ms":consolidation_max_ms,"run_count":run_count,
+            "overwrite_half":overwrite_half,"reclaim_packs":reclaim_packs,
+            "reclamation_steps":reclamation_steps,"reclamation_max_ms":reclamation_max_ms,
+            "visible_payload_bytes":visible_payload_bytes,"visible_objects":keys.len(),
+            "audit_get":audit_counts.get,"audit_list":audit_counts.list,
             "write_put":write_counts.put,"write_delete":write_counts.delete,
             "write_list":write_counts.list,"write_get":write_counts.get,
             "write_uploaded_bytes":write_counts.request_body_bytes,

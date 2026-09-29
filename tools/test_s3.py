@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--segmented-capacity", type=Path, help="save one experimental segmented SIFT1M load/recovery probe")
     parser.add_argument("--data", type=Path, help="directory containing verified SIFT1M prefix and query files")
     parser.add_argument("--consolidate-runs", action="store_true", help="enable bounded run-index consolidation in the capacity probe")
+    parser.add_argument("--overwrite-half", action="store_true", help="overwrite even IDs once after the capacity load")
+    parser.add_argument("--reclaim-packs", action="store_true", help="reclaim stale physical packs during the overwrite probe")
     args = parser.parse_args()
     range_only = args.range_only
     segmented_only = args.segmented_only
@@ -41,6 +43,10 @@ def main():
         parser.error("--data requires --segmented-capacity")
     if args.consolidate_runs and not capacity:
         parser.error("--consolidate-runs requires --segmented-capacity")
+    if args.overwrite_half and not args.consolidate_runs:
+        parser.error("--overwrite-half requires --consolidate-runs")
+    if args.reclaim_packs and not args.overwrite_half:
+        parser.error("--reclaim-packs requires --overwrite-half")
     search_output = args.search_smoke
     compaction_output = args.compaction_benchmarks
     if compaction_output:
@@ -106,6 +112,10 @@ def main():
                        str(args.data / "sift1m_query.fvecs"), "250000", namespace]
             if args.consolidate_runs:
                 command.append("--consolidate")
+            if args.overwrite_half:
+                command.append("--overwrite-half")
+            if args.reclaim_packs:
+                command.append("--reclaim-packs")
             raw = run(*command, env=env, capture=True, timeout=1800)
             result = json.loads(raw)
             if result["rows"] != 250000 or not result["exact_oracle_passed"]:
