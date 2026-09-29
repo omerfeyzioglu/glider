@@ -150,3 +150,16 @@ time while local queries stayed below 0.4 ms. This does not establish a provider
 internet-independent engine bottleneck, so it does not justify architectural
 optimization or changing local M17/M18 decisions. Cloud performance conclusions
 need a representative stable connection. [Evidence](../benchmarks/AWS_DIAGNOSTICS.md).
+
+## 2026-09-29 — Staged physical reclamation for segmented packs
+
+The experimental M22 layout originally coalesced ID indexes but retained
+mixed live/stale physical packs. On 250,000 SIFT1M rows followed by 125,000
+distinct overwrites, a synchronous repack saved 63.3 MB of visible payload but
+took up to 135 ms in one call. Reclamation now fixes a pack's live-ID snapshot,
+reads one block per step, then creates the replacement pack and root in separate
+steps. Later acknowledged logs can shadow that snapshot; seal and index
+consolidation wait for root publication. The same probe saved the same bytes
+with a 38.2 ms maximum step, at 970 extra GET and 137.3 MB extra upload versus
+no reclamation. Packs containing wholly dead blocks still need a separate
+index-remapping path. [Evidence](../benchmarks/M22.md).

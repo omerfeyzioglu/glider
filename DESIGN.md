@@ -186,8 +186,16 @@ immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
 requires reopen. It can coalesce adjacent small ID indexes through another root
 generation, reusing immutable blocks and dropping fully unreferenced packs.
-Mixed live/stale packs still require staged physical reclamation. It has no
-cache, selective search or production serving integration, so the
+For mixed live/stale packs, one reclamation plan freezes the latest IDs for a
+<=1 MiB pack, reads authenticated blocks one at a time, then writes a new pack
+and publishes a root in separate steps. Each referenced block must retain at
+least one record so run indexes remain valid; shadowed index entries need not
+still exist in physical blocks. New acknowledged logs may shadow retained
+records during staging, while seal and run consolidation wait for the root.
+The old pack remains authoritative until root publication; an interrupted
+attempt leaves an unreferenced pack for cleanup on reopen. Packs containing a
+fully dead block still require index remapping. It has no cache, selective
+search or production serving integration, so the
 larger-than-RAM target remains unaccepted. If maintenance overlaps writes, its
 generation boundary, backlog, memory, reclamation and crash behavior must be
 explicit. More background threads alone do not reduce total work.

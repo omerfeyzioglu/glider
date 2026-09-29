@@ -424,6 +424,21 @@ struct Location {
     entry: IndexEntry,
 }
 
+struct PackStats {
+    payload_len: usize,
+    estimated_live_bytes: usize,
+    locations: Vec<(usize, usize)>,
+    has_empty_block: bool,
+}
+
+struct ReclaimState {
+    locations: Vec<(usize, usize)>,
+    expected: Vec<BTreeMap<u64, (u64, bool)>>,
+    blocks: Vec<Block>,
+    key: String,
+    references: Option<Vec<BlockRef>>,
+}
+
 struct Ranked(Neighbor);
 impl PartialEq for Ranked {
     fn eq(&self, other: &Self) -> bool {
@@ -493,6 +508,7 @@ pub struct SegmentedDatabase<S> {
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
     seal: Option<SealState>,
+    reclaim: Option<ReclaimState>,
     poisoned: bool,
 }
 
@@ -612,6 +628,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             known_keys: listed,
             obsolete: VecDeque::new(),
             seal: None,
+            reclaim: None,
             poisoned: false,
         };
         for log_sequence in tail_logs {
@@ -889,7 +906,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() {
+        if self.seal.is_some() || self.reclaim.is_some() {
             return Err(Error::MaintenanceRequired);
         }
         if self.tail_objects == 0 {
@@ -1076,7 +1093,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() {
+        if self.seal.is_some() || self.reclaim.is_some() {
             return Err(Error::MaintenanceRequired);
         }
         let runs = &self.root.runs;
@@ -1190,6 +1207,186 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         });
         self.root = root;
         self.schedule_obsolete();
+        Ok(true)
+    }
+
+    /// Freeze one <=1 MiB pack for reclamation. The live set is fixed before
+    /// reading blocks; later acknowledged log writes may safely shadow it.
+    pub fn start_reclaim(&mut self) -> Result<bool> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        if self.seal.is_some() || self.reclaim.is_some() {
+            return Err(Error::MaintenanceRequired);
+        }
+        let mut live_counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for (&id, location) in &self.latest {
+            if !self.tail.contains_key(&id) {
+                *live_counts
+                    .entry((location.run, location.entry.block as usize))
+                    .or_default() += 1;
+            }
+        }
+        let mut packs: BTreeMap<String, PackStats> = BTreeMap::new();
+        for (run, run_ref) in self.root.runs.iter().enumerate() {
+            for (block, reference) in run_ref.blocks.iter().enumerate() {
+                let live = live_counts.get(&(run, block)).copied().unwrap_or(0);
+                if live > reference.rows {
+                    return Err(Error::Corrupt(
+                        "segmented block has more live IDs than records".into(),
+                    ));
+                }
+                let entry = packs.entry(reference.object.clone()).or_insert(PackStats {
+                    payload_len: reference.payload_len,
+                    estimated_live_bytes: 0,
+                    locations: Vec::new(),
+                    has_empty_block: false,
+                });
+                if entry.payload_len != reference.payload_len {
+                    return Err(Error::Corrupt(
+                        "segmented pack references disagree on length".into(),
+                    ));
+                }
+                entry.estimated_live_bytes +=
+                    ((reference.length as u128 * live as u128) / reference.rows as u128) as usize;
+                entry.locations.push((run, block));
+                entry.has_empty_block |= live == 0;
+            }
+        }
+        let candidate = packs
+            .into_iter()
+            .filter(|(_, pack)| {
+                !pack.has_empty_block
+                    && pack.estimated_live_bytes <= pack.payload_len / 2
+                    && pack.payload_len.saturating_sub(pack.estimated_live_bytes) >= 64 * 1024
+            })
+            .max_by(|(a_key, a), (b_key, b)| {
+                a.payload_len
+                    .saturating_sub(a.estimated_live_bytes)
+                    .cmp(&b.payload_len.saturating_sub(b.estimated_live_bytes))
+                    .then_with(|| b_key.cmp(a_key))
+            });
+        let Some((_, mut pack)) = candidate else {
+            return Ok(false);
+        };
+        pack.locations
+            .sort_by_key(|&(run, block)| self.root.runs[run].blocks[block].offset);
+        let mut expected_by_location: BTreeMap<_, BTreeMap<_, _>> = pack
+            .locations
+            .iter()
+            .copied()
+            .map(|location| (location, BTreeMap::new()))
+            .collect();
+        for (&id, location) in &self.latest {
+            if !self.tail.contains_key(&id) {
+                if let Some(expected) =
+                    expected_by_location.get_mut(&(location.run, location.entry.block as usize))
+                {
+                    expected.insert(id, (location.entry.sequence, location.entry.deleted));
+                }
+            }
+        }
+        let expected = pack
+            .locations
+            .iter()
+            .map(|location| {
+                expected_by_location
+                    .remove(location)
+                    .expect("location present")
+            })
+            .collect();
+        self.reclaim = Some(ReclaimState {
+            locations: pack.locations,
+            expected,
+            blocks: Vec::new(),
+            key: format!("sgpack-{}-00000000", attempt_id()?),
+            references: None,
+        });
+        Ok(true)
+    }
+
+    /// Advance reclamation by one block GET, pack PUT, or root PUT. Only the
+    /// root PUT changes authoritative visibility. An uncertain write poisons
+    /// this handle, and reopen determines whether publication happened.
+    pub fn reclaim_step(&mut self) -> Result<bool> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        let Some(mut state) = self.reclaim.take() else {
+            return Ok(false);
+        };
+        if state.references.is_none() && state.blocks.len() < state.locations.len() {
+            let ordinal = state.blocks.len();
+            let (run, block) = state.locations[ordinal];
+            let reference = &self.root.runs[run].blocks[block];
+            let old = match read_block(&self.store, self.config, reference) {
+                Ok(block) => block,
+                Err(error) => {
+                    self.reclaim = Some(state);
+                    return Err(error);
+                }
+            };
+            let expected = &state.expected[ordinal];
+            let records: Vec<_> = old
+                .records
+                .into_iter()
+                .filter(|record| {
+                    expected
+                        .get(&record.id())
+                        .is_some_and(|&(sequence, deleted)| {
+                            sequence == record.sequence
+                                && deleted == matches!(record.mutation, Mutation::Delete { .. })
+                        })
+                })
+                .collect();
+            if records.len() != expected.len() {
+                return Err(Error::Corrupt(
+                    "segmented live directory disagrees with physical block".into(),
+                ));
+            }
+            state
+                .blocks
+                .push(Block::new(self.config, old.partition, records)?);
+            self.reclaim = Some(state);
+            return Ok(true);
+        }
+        if state.references.is_none() {
+            let (bytes, references) = encode_pack(&state.key, self.config, &state.blocks)?;
+            self.poisoned = true;
+            self.create_staged(&state.key, &bytes)?;
+            self.poisoned = false;
+            state.references = Some(references);
+            state.blocks.clear();
+            state.expected.clear();
+            self.reclaim = Some(state);
+            return Ok(true);
+        }
+        let mut root = self.root.clone();
+        root.generation = root
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        for (index, &(run, block)) in state.locations.iter().enumerate() {
+            root.runs[run].blocks[block] = state.references.as_ref().unwrap()[index].clone();
+        }
+        root.validate(self.config)?;
+        let root_bytes = encode(&root)?;
+        self.poisoned = true;
+        self.create_staged(&root_key(root.generation), &root_bytes)?;
+        self.poisoned = false;
+        self.root = root;
+        self.schedule_obsolete();
+        Ok(true)
+    }
+
+    /// Synchronous convenience for callers without a maintenance scheduler.
+    pub fn reclaim_pack_step(&mut self) -> Result<bool> {
+        if !self.start_reclaim()? {
+            return Ok(false);
+        }
+        while self.reclaim.is_some() {
+            self.reclaim_step()?;
+        }
         Ok(true)
     }
 
@@ -1563,6 +1760,100 @@ mod tests {
         assert_eq!(db.root.runs.len(), 1);
     }
 
+    #[test]
+    fn reclaiming_a_mixed_pack_preserves_latest_rows_and_log_tail() {
+        let config = Config {
+            dimensions: 128,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        for batch in 0..4 {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary: batch,
+                    nonce: [batch as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: (0..100)
+                    .map(|offset| {
+                        let id = batch * 100 + offset;
+                        Mutation::Put {
+                            id,
+                            vector: vec![id as f32; 128],
+                            metadata: BTreeMap::new(),
+                        }
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        }
+        db.seal_delta().unwrap();
+        let old_pack = db.root.runs[0].blocks[0].object.clone();
+        for batch in 0..2 {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary: 4 + batch,
+                    nonce: [4 + batch as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: (0..100)
+                    .map(|offset| {
+                        let id = 2 * (batch * 100 + offset);
+                        Mutation::Put {
+                            id,
+                            vector: vec![1000. + id as f32; 128],
+                            metadata: BTreeMap::new(),
+                        }
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        }
+        assert!(db.start_reclaim().unwrap());
+        assert!(db.reclaim_step().unwrap());
+        assert!(matches!(db.start_seal(), Err(Error::MaintenanceRequired)));
+        assert!(matches!(
+            db.consolidate_runs_step(),
+            Err(Error::MaintenanceRequired)
+        ));
+        db.apply_request(retry::Request {
+            id: retry::RequestId {
+                boundary: 6,
+                nonce: [6; 16],
+            },
+            conditions: Vec::new(),
+            mutations: vec![Mutation::Put {
+                id: 1,
+                vector: vec![2001.; 128],
+                metadata: BTreeMap::new(),
+            }],
+        })
+        .unwrap();
+        while db.reclaim_step().unwrap() {}
+        assert!(!db.root.runs[0]
+            .blocks
+            .iter()
+            .any(|reference| reference.object == old_pack));
+        assert_eq!(db.root.sequence, 4);
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert_eq!(db.get(1).unwrap().unwrap().vector[0], 2001.);
+        while db.cleanup_step(8).unwrap() != 0 {}
+        assert!(!db.known_keys.contains(&old_pack));
+        drop(db);
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert_eq!(db.get(1).unwrap().unwrap().vector[0], 2001.);
+        assert_eq!(db.search_exact(&vec![2001.; 128], 1, &[]).unwrap()[0].id, 1);
+        db.seal_delta().unwrap();
+        while db.cleanup_step(8).unwrap() != 0 {}
+        drop(db);
+        let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert_eq!(db.get(1).unwrap().unwrap().vector[0], 2001.);
+    }
+
     #[cfg(feature = "s3")]
     #[test]
     #[ignore = "requires disposable MinIO from tools/test_s3.py"]
@@ -1791,5 +2082,99 @@ mod tests {
                 Err(Error::Corrupt(_))
             ));
         }
+
+        let reclaim_namespace = format!("segmented-{}-reclaim", u64::from_le_bytes(random));
+        let reclaim_store = || {
+            S3Store::open(
+                AmazonS3Builder::new()
+                    .with_bucket_name(std::env::var("GLIDER_S3_BUCKET").unwrap())
+                    .with_region("us-east-1")
+                    .with_access_key_id(std::env::var("AWS_ACCESS_KEY_ID").unwrap())
+                    .with_secret_access_key(std::env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+                    .with_endpoint(std::env::var("GLIDER_S3_ENDPOINT").unwrap())
+                    .with_allow_http(true),
+                &reclaim_namespace,
+            )
+            .unwrap()
+        };
+        let vector_config = Config {
+            dimensions: 128,
+            metric: Metric::SquaredEuclidean,
+        };
+        let mut base = SegmentedDatabase::open(reclaim_store(), vector_config).unwrap();
+        for batch in 0..4_u64 {
+            base.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary: batch,
+                    nonce: [batch as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: (0..100)
+                    .map(|offset| {
+                        let id = batch * 100 + offset;
+                        Mutation::Put {
+                            id,
+                            vector: vec![id as f32; 128],
+                            metadata: BTreeMap::new(),
+                        }
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        }
+        base.seal_delta().unwrap();
+        let old_pack = base.root.runs[0].blocks[0].object.clone();
+        drop(base);
+        let mut uncertain_reclaim = SegmentedDatabase::open(
+            UncertainCreate {
+                inner: reclaim_store(),
+                fail_prefix: "sgroot-00000000000000000002",
+                fired: false,
+                fail_remove_once: false,
+            },
+            vector_config,
+        )
+        .unwrap();
+        for batch in 0..2_u64 {
+            uncertain_reclaim
+                .apply_request(retry::Request {
+                    id: retry::RequestId {
+                        boundary: 4 + batch,
+                        nonce: [4 + batch as u8; 16],
+                    },
+                    conditions: Vec::new(),
+                    mutations: (0..100)
+                        .map(|offset| {
+                            let id = 2 * (batch * 100 + offset);
+                            Mutation::Put {
+                                id,
+                                vector: vec![1000. + id as f32; 128],
+                                metadata: BTreeMap::new(),
+                            }
+                        })
+                        .collect(),
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            uncertain_reclaim.reclaim_pack_step(),
+            Err(Error::Io(_))
+        ));
+        drop(uncertain_reclaim);
+        let mut recovered_reclaim =
+            SegmentedDatabase::open(reclaim_store(), vector_config).unwrap();
+        assert_eq!(recovered_reclaim.root.generation, 2);
+        assert_eq!(recovered_reclaim.root.sequence, 4);
+        assert_eq!(recovered_reclaim.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert_eq!(recovered_reclaim.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(
+            recovered_reclaim
+                .search_exact(&vec![1.; 128], 1, &[])
+                .unwrap()[0]
+                .id,
+            1
+        );
+        while recovered_reclaim.cleanup_step(8).unwrap() != 0 {}
+        assert!(!recovered_reclaim.known_keys.contains(&old_pack));
     }
 }
