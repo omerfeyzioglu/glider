@@ -439,6 +439,14 @@ struct ReclaimState {
     references: Option<Vec<BlockRef>>,
 }
 
+struct PruneState {
+    run: usize,
+    root: Root,
+    entries: Vec<IndexEntry>,
+    index: Option<(String, Vec<u8>)>,
+    index_published: bool,
+}
+
 struct Ranked(Neighbor);
 impl PartialEq for Ranked {
     fn eq(&self, other: &Self) -> bool {
@@ -509,6 +517,7 @@ pub struct SegmentedDatabase<S> {
     obsolete: VecDeque<String>,
     seal: Option<SealState>,
     reclaim: Option<ReclaimState>,
+    prune: Option<PruneState>,
     poisoned: bool,
 }
 
@@ -629,6 +638,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             obsolete: VecDeque::new(),
             seal: None,
             reclaim: None,
+            prune: None,
             poisoned: false,
         };
         for log_sequence in tail_logs {
@@ -906,7 +916,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() || self.reclaim.is_some() {
+        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
             return Err(Error::MaintenanceRequired);
         }
         if self.tail_objects == 0 {
@@ -1093,7 +1103,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() || self.reclaim.is_some() {
+        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
             return Err(Error::MaintenanceRequired);
         }
         let runs = &self.root.runs;
@@ -1210,13 +1220,150 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(true)
     }
 
+    /// Remove fully dead block references from one <=1 MiB index run. This
+    /// publishes a new index before a root and lets obsolete packs disappear
+    /// through ordinary cleanup. Mixed packs become eligible for repacking.
+    pub fn start_prune(&mut self) -> Result<bool> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
+            return Err(Error::MaintenanceRequired);
+        }
+        let mut live_counts: Vec<Vec<usize>> = self
+            .root
+            .runs
+            .iter()
+            .map(|run| vec![0; run.blocks.len()])
+            .collect();
+        for (&id, location) in &self.latest {
+            if !self.tail.contains_key(&id) {
+                *live_counts
+                    .get_mut(location.run)
+                    .and_then(|counts| counts.get_mut(location.entry.block as usize))
+                    .ok_or_else(|| Error::Corrupt("segmented directory block missing".into()))? +=
+                    1;
+            }
+        }
+        let Some(run) = self
+            .root
+            .runs
+            .iter()
+            .enumerate()
+            .find_map(|(run, reference)| {
+                (reference.index_len <= MAX_CONSOLIDATION_INDEX_BYTES
+                    && live_counts[run].contains(&0))
+                .then_some(run)
+            })
+        else {
+            return Ok(false);
+        };
+        let source = &self.root.runs[run];
+        let mut remap = vec![None; source.blocks.len()];
+        let mut blocks = Vec::new();
+        for (old, reference) in source.blocks.iter().enumerate() {
+            if live_counts[run][old] != 0 {
+                let ordinal = u32::try_from(blocks.len())
+                    .map_err(|_| Error::Invalid("segmented block count exhausted".into()))?;
+                remap[old] = Some(ordinal);
+                blocks.push(reference.clone());
+            }
+        }
+        let mut entries = Vec::new();
+        for (&id, location) in &self.latest {
+            if location.run == run && !self.tail.contains_key(&id) {
+                let mut entry = location.entry;
+                entry.block = remap[entry.block as usize]
+                    .ok_or_else(|| Error::Corrupt("live ID in dead segmented block".into()))?;
+                entries.push(entry);
+            }
+        }
+        let mut root = self.root.clone();
+        root.generation = root
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let index = if entries.is_empty() {
+            root.runs.remove(run);
+            None
+        } else {
+            let bytes = RunIndex {
+                sequence: source.last_sequence,
+                entries: entries.clone(),
+            }
+            .encode(source.first_sequence, blocks.len())?;
+            let key = format!("sgindex-{}", attempt_id()?);
+            root.runs[run].blocks = blocks;
+            root.runs[run].index_object = key.clone();
+            root.runs[run].index_len = bytes.len();
+            root.runs[run].index_sha256 = format!("{:x}", Sha256::digest(&bytes));
+            Some((key, bytes))
+        };
+        root.validate(self.config)?;
+        self.prune = Some(PruneState {
+            run,
+            root,
+            entries,
+            index_published: index.is_none(),
+            index,
+        });
+        Ok(true)
+    }
+
+    /// Advance one index PUT or root PUT. Writes may extend the log tail, but
+    /// the frozen root directory cannot change until this publication ends.
+    pub fn prune_step(&mut self) -> Result<bool> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        let Some(mut state) = self.prune.take() else {
+            return Ok(false);
+        };
+        if !state.index_published {
+            let (key, bytes) = state.index.as_ref().expect("index pending");
+            self.poisoned = true;
+            self.create_staged(key, bytes)?;
+            self.poisoned = false;
+            state.index_published = true;
+            state.index = None;
+            self.prune = Some(state);
+            return Ok(true);
+        }
+        self.poisoned = true;
+        self.create_staged(&root_key(state.root.generation), &encode(&state.root)?)?;
+        self.poisoned = false;
+        let removed = state.entries.is_empty();
+        self.latest.retain(|_, location| {
+            if location.run == state.run {
+                false
+            } else {
+                if removed && location.run > state.run {
+                    location.run -= 1;
+                }
+                true
+            }
+        });
+        for entry in state.entries {
+            self.latest.insert(
+                entry.id,
+                Location {
+                    run: state.run,
+                    entry,
+                },
+            );
+        }
+        self.root = state.root;
+        self.schedule_obsolete();
+        Ok(true)
+    }
+
     /// Freeze one <=1 MiB pack for reclamation. The live set is fixed before
     /// reading blocks; later acknowledged log writes may safely shadow it.
     pub fn start_reclaim(&mut self) -> Result<bool> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() || self.reclaim.is_some() {
+        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
             return Err(Error::MaintenanceRequired);
         }
         let mut live_counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
@@ -1854,6 +2001,119 @@ mod tests {
         assert_eq!(db.get(1).unwrap().unwrap().vector[0], 2001.);
     }
 
+    #[test]
+    fn pruning_dead_blocks_reclaims_mixed_pack_then_removes_empty_run() {
+        let config = Config {
+            dimensions: 128,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        for batch in 0..4_u64 {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary: batch,
+                    nonce: [batch as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: (batch * 100..(batch + 1) * 100)
+                    .map(|id| Mutation::Put {
+                        id,
+                        vector: vec![id as f32; 128],
+                        metadata: BTreeMap::new(),
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        }
+        db.seal_delta().unwrap();
+        assert_eq!(db.root.runs.len(), 1);
+        assert!(db.root.runs[0].blocks.len() >= 2);
+        let initial_blocks = db.root.runs[0].blocks.len();
+        let dead_through = db.root.runs[0].blocks[initial_blocks - 2].last_id;
+        let old_pack = db.root.runs[0].blocks[0].object.clone();
+        assert_eq!(db.root.runs[0].blocks[1].object, old_pack);
+        let mut boundary = 4_u64;
+        for chunk in (0..=dead_through).collect::<Vec<_>>().chunks(100) {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary,
+                    nonce: [boundary as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: chunk
+                    .iter()
+                    .map(|&id| Mutation::Put {
+                        id,
+                        vector: vec![1000. + id as f32; 128],
+                        metadata: BTreeMap::new(),
+                    })
+                    .collect(),
+            })
+            .unwrap();
+            boundary += 1;
+        }
+        assert!(!db.start_reclaim().unwrap());
+        assert!(db.start_prune().unwrap());
+        assert!(db.prune_step().unwrap());
+        assert!(matches!(db.start_seal(), Err(Error::MaintenanceRequired)));
+        db.apply_request(retry::Request {
+            id: retry::RequestId {
+                boundary,
+                nonce: [boundary as u8; 16],
+            },
+            conditions: Vec::new(),
+            mutations: vec![Mutation::Put {
+                id: dead_through + 1,
+                vector: vec![2000.; 128],
+                metadata: BTreeMap::new(),
+            }],
+        })
+        .unwrap();
+        boundary += 1;
+        assert!(db.prune_step().unwrap());
+        assert!(!db.prune_step().unwrap());
+        assert_eq!(db.root.runs[0].blocks.len(), 1);
+        assert!(db.reclaim_pack_step().unwrap());
+        while db.cleanup_step(8).unwrap() != 0 {}
+        assert!(!db.known_keys.contains(&old_pack));
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert_eq!(db.get(dead_through + 1).unwrap().unwrap().vector[0], 2000.);
+        drop(db);
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert_eq!(db.get(dead_through + 1).unwrap().unwrap().vector[0], 2000.);
+        for chunk in (dead_through + 1..400).collect::<Vec<_>>().chunks(100) {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary,
+                    nonce: [boundary as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: chunk.iter().map(|&id| Mutation::Delete { id }).collect(),
+            })
+            .unwrap();
+            boundary += 1;
+        }
+        assert!(db.start_prune().unwrap());
+        assert!(db.prune_step().unwrap());
+        assert_eq!(db.run_count(), 0);
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert!(db.get(dead_through + 1).unwrap().is_none());
+        while db.cleanup_step(8).unwrap() != 0 {}
+        drop(db);
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        assert_eq!(db.run_count(), 0);
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert!(db.get(dead_through + 1).unwrap().is_none());
+        db.seal_delta().unwrap();
+        drop(db);
+        let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 1000.);
+        assert!(db.get(dead_through + 1).unwrap().is_none());
+    }
+
     #[cfg(feature = "s3")]
     #[test]
     #[ignore = "requires disposable MinIO from tools/test_s3.py"]
@@ -2176,5 +2436,106 @@ mod tests {
         );
         while recovered_reclaim.cleanup_step(8).unwrap() != 0 {}
         assert!(!recovered_reclaim.known_keys.contains(&old_pack));
+
+        for fail_prefix in ["sgindex-", "sgroot-00000000000000000002"] {
+            let namespace = format!(
+                "segmented-{}-prune-{fail_prefix}",
+                u64::from_le_bytes(random)
+            );
+            let prune_store = || {
+                S3Store::open(
+                    AmazonS3Builder::new()
+                        .with_bucket_name(std::env::var("GLIDER_S3_BUCKET").unwrap())
+                        .with_region("us-east-1")
+                        .with_access_key_id(std::env::var("AWS_ACCESS_KEY_ID").unwrap())
+                        .with_secret_access_key(std::env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+                        .with_endpoint(std::env::var("GLIDER_S3_ENDPOINT").unwrap())
+                        .with_allow_http(true),
+                    &namespace,
+                )
+                .unwrap()
+            };
+            let mut base = SegmentedDatabase::open(prune_store(), vector_config).unwrap();
+            for batch in 0..4_u64 {
+                base.apply_request(retry::Request {
+                    id: retry::RequestId {
+                        boundary: batch,
+                        nonce: [batch as u8; 16],
+                    },
+                    conditions: Vec::new(),
+                    mutations: (batch * 100..(batch + 1) * 100)
+                        .map(|id| Mutation::Put {
+                            id,
+                            vector: vec![id as f32; 128],
+                            metadata: BTreeMap::new(),
+                        })
+                        .collect(),
+                })
+                .unwrap();
+            }
+            base.seal_delta().unwrap();
+            let blocks = &base.root.runs[0].blocks;
+            let dead_through = blocks[blocks.len() - 2].last_id;
+            drop(base);
+            let mut uncertain = SegmentedDatabase::open(
+                UncertainCreate {
+                    inner: prune_store(),
+                    fail_prefix,
+                    fired: false,
+                    fail_remove_once: false,
+                },
+                vector_config,
+            )
+            .unwrap();
+            for (batch, chunk) in (0..=dead_through)
+                .collect::<Vec<_>>()
+                .chunks(100)
+                .enumerate()
+            {
+                let boundary = 4 + batch as u64;
+                uncertain
+                    .apply_request(retry::Request {
+                        id: retry::RequestId {
+                            boundary,
+                            nonce: [boundary as u8; 16],
+                        },
+                        conditions: Vec::new(),
+                        mutations: chunk
+                            .iter()
+                            .map(|&id| Mutation::Put {
+                                id,
+                                vector: vec![1000. + id as f32; 128],
+                                metadata: BTreeMap::new(),
+                            })
+                            .collect(),
+                    })
+                    .unwrap();
+            }
+            assert!(uncertain.start_prune().unwrap());
+            if fail_prefix.starts_with("sgroot-") {
+                assert!(uncertain.prune_step().unwrap());
+            }
+            assert!(matches!(uncertain.prune_step(), Err(Error::Io(_))));
+            assert!(matches!(
+                uncertain.start_prune(),
+                Err(Error::RecoveryRequired)
+            ));
+            drop(uncertain);
+            let mut recovered = SegmentedDatabase::open(prune_store(), vector_config).unwrap();
+            assert_eq!(recovered.get(0).unwrap().unwrap().vector[0], 1000.);
+            assert_eq!(
+                recovered.get(dead_through + 1).unwrap().unwrap().vector[0],
+                (dead_through + 1) as f32
+            );
+            if fail_prefix == "sgindex-" {
+                assert_eq!(recovered.root.generation, 1);
+                assert!(recovered.start_prune().unwrap());
+                while recovered.prune_step().unwrap() {}
+            } else {
+                assert_eq!(recovered.root.generation, 2);
+            }
+            assert_eq!(recovered.root.runs[0].blocks.len(), 1);
+            while recovered.cleanup_step(8).unwrap() != 0 {}
+        }
     }
 }
