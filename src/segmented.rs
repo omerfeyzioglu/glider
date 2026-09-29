@@ -538,6 +538,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.root.runs.len()
     }
 
+    /// Diagnostic locator for an ID in the selected root. A newer log-tail
+    /// mutation shadows its root location and therefore returns no block.
+    pub fn current_block_of(&self, id: u64) -> Option<(usize, usize)> {
+        if self.tail.contains_key(&id) {
+            return None;
+        }
+        self.latest.get(&id).and_then(|location| {
+            (!location.entry.deleted).then_some((location.run, location.entry.block as usize))
+        })
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.root.runs.iter().map(|run| run.blocks.len()).sum()
+    }
+
     /// Attach a disposable block cache. The namespace still opens and recovers
     /// from the object store; the cache never participates in acknowledgement.
     pub fn with_block_cache(

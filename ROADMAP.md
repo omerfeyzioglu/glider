@@ -710,8 +710,9 @@ Done when:
 The target is a durable, low-cost, fast object-storage-native vector engine,
 with bounded RAM and NVMe caching before multiple machines. Small tests verify
 invariants and isolate causes; fitting a small resident corpus is not the goal.
-M21 has a merged measurement and layout decision; M22–M24 are
-planned, not implemented. Preserve M1–M20 evidence and scope limits.
+M21 has a merged measurement and layout decision. Experimental M22 and M23
+components and an M24 layout-feasibility probe exist, but their acceptance
+gates remain open. Preserve M1–M20 evidence and scope limits.
 Do not import another engine or copy a reference architecture without a separate
 justified decision. Independent read/write arrivals, working-set size and object
 costs must drive prioritization rather than feature count.
@@ -795,7 +796,10 @@ losing either cache changes performance only. No multi-node work is required.
 
 ## M24 — Selective retrieval and single-machine cost acceptance
 
-Status: planned; reuse validated M21–M23 evidence.
+Status: in progress. The [eight-block oracle bound](benchmarks/M24.md) shows
+that the current one-block-per-GET, ID-sorted reader cannot reach the M21 mean
+recall target with eight cold block fetches. A different selective layout and
+measured acceptance are pending; reuse validated M21–M23 evidence.
 
 Steps:
 - Evaluate selective filtering/ANN on addressable segments when required by the
