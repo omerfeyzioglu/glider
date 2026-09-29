@@ -195,4 +195,7 @@ blocks reaches only 0.855 unfiltered and 0.800 filtered mean recall@10 over
 not measured ANN recall or a general impossibility result for regrouped ranges.
 It directs selective-serving work toward a measured vector-aware or regrouped
 read layout while keeping root/log publication authoritative.
-[Evidence](../benchmarks/M24.md).
+A following offline probe found that 170-row vector-local groups and a scanned
+4-bit routing sketch can meet the static 200-query quality threshold, while
+block centroids alone cannot. It does not establish encoded byte, update,
+memory or latency acceptance. [Evidence](../benchmarks/M24.md).
