@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--data", type=Path, help="directory containing verified SIFT1M prefix and query files")
     parser.add_argument("--consolidate-runs", action="store_true", help="enable bounded run-index consolidation in the capacity probe")
     parser.add_argument("--overwrite-half", action="store_true", help="overwrite even IDs once after the capacity load")
+    parser.add_argument("--overwrite-prefix-half", action="store_true", help="overwrite the first half of IDs once after the capacity load")
+    parser.add_argument("--prune-dead", action="store_true", help="prune fully dead segmented block references")
     parser.add_argument("--reclaim-packs", action="store_true", help="reclaim stale physical packs during the overwrite probe")
     args = parser.parse_args()
     range_only = args.range_only
@@ -43,10 +45,14 @@ def main():
         parser.error("--data requires --segmented-capacity")
     if args.consolidate_runs and not capacity:
         parser.error("--consolidate-runs requires --segmented-capacity")
-    if args.overwrite_half and not args.consolidate_runs:
-        parser.error("--overwrite-half requires --consolidate-runs")
-    if args.reclaim_packs and not args.overwrite_half:
-        parser.error("--reclaim-packs requires --overwrite-half")
+    if args.overwrite_half and args.overwrite_prefix_half:
+        parser.error("choose one overwrite pattern")
+    if (args.overwrite_half or args.overwrite_prefix_half) and not args.consolidate_runs:
+        parser.error("overwrite requires --consolidate-runs")
+    if args.prune_dead and not args.overwrite_prefix_half:
+        parser.error("--prune-dead requires --overwrite-prefix-half")
+    if args.reclaim_packs and not (args.overwrite_half or args.overwrite_prefix_half):
+        parser.error("--reclaim-packs requires an overwrite pattern")
     search_output = args.search_smoke
     compaction_output = args.compaction_benchmarks
     if compaction_output:
@@ -114,6 +120,10 @@ def main():
                 command.append("--consolidate")
             if args.overwrite_half:
                 command.append("--overwrite-half")
+            if args.overwrite_prefix_half:
+                command.append("--overwrite-prefix-half")
+            if args.prune_dead:
+                command.append("--prune-dead")
             if args.reclaim_packs:
                 command.append("--reclaim-packs")
             raw = run(*command, env=env, capture=True, timeout=1800)

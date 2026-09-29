@@ -69,13 +69,20 @@ fn top10(
     rows: usize,
     query: &[f32],
     overwrite_half: bool,
+    overwrite_prefix: bool,
 ) -> Result<Vec<Neighbor>> {
     let mut input = BufReader::new(File::open(data_path)?);
     let mut replacements = BufReader::new(File::open(data_path)?);
     let mut best = Vec::new();
     for id in 0..rows {
         let original = row(&mut input)?;
-        let vector = if overwrite_half && id.is_multiple_of(2) {
+        let changed = overwrite_half
+            && (if overwrite_prefix {
+                id < rows / 2
+            } else {
+                id.is_multiple_of(2)
+            });
+        let vector = if changed {
             replacements.seek(SeekFrom::Start((((id + 137) % rows) * 516) as u64))?;
             row(&mut replacements)?
         } else {
@@ -101,14 +108,20 @@ fn top10(
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().collect();
-    if args.len() < 5 || args.len() > 8 {
-        return Err("usage: m22_capacity BASE.fvecs QUERY.fvecs ROWS NAMESPACE [--consolidate] [--overwrite-half] [--reclaim-packs]".into());
+    if args.len() < 5 || args.len() > 9 {
+        return Err("usage: m22_capacity BASE.fvecs QUERY.fvecs ROWS NAMESPACE [--consolidate] [--overwrite-half|--overwrite-prefix-half] [--prune-dead] [--reclaim-packs]".into());
     }
     let consolidate = args.iter().any(|arg| arg == "--consolidate");
-    let overwrite_half = args.iter().any(|arg| arg == "--overwrite-half");
+    let overwrite_prefix = args.iter().any(|arg| arg == "--overwrite-prefix-half");
+    let overwrite_half = overwrite_prefix || args.iter().any(|arg| arg == "--overwrite-half");
+    let prune_dead = args.iter().any(|arg| arg == "--prune-dead");
     let reclaim_packs = args.iter().any(|arg| arg == "--reclaim-packs");
-    if (overwrite_half && !consolidate) || (reclaim_packs && !overwrite_half) {
-        return Err("overwrite requires consolidation; reclamation requires overwrite".into());
+    if args.iter().any(|arg| arg == "--overwrite-half") && overwrite_prefix
+        || (overwrite_half && !consolidate)
+        || (reclaim_packs && !overwrite_half)
+        || (prune_dead && !overwrite_prefix)
+    {
+        return Err("invalid overwrite, pruning or reclamation combination".into());
     }
     let rows: usize = args[3].parse()?;
     if rows == 0 || !rows.is_multiple_of(100) {
@@ -135,6 +148,10 @@ fn main() -> Result<()> {
     let mut consolidation_max_ms = 0_f64;
     let mut reclamation_steps = 0;
     let mut reclamation_max_ms = 0_f64;
+    let mut reclamation_plans = 0;
+    let mut pruning_steps = 0;
+    let mut pruning_max_ms = 0_f64;
+    let mut pruning_plans = 0;
     let start = Instant::now();
     for batch in 0..rows / 100 {
         let mutations = (0..100)
@@ -202,7 +219,11 @@ fn main() -> Result<()> {
         for batch in 0..rows / 200 {
             let mutations = (0..100)
                 .map(|offset| {
-                    let id = 2 * (batch * 100 + offset);
+                    let id = if overwrite_prefix {
+                        batch * 100 + offset
+                    } else {
+                        2 * (batch * 100 + offset)
+                    };
                     replacement_file.seek(SeekFrom::Start((((id + 137) % rows) * 516) as u64))?;
                     let vector = row(&mut replacement_file)?;
                     if samples.contains_key(&(id as u64)) {
@@ -258,11 +279,40 @@ fn main() -> Result<()> {
                         cleanup_calls += 1;
                     }
                 }
-                if reclaim_packs {
+                if prune_dead {
                     loop {
-                        if !db.start_reclaim()? {
+                        let step = Instant::now();
+                        let started = db.start_prune()?;
+                        pruning_max_ms = pruning_max_ms.max(step.elapsed().as_secs_f64() * 1000.);
+                        if !started {
                             break;
                         }
+                        pruning_plans += 1;
+                        while {
+                            let step = Instant::now();
+                            let progressed = db.prune_step()?;
+                            if progressed {
+                                pruning_steps += 1;
+                                pruning_max_ms =
+                                    pruning_max_ms.max(step.elapsed().as_secs_f64() * 1000.);
+                            }
+                            progressed
+                        } {}
+                        while db.cleanup_step(32)? != 0 {
+                            cleanup_calls += 1;
+                        }
+                    }
+                }
+                if reclaim_packs {
+                    loop {
+                        let step = Instant::now();
+                        let started = db.start_reclaim()?;
+                        reclamation_max_ms =
+                            reclamation_max_ms.max(step.elapsed().as_secs_f64() * 1000.);
+                        if !started {
+                            break;
+                        }
+                        reclamation_plans += 1;
                         loop {
                             let step = Instant::now();
                             if !db.reclaim_step()? {
@@ -312,7 +362,7 @@ fn main() -> Result<()> {
     let actual = reopened.search_exact(&query, 10, &[])?;
     let exact_ms = start.elapsed().as_secs_f64() * 1000.;
     let exact_counts = reopen_metrics.snapshot();
-    let oracle = top10(&args[1], rows, &query, overwrite_half)?;
+    let oracle = top10(&args[1], rows, &query, overwrite_half, overwrite_prefix)?;
     if actual != oracle {
         return Err("segmented exact result disagrees with independent oracle".into());
     }
@@ -324,7 +374,10 @@ fn main() -> Result<()> {
             "seal_step_max_ms":seal_max_ms,"cleanup_calls":cleanup_calls,
             "consolidate":consolidate,"consolidation_steps":consolidation_steps,
             "consolidation_max_ms":consolidation_max_ms,"run_count":run_count,
-            "overwrite_half":overwrite_half,"reclaim_packs":reclaim_packs,
+            "overwrite_half":overwrite_half,"overwrite_prefix":overwrite_prefix,
+            "prune_dead":prune_dead,"pruning_plans":pruning_plans,
+            "pruning_steps":pruning_steps,"pruning_max_ms":pruning_max_ms,
+            "reclaim_packs":reclaim_packs,"reclamation_plans":reclamation_plans,
             "reclamation_steps":reclamation_steps,"reclamation_max_ms":reclamation_max_ms,
             "visible_payload_bytes":visible_payload_bytes,"visible_objects":keys.len(),
             "audit_get":audit_counts.get,"audit_list":audit_counts.list,

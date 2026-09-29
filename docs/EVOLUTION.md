@@ -163,3 +163,14 @@ consolidation wait for root publication. The same probe saved the same bytes
 with a 38.2 ms maximum step, at 970 extra GET and 137.3 MB extra upload versus
 no reclamation. Packs containing wholly dead blocks still need a separate
 index-remapping path. [Evidence](../benchmarks/M22.md).
+
+## 2026-09-29 — Prune fully dead segmented blocks
+
+A fully shadowed block kept its pack ineligible for the mixed-pack repacker.
+The experimental engine now reconstructs one bounded run index from the latest
+ID directory, omits dead block references, and publishes index then root in
+separate steps. A run with no live entries is removed; interrupted index/root
+publication recovers through the selected root and orphan cleanup. On a
+250,000-row prefix-overwrite probe, this cut visible payload by 86.3 MB for
+18.6 MB extra upload and a 17.1 ms maximum planner or publication call. The
+probe does not establish independent-load latency. [Evidence](../benchmarks/M22.md).

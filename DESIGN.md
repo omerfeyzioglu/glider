@@ -193,9 +193,13 @@ least one record so run indexes remain valid; shadowed index entries need not
 still exist in physical blocks. New acknowledged logs may shadow retained
 records during staging, while seal and run consolidation wait for the root.
 The old pack remains authoritative until root publication; an interrupted
-attempt leaves an unreferenced pack for cleanup on reopen. Packs containing a
-fully dead block still require index remapping. It has no cache, selective
-search or production serving integration, so the
+attempt leaves an unreferenced pack for cleanup on reopen. For a run index no
+larger than 1 MiB, a separate staged pruning plan removes references to fully
+dead blocks, remaps surviving block ordinals in a new index, then publishes one
+root. A completely dead run disappears. Logs may grow during this plan, but
+seal, run consolidation and repacking wait for its root; uncertain index or
+root creation requires reopen. Indexes above this size are not pruned yet.
+It has no cache, selective search or production serving integration, so the
 larger-than-RAM target remains unaccepted. If maintenance overlaps writes, its
 generation boundary, backlog, memory, reclamation and crash behavior must be
 explicit. More background threads alone do not reduce total work.
