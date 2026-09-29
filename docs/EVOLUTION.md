@@ -174,3 +174,15 @@ publication recovers through the selected root and orphan cleanup. On a
 250,000-row prefix-overwrite probe, this cut visible payload by 86.3 MB for
 18.6 MB extra upload and a 17.1 ms maximum planner or publication call. The
 probe does not establish independent-load latency. [Evidence](../benchmarks/M22.md).
+
+## 2026-09-29 — Disposable authenticated block cache
+
+The experimental segmented reader now caches only root-authenticated immutable
+block slices under byte-bounded RAM and NVMe budgets. A versioned identity
+includes the object key, range, full payload length and committed digest;
+missing or corrupt cache bytes refetch from the authoritative object store.
+Writes and recovery never depend on cache files. On the 250,000-row exact
+probe, a fresh process used 172.99 MB of NVMe cache and removed all 1,292
+query GETs, but still needed 1,005 ms to scan and decode every block. This
+measured limit directs the next work to selective retrieval rather than a
+larger cache. [Evidence](../benchmarks/M23.md).

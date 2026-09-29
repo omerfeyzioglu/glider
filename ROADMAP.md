@@ -772,7 +772,10 @@ rewrites. Report unavoidable compaction amplification rather than claiming none.
 
 ## M23 — Serve through bounded NVMe and RAM caches
 
-Status: planned; segment identity and read granularity coordinate with M22.
+Status: in progress. The opt-in experimental block cache and targeted
+250,000-row cold/warm/pressure evidence are in [benchmarks/M23.md](benchmarks/M23.md).
+Exact full-scan latency and GET counts fail the declared query gates; M24's
+selective retrieval and independent-load acceptance remain pending.
 
 Steps:
 - Open/read without loading every vector into RAM. Fetch addressable data on

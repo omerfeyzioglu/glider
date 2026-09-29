@@ -177,8 +177,8 @@ as the next layout to implement. A versioned root will name block identities,
 sequence and retry state; immutable mutation logs remain authoritative until a
 complete root covers them. Readers need a bounded latest-ID directory to hide
 stale base candidates and an exact path for quality checks. Block identity and
-digest will bind disposable RAM/NVMe cache entries to a pinned root. This is a
-target decision, not a claim that the layout or cache exists today. The measured
+digest bind disposable RAM/NVMe cache entries to a pinned root in the
+experimental namespace; production serving is not yet integrated. The measured
 10,000-row independent-arrival boundary and alternatives are in
 `benchmarks/M21.md`. The experimental `experimental-segmented` API defines
 metadata v2 and root/block/index/log v1 in a fresh namespace. It acknowledges
@@ -199,7 +199,15 @@ dead blocks, remaps surviving block ordinals in a new index, then publishes one
 root. A completely dead run disappears. Logs may grow during this plan, but
 seal, run consolidation and repacking wait for its root; uncertain index or
 root creation requires reopen. Indexes above this size are not pruned yet.
-It has no cache, selective search or production serving integration, so the
+The opt-in block cache reads through bounded RAM and a versioned local NVMe
+directory. Its key includes object, range, complete payload length and block
+digest; every hit is checked against the selected root before decoding.
+Missing or corrupt cache bytes trigger an authoritative range fetch. Opening
+rejects a missing selected pack, and corrupt bytes fetched from object storage
+fail closed. Cache bytes never acknowledge mutations or participate in root
+recovery. The in-process cache
+mutex bounds this experimental reader to one in-flight block fetch per handle.
+It has no selective search or production serving integration, so the
 larger-than-RAM target remains unaccepted. If maintenance overlaps writes, its
 generation boundary, backlog, memory, reclamation and crash behavior must be
 explicit. More background threads alone do not reduce total work.

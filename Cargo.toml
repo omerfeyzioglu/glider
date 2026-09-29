@@ -46,3 +46,7 @@ required-features = ["s3"]
 [[example]]
 name = "m22_capacity"
 required-features = ["s3", "experimental-segmented"]
+
+[[example]]
+name = "m23_cache"
+required-features = ["s3", "experimental-segmented"]
