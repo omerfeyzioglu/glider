@@ -186,3 +186,13 @@ probe, a fresh process used 172.99 MB of NVMe cache and removed all 1,292
 query GETs, but still needed 1,005 ms to scan and decode every block. This
 measured limit directs the next work to selective retrieval rather than a
 larger cache. [Evidence](../benchmarks/M23.md).
+
+## 2026-09-29 — ID-sorted block layout cannot meet the selective-read target
+
+On the 250,000-row SIFT1M root, an exact oracle given the best eight actual
+blocks reaches only 0.855 unfiltered and 0.800 filtered mean recall@10 over
+200 queries. This is a ceiling for the current one-block-per-GET read pattern,
+not measured ANN recall or a general impossibility result for regrouped ranges.
+It directs selective-serving work toward a measured vector-aware or regrouped
+read layout while keeping root/log publication authoritative.
+[Evidence](../benchmarks/M24.md).

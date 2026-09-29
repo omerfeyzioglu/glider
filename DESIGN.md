@@ -169,6 +169,16 @@ include metadata and in-flight reads, and eviction/cold starts must preserve
 logical results. The existing streaming reader is a useful baseline, not this
 completed serving/cache implementation.
 
+The ID-sorted authoritative runs are suitable for bounded changed-data writes,
+but their current one-block-per-GET read pattern is insufficient for the M21
+quality/request envelope: an oracle selecting the best eight committed blocks
+reaches only 0.855 unfiltered and 0.800 filtered mean recall@10 on 200 SIFT1M
+queries. Selective serving therefore needs a measured vector-aware read layout
+or another block grouping that passes both byte and request limits. Any derived
+candidate structure must bind to a committed generation, tolerate missing or
+corrupt derived data through explicit rebuild/failure semantics, and leave the
+root and logs authoritative. See `benchmarks/M24.md` for the bound and limits.
+
 The target write path retains explicit durable acknowledgement and recovery.
 Routine maintenance should rewrite affected bounded data, rather than the full
 collection at a fixed mutation count. M21 selects addressable immutable base
@@ -224,7 +234,8 @@ single-machine limit and explicit coordination semantics.
 [OpenData](https://github.com/opendata-oss/opendata) are references for economics
 and operating behavior. OpenData's SlateDB foundation is not an adoption decision
 for glider's owned storage engine. The next measurable stages are M21–M24 in
-`ROADMAP.md`; none of the target cache/segment behavior above is claimed implemented.
+`ROADMAP.md`; segmented publication and caching are experimental, while
+selective serving and the larger-than-RAM acceptance remain open.
 
 ### Target invariants
 
