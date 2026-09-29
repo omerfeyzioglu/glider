@@ -1,0 +1,140 @@
+{
+  "algorithm": "balanced recursive two-center cuts, three refinement rounds, tie by ID",
+  "dataset_sha256": {
+    "sift1m_base_250000.fvecs": "fab6b3f6c68d8bca09c72b0ee84a8126b80aebc635765fb52c0ab3efbda51960",
+    "sift1m_query.fvecs": "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc"
+  },
+  "dimensions": 128,
+  "elapsed_ms": 3540.5262080021203,
+  "environment": "macOS-26.6.2-arm64-arm-64bit",
+  "k": 10,
+  "max_blocks_selected": 8,
+  "max_rows_per_block": 170,
+  "numpy": "2.3.5",
+  "one_percent_filter": {
+    "blocks": 15,
+    "distinct_exact_blocks": {
+      "1": 33,
+      "2": 55,
+      "3": 66,
+      "4": 35,
+      "5": 9,
+      "6": 2
+    },
+    "max_rows_per_block": 167,
+    "min_rows_per_block": 166,
+    "nearest_eight_by_16_representatives": {
+      "fifth_percentile_recall_at_10": 1.0,
+      "mean_recall_at_10": 0.9995,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 0
+    },
+    "nearest_eight_by_8_representatives": {
+      "fifth_percentile_recall_at_10": 1.0,
+      "mean_recall_at_10": 0.9985,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 1
+    },
+    "nearest_eight_centroids": {
+      "fifth_percentile_recall_at_10": 1.0,
+      "mean_recall_at_10": 1.0,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 0
+    },
+    "oracle_eight_block": {
+      "fifth_percentile_recall_at_10": 1.0,
+      "mean_recall_at_10": 1.0,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 0
+    },
+    "quantized_4_bit_min_score": {
+      "bits_per_component": 4,
+      "fifth_percentile_recall_at_10": 1.0,
+      "max_abs_reconstruction_error": 5.799999237060547,
+      "mean_recall_at_10": 1.0,
+      "packed_code_bytes": 160000,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 0
+    },
+    "quantized_8_bit_min_score": {
+      "bits_per_component": 8,
+      "fifth_percentile_recall_at_10": 1.0,
+      "max_abs_reconstruction_error": 0.34117889404296875,
+      "mean_recall_at_10": 1.0,
+      "packed_code_bytes": 320000,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 0
+    },
+    "selected_rows_max": 1334,
+    "selected_rows_mean": 1333.215
+  },
+  "oracle_sha256": "b545e687c28abe8b79fb3db60af54a99813b2d27e0997338d54e26d14cb39e65",
+  "python": "3.12.14",
+  "queries": 200,
+  "representative_selection": "nearest centroid, then farthest from nearest selected representative",
+  "representative_vectors_per_block": 16,
+  "rows": 250000,
+  "source_sha256": "2f3f6f2ef1dbfe553bf165a1062ddec7dd22403699a3d38a69a019c59be4a1bf",
+  "unfiltered": {
+    "blocks": 1471,
+    "distinct_exact_blocks": {
+      "1": 2,
+      "2": 4,
+      "3": 7,
+      "4": 18,
+      "5": 30,
+      "6": 33,
+      "7": 39,
+      "8": 32,
+      "9": 32,
+      "10": 3
+    },
+    "max_rows_per_block": 170,
+    "min_rows_per_block": 169,
+    "nearest_eight_by_16_representatives": {
+      "fifth_percentile_recall_at_10": 0.1,
+      "mean_recall_at_10": 0.4835,
+      "queries_below_0_8": 159,
+      "queries_below_0_9": 176
+    },
+    "nearest_eight_by_8_representatives": {
+      "fifth_percentile_recall_at_10": 0.1,
+      "mean_recall_at_10": 0.4635,
+      "queries_below_0_8": 157,
+      "queries_below_0_9": 173
+    },
+    "nearest_eight_centroids": {
+      "fifth_percentile_recall_at_10": 0.1,
+      "mean_recall_at_10": 0.65,
+      "queries_below_0_8": 125,
+      "queries_below_0_9": 142
+    },
+    "oracle_eight_block": {
+      "fifth_percentile_recall_at_10": 0.9,
+      "mean_recall_at_10": 0.981,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 3
+    },
+    "quantized_4_bit_min_score": {
+      "bits_per_component": 4,
+      "fifth_percentile_recall_at_10": 0.8,
+      "max_abs_reconstruction_error": 7.0666656494140625,
+      "mean_recall_at_10": 0.945,
+      "packed_code_bytes": 16000000,
+      "queries_below_0_8": 9,
+      "queries_below_0_9": 32
+    },
+    "quantized_8_bit_min_score": {
+      "bits_per_component": 8,
+      "fifth_percentile_recall_at_10": 0.9,
+      "max_abs_reconstruction_error": 0.41568756103515625,
+      "mean_recall_at_10": 0.98,
+      "packed_code_bytes": 32000000,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 3
+    },
+    "selected_rows_max": 1360,
+    "selected_rows_mean": 1359.595
+  },
+  "version": 1
+}
