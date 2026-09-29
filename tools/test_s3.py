@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import secrets
+import tempfile
 
 # The legacy Quay repository no longer permits anonymous pulls. This digest
 # contains MinIO RELEASE.2025-10-15T17-29-55Z and mc for isolated CI tests.
@@ -24,6 +25,7 @@ def main():
     parser.add_argument("--range-only", action="store_true", help="run only the M22 addressable-range integration test")
     parser.add_argument("--segmented-only", action="store_true", help="run only the M22 segmented publication recovery test")
     parser.add_argument("--segmented-capacity", type=Path, help="save one experimental segmented SIFT1M load/recovery probe")
+    parser.add_argument("--segmented-cache", type=Path, help="save a targeted 250k-row segmented block-cache probe")
     parser.add_argument("--data", type=Path, help="directory containing verified SIFT1M prefix and query files")
     parser.add_argument("--consolidate-runs", action="store_true", help="enable bounded run-index consolidation in the capacity probe")
     parser.add_argument("--overwrite-half", action="store_true", help="overwrite even IDs once after the capacity load")
@@ -34,15 +36,16 @@ def main():
     range_only = args.range_only
     segmented_only = args.segmented_only
     capacity = args.segmented_capacity
-    targeted = sum((range_only, segmented_only, capacity is not None))
+    cache_probe = args.segmented_cache
+    targeted = sum((range_only, segmented_only, capacity is not None, cache_probe is not None))
     if targeted > 1 or (targeted and any((
             args.benchmark_smoke, args.segment_benchmarks,
             args.compaction_benchmarks, args.search_smoke))):
-        parser.error("targeted M22 tests cannot be combined with other modes")
-    if capacity and not args.data:
-        parser.error("--segmented-capacity requires --data")
-    if args.data and not capacity:
-        parser.error("--data requires --segmented-capacity")
+        parser.error("targeted segmented tests cannot be combined with other modes")
+    if (capacity or cache_probe) and not args.data:
+        parser.error("segmented probes require --data")
+    if args.data and not (capacity or cache_probe):
+        parser.error("--data requires a segmented probe")
     if args.consolidate_runs and not capacity:
         parser.error("--consolidate-runs requires --segmented-capacity")
     if args.overwrite_half and args.overwrite_prefix_half:
@@ -67,7 +70,7 @@ def main():
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
-    if capacity:
+    if capacity or cache_probe:
         expected = {
             "sift1m_base_250000.fvecs": "fab6b3f6c68d8bca09c72b0ee84a8126b80aebc635765fb52c0ab3efbda51960",
             "sift1m_query.fvecs": "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc",
@@ -81,10 +84,13 @@ def main():
                 raise ValueError(f"unexpected SIFT1M digest: {filename}")
         run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
             "--example", "m22_capacity", env=env)
-        capacity.mkdir(parents=True, exist_ok=False)
+        if cache_probe:
+            run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
+                "--example", "m23_cache", env=env)
+        (capacity or cache_probe).mkdir(parents=True, exist_ok=False)
     else:
         run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
-    if not (range_only or segmented_only or capacity):
+    if not (range_only or segmented_only or capacity or cache_probe):
         run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
@@ -111,12 +117,12 @@ def main():
                 "--", "--ignored", "--nocapture", env=env)
             print("M22 segmented publication MinIO recovery test passed.", flush=True)
             return
-        if capacity:
+        if capacity or cache_probe:
             namespace = "segmented-capacity-" + secrets.token_hex(6)
             command = ["target/release/examples/m22_capacity",
                        str(args.data / "sift1m_base_250000.fvecs"),
                        str(args.data / "sift1m_query.fvecs"), "250000", namespace]
-            if args.consolidate_runs:
+            if args.consolidate_runs or cache_probe:
                 command.append("--consolidate")
             if args.overwrite_half:
                 command.append("--overwrite-half")
@@ -130,6 +136,14 @@ def main():
             result = json.loads(raw)
             if result["rows"] != 250000 or not result["exact_oracle_passed"]:
                 raise ValueError("segmented capacity probe did not verify")
+            if cache_probe:
+                with tempfile.TemporaryDirectory(prefix="glider-m23-cache-") as cache_dir:
+                    cache = json.loads(run("target/release/examples/m23_cache",
+                                           str(args.data / "sift1m_query.fvecs"), namespace,
+                                           cache_dir, env=env, capture=True, timeout=1800))
+                if not cache["exact_results_equal"] or cache["exact_top10_ids"] != result["exact_top10_ids"]:
+                    raise ValueError("segmented cache probe disagrees with exact oracle")
+                result = {"load": result, "cache": cache}
             result["dataset_sha256"] = expected
             result["minio_image"] = IMAGE
             result["environment"] = platform.platform()
@@ -137,10 +151,11 @@ def main():
                                   if platform.system() == "Darwin" else platform.processor())
             result["rustc"] = run("rustc", "--version", capture=True).strip()
             result["docker_server_version"] = run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip()
-            with (capacity / "run.json").open("x") as output_file:
+            output_path = (capacity or cache_probe) / "run.json"
+            with output_path.open("x") as output_file:
                 json.dump(result, output_file, indent=2, sort_keys=True)
                 output_file.write("\n")
-            print(f"M22 experimental capacity probe saved to {capacity / 'run.json'}.", flush=True)
+            print(f"Experimental segmented probe saved to {output_path}.", flush=True)
             return
         run(*test_args, "segmented::tests::minio_segmented_publication_recovers_before_and_after_root_create",
             "--", "--ignored", "--nocapture", env=env)

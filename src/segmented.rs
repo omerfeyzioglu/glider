@@ -8,7 +8,13 @@ use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
+    path::Path,
+    sync::Mutex,
 };
+
+mod cache;
+use cache::BlockCache;
+pub use cache::CacheStats;
 
 pub(crate) const MAX_BLOCK_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_PACK_BYTES: usize = 1024 * 1024;
@@ -355,13 +361,18 @@ pub(crate) fn read_block<S: ObjectStore>(
             reference.payload_len,
         )?
         .ok_or_else(|| Error::Corrupt(format!("segmented pack missing: {}", reference.object)))?;
-    if format!("{:x}", Sha256::digest(&bytes)) != reference.sha256 {
+    decode_block_bytes(config, reference, &bytes)
+}
+
+fn decode_block_bytes(config: Config, reference: &BlockRef, bytes: &[u8]) -> Result<Block> {
+    if bytes.len() != reference.length || format!("{:x}", Sha256::digest(bytes)) != reference.sha256
+    {
         return Err(Error::Corrupt(format!(
             "segmented block digest mismatch: {}",
             reference.object
         )));
     }
-    let block: Block = decode(&bytes)?;
+    let block: Block = decode(bytes)?;
     block.validate(config)?;
     if block.partition != reference.partition
         || block.records.len() != reference.rows
@@ -515,6 +526,7 @@ pub struct SegmentedDatabase<S> {
     tail_objects: usize,
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
+    cache: Option<Mutex<BlockCache>>,
     seal: Option<SealState>,
     reclaim: Option<ReclaimState>,
     prune: Option<PruneState>,
@@ -524,6 +536,44 @@ pub struct SegmentedDatabase<S> {
 impl<S: ObjectStore> SegmentedDatabase<S> {
     pub fn run_count(&self) -> usize {
         self.root.runs.len()
+    }
+
+    /// Attach a disposable block cache. The namespace still opens and recovers
+    /// from the object store; the cache never participates in acknowledgement.
+    pub fn with_block_cache(
+        mut self,
+        directory: impl AsRef<Path>,
+        ram_bytes: usize,
+        nvme_bytes: usize,
+    ) -> Result<Self> {
+        self.cache = Some(Mutex::new(BlockCache::open(
+            directory.as_ref(),
+            ram_bytes,
+            nvme_bytes,
+        )));
+        Ok(self)
+    }
+
+    pub fn cache_stats(&self) -> Result<Option<CacheStats>> {
+        self.cache
+            .as_ref()
+            .map(|cache| {
+                cache
+                    .lock()
+                    .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))
+                    .map(|cache| cache.stats())
+            })
+            .transpose()
+    }
+
+    fn read_data_block(&self, reference: &BlockRef) -> Result<Block> {
+        match &self.cache {
+            Some(cache) => cache
+                .lock()
+                .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))?
+                .read_block(&self.store, self.config, reference),
+            None => read_block(&self.store, self.config, reference),
+        }
     }
 
     pub fn open(mut store: S, config: Config) -> Result<Self> {
@@ -636,6 +686,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             tail_objects: 0,
             known_keys: listed,
             obsolete: VecDeque::new(),
+            cache: None,
             seal: None,
             reclaim: None,
             prune: None,
@@ -810,11 +861,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Ok(None);
         }
         let run = &self.root.runs[location.run];
-        let block = read_block(
-            &self.store,
-            self.config,
-            &run.blocks[location.entry.block as usize],
-        )?;
+        let block = self.read_data_block(&run.blocks[location.entry.block as usize])?;
         let record = block
             .records
             .binary_search_by_key(&id, BlockRecord::id)
@@ -860,7 +907,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let mut seen = 0;
         for (run_ordinal, run) in self.root.runs.iter().enumerate() {
             for (block_ordinal, reference) in run.blocks.iter().enumerate() {
-                let block = read_block(&self.store, self.config, reference)?;
+                let block = self.read_data_block(reference)?;
                 for record in block.records {
                     let id = record.id();
                     if self.tail.contains_key(&id) {
@@ -2114,6 +2161,128 @@ mod tests {
         assert!(db.get(dead_through + 1).unwrap().is_none());
     }
 
+    #[test]
+    fn disposable_block_cache_survives_restart_and_recovers_from_loss_and_corruption() {
+        let config = Config {
+            dimensions: 128,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let cache_path = temp.path().join("cache");
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        for batch in 0..4_u64 {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary: batch,
+                    nonce: [batch as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: (batch * 100..(batch + 1) * 100)
+                    .map(|id| Mutation::Put {
+                        id,
+                        vector: vec![id as f32; 128],
+                        metadata: BTreeMap::new(),
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        }
+        db.seal_delta().unwrap();
+        drop(db);
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_block_cache(&cache_path, 2 * MAX_BLOCK_BYTES, 256 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
+        let stats = db.cache_stats().unwrap().unwrap();
+        assert_eq!((stats.remote_fetches, stats.ram_hits), (1, 1));
+        assert_eq!(stats.nvme_entries, 1);
+        assert!(stats.ram_bytes <= 2 * MAX_BLOCK_BYTES);
+        drop(db);
+        db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_block_cache(&cache_path, 2 * MAX_BLOCK_BYTES, 256 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
+        let stats = db.cache_stats().unwrap().unwrap();
+        assert_eq!((stats.nvme_hits, stats.remote_fetches), (1, 0));
+        drop(db);
+        let disk = cache_path.join("glider-block-cache-v1");
+        let entry = std::fs::read_dir(&disk)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(entry, b"damaged disposable cache bytes").unwrap();
+        db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_block_cache(&cache_path, 2 * MAX_BLOCK_BYTES, 256 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
+        let stats = db.cache_stats().unwrap().unwrap();
+        assert_eq!((stats.corrupt_entries, stats.remote_fetches), (1, 1));
+        drop(db);
+        db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_block_cache(&cache_path, 2 * MAX_BLOCK_BYTES, 256 * MAX_BLOCK_BYTES)
+            .unwrap();
+        let entry = std::fs::read_dir(&disk)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::remove_file(entry).unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
+        assert_eq!(db.cache_stats().unwrap().unwrap().remote_fetches, 1);
+        drop(db);
+        std::fs::remove_dir_all(&cache_path).unwrap();
+        std::fs::create_dir_all(&cache_path).unwrap();
+        std::fs::write(cache_path.join("glider-block-cache-v1"), b"unavailable").unwrap();
+        let fallback = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_block_cache(&cache_path, 2 * MAX_BLOCK_BYTES, 256 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(fallback.get(0).unwrap().unwrap().vector[0], 0.);
+        let stats = fallback.cache_stats().unwrap().unwrap();
+        assert!(!stats.nvme_available);
+        assert_eq!(stats.remote_fetches, 1);
+        drop(fallback);
+        std::fs::remove_dir_all(&cache_path).unwrap();
+        #[cfg(unix)]
+        {
+            let unrelated = temp.path().join("unrelated");
+            std::fs::create_dir(&unrelated).unwrap();
+            std::fs::write(unrelated.join("keep"), b"unrelated").unwrap();
+            std::fs::create_dir(&cache_path).unwrap();
+            std::os::unix::fs::symlink(&unrelated, cache_path.join("glider-block-cache-v1"))
+                .unwrap();
+            let fallback = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+                .unwrap()
+                .with_block_cache(&cache_path, 2 * MAX_BLOCK_BYTES, 256 * MAX_BLOCK_BYTES)
+                .unwrap();
+            assert_eq!(fallback.get(0).unwrap().unwrap().vector[0], 0.);
+            assert!(!fallback.cache_stats().unwrap().unwrap().nvme_available);
+            assert_eq!(std::fs::read(unrelated.join("keep")).unwrap(), b"unrelated");
+            drop(fallback);
+            std::fs::remove_dir_all(&cache_path).unwrap();
+        }
+        let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_block_cache(&cache_path, 0, MAX_BLOCK_BYTES + 4096)
+            .unwrap();
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
+        assert_eq!(db.get(399).unwrap().unwrap().vector[0], 399.);
+        assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
+        let stats = db.cache_stats().unwrap().unwrap();
+        assert_eq!(stats.remote_fetches, 3);
+        assert!(stats.nvme_bytes <= MAX_BLOCK_BYTES + 4096);
+        assert_eq!(stats.ram_bytes, 0);
+    }
+
     #[cfg(feature = "s3")]
     #[test]
     #[ignore = "requires disposable MinIO from tools/test_s3.py"]
@@ -2436,6 +2605,54 @@ mod tests {
         );
         while recovered_reclaim.cleanup_step(8).unwrap() != 0 {}
         assert!(!recovered_reclaim.known_keys.contains(&old_pack));
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cached = recovered_reclaim
+            .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(cached.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(cached.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(cached.cache_stats().unwrap().unwrap().remote_fetches, 1);
+        assert_eq!(cached.cache_stats().unwrap().unwrap().ram_hits, 1);
+        drop(cached);
+        let warm = SegmentedDatabase::open(reclaim_store(), vector_config)
+            .unwrap()
+            .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(warm.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(warm.cache_stats().unwrap().unwrap().nvme_hits, 1);
+        drop(warm);
+        let disk = cache_dir.path().join("glider-block-cache-v1");
+        let entry = std::fs::read_dir(&disk)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(entry, b"corrupt cache").unwrap();
+        let corrupt = SegmentedDatabase::open(reclaim_store(), vector_config)
+            .unwrap()
+            .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(corrupt.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(corrupt.cache_stats().unwrap().unwrap().corrupt_entries, 1);
+        assert_eq!(corrupt.cache_stats().unwrap().unwrap().remote_fetches, 1);
+        drop(corrupt);
+        std::fs::remove_dir_all(&disk).unwrap();
+        let lost = SegmentedDatabase::open(reclaim_store(), vector_config)
+            .unwrap()
+            .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
+            .unwrap();
+        assert_eq!(lost.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(lost.cache_stats().unwrap().unwrap().remote_fetches, 1);
+        let selected_pack = lost.root.runs[0].blocks[0].object.clone();
+        drop(lost);
+        let mut damaged = reclaim_store();
+        damaged.remove(&selected_pack).unwrap();
+        drop(damaged);
+        assert!(matches!(
+            SegmentedDatabase::open(reclaim_store(), vector_config),
+            Err(Error::Corrupt(_))
+        ));
 
         for fail_prefix in ["sgindex-", "sgroot-00000000000000000002"] {
             let namespace = format!(
