@@ -143,6 +143,7 @@ fn main() -> Result<()> {
     let mut samples = BTreeMap::new();
     let mut seal_steps = 0;
     let mut seal_max_ms = 0_f64;
+    let mut seal_planning_max_ms = 0_f64;
     let mut cleanup_calls = 0;
     let mut consolidation_steps = 0;
     let mut consolidation_max_ms = 0_f64;
@@ -185,7 +186,10 @@ fn main() -> Result<()> {
             return Err("unexpected sequence".into());
         }
         if (batch + 1) % 64 == 0 || batch + 1 == rows / 100 {
+            let planning = Instant::now();
             db.start_seal()?;
+            seal_planning_max_ms =
+                seal_planning_max_ms.max(planning.elapsed().as_secs_f64() * 1000.);
             while {
                 let step = Instant::now();
                 let progressed = db.seal_step()?;
@@ -254,7 +258,10 @@ fn main() -> Result<()> {
                 return Err("unexpected overwrite sequence".into());
             }
             if (batch + 1).is_multiple_of(64) || batch + 1 == rows / 200 {
+                let planning = Instant::now();
                 db.start_seal()?;
+                seal_planning_max_ms =
+                    seal_planning_max_ms.max(planning.elapsed().as_secs_f64() * 1000.);
                 while {
                     let step = Instant::now();
                     let progressed = db.seal_step()?;
@@ -371,7 +378,8 @@ fn main() -> Result<()> {
         json!({
             "version":1,"rows":rows,"dimensions":128,"backend":"local_minio",
             "load_ms":load_ms,"load_peak_rss_bytes":load_rss,"seal_steps":seal_steps,
-            "seal_step_max_ms":seal_max_ms,"cleanup_calls":cleanup_calls,
+            "seal_step_max_ms":seal_max_ms,"seal_planning_max_ms":seal_planning_max_ms,
+            "cleanup_calls":cleanup_calls,
             "consolidate":consolidate,"consolidation_steps":consolidation_steps,
             "consolidation_max_ms":consolidation_max_ms,"run_count":run_count,
             "overwrite_half":overwrite_half,"overwrite_prefix":overwrite_prefix,
