@@ -5,7 +5,7 @@
     "sift1m_query.fvecs": "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc"
   },
   "dimensions": 128,
-  "elapsed_ms": 3540.5262080021203,
+  "elapsed_ms": 5957.839499984402,
   "environment": "macOS-26.6.2-arm64-arm-64bit",
   "k": 10,
   "max_blocks_selected": 8,
@@ -74,7 +74,7 @@
   "representative_selection": "nearest centroid, then farthest from nearest selected representative",
   "representative_vectors_per_block": 16,
   "rows": 250000,
-  "source_sha256": "2f3f6f2ef1dbfe553bf165a1062ddec7dd22403699a3d38a69a019c59be4a1bf",
+  "source_sha256": "c27d165b6bd07a5727ec0a796d061630331b2156b09fc5ab8c230b5e7c54d1fb",
   "unfiltered": {
     "blocks": 1471,
     "distinct_exact_blocks": {
@@ -135,6 +135,45 @@
     },
     "selected_rows_max": 1360,
     "selected_rows_mean": 1359.595
+  },
+  "unfiltered_independent_6400_row_groups": {
+    "blocks": 1485,
+    "chunk_rows": 6400,
+    "max_rows_per_block": 169,
+    "min_rows_per_block": 133,
+    "oracle_eight_block": {
+      "fifth_percentile_recall_at_10": 0.8,
+      "mean_recall_at_10": 0.946,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 28
+    },
+    "quantized_4_bit_min_score": {
+      "bits_per_component": 4,
+      "fifth_percentile_recall_at_10": 0.7,
+      "max_abs_reconstruction_error": 7.0666656494140625,
+      "mean_recall_at_10": 0.895,
+      "packed_code_bytes": 16000000,
+      "queries_below_0_8": 21,
+      "queries_below_0_9": 64
+    },
+    "quantized_5_bit_min_score": {
+      "bits_per_component": 5,
+      "fifth_percentile_recall_at_10": 0.8,
+      "max_abs_reconstruction_error": 3.4193572998046875,
+      "mean_recall_at_10": 0.9245,
+      "packed_code_bytes": 20000000,
+      "queries_below_0_8": 4,
+      "queries_below_0_9": 41
+    },
+    "quantized_8_bit_min_score": {
+      "bits_per_component": 8,
+      "fifth_percentile_recall_at_10": 0.8,
+      "max_abs_reconstruction_error": 0.41568756103515625,
+      "mean_recall_at_10": 0.944,
+      "packed_code_bytes": 32000000,
+      "queries_below_0_8": 0,
+      "queries_below_0_9": 28
+    }
   },
   "version": 1
 }

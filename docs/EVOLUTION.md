@@ -196,6 +196,8 @@ not measured ANN recall or a general impossibility result for regrouped ranges.
 It directs selective-serving work toward a measured vector-aware or regrouped
 read layout while keeping root/log publication authoritative.
 A following offline probe found that 170-row vector-local groups and a scanned
-4-bit routing sketch can meet the static 200-query quality threshold, while
-block centroids alone cannot. It does not establish encoded byte, update,
-memory or latency acceptance. [Evidence](../benchmarks/M24.md).
+4-bit routing sketch can meet the static 200-query quality threshold when
+globally regrouped, while block centroids alone cannot. Independently grouping
+6,400-row increments makes 4-bit miss the threshold; 5-bit passes in that
+approximation. It does not establish encoded byte, update, memory or latency
+acceptance. [Evidence](../benchmarks/M24.md).

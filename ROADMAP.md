@@ -799,9 +799,11 @@ losing either cache changes performance only. No multi-node work is required.
 Status: in progress. The [eight-block oracle bound](benchmarks/M24.md) shows
 that the current one-block-per-GET, ID-sorted reader cannot reach the M21 mean
 recall target with eight cold block fetches. A [vector-local offline probe](benchmarks/M24.md)
-found a 4-bit routing candidate at 0.945/1.000 mean recall for unfiltered/1%
-filtered queries, but encoded bytes, serving resources, updates and measured
-acceptance are pending; reuse validated M21–M23 evidence.
+found 0.945/1.000 mean recall for unfiltered/1% filtered queries with a
+globally regrouped 4-bit sketch. Independent 6,400-row grouping lowers its
+unfiltered result to 0.895; 5-bit reaches 0.925 in that approximation. Encoded
+bytes, serving resources, updates and measured acceptance are pending; reuse
+validated M21–M23 evidence.
 
 Steps:
 - Evaluate selective filtering/ANN on addressable segments when required by the
