@@ -220,3 +220,13 @@ vector-local blocks and exactly reranks them with the current log tail. On
 64.0 MB peak RSS. The 7.34 s full-root rebuild and lack of filtered routing
 prevent acceptance; the next design must persist and update the derived sketch
 without changing authoritative log/root semantics. [Evidence](../benchmarks/M24.md).
+
+## 2026-09-30 — Run-local sketch codebooks
+
+An offline comparison on the committed 250,000-row layout found five-bit
+eight-block mean recall of 0.925 with one root codebook, 0.9295 with 12
+run-local books, and 0.936 with 1,485 block-local books. Run-local books add
+24,576 bytes; block-local books add 3,041,280 bytes before IDs and ordinals.
+Immutable seal-group sketch components are the next candidate for incremental
+derived-index publication; serving and recovery remain unmeasured.
+[Evidence](../benchmarks/M24.md).

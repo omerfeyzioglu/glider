@@ -806,7 +806,11 @@ mean recall and 31.5 ms NVMe-warm p95 on local MinIO. Rebuilding the derived
 index needs 7.34 s/2,970 GET after open, every root publication invalidates it,
 and the 1% filtered eight-block ceiling is only 0.841. Persisted derived-index
 recovery, incremental visibility, filtered selective reads, independent-load
-traffic and cost acceptance remain pending.
+traffic and cost acceptance remain pending. A targeted [codebook granularity
+probe](benchmarks/M24.md) found 0.9295 mean eight-block routing recall with
+run-local five-bit books and only 24,576 codebook bytes, versus 3,041,280
+bytes for block-local books. Immutable seal-group components are the next
+derived-index direction; their serving behavior is unmeasured.
 
 Steps:
 - Evaluate selective filtering/ANN on addressable segments when required by the
