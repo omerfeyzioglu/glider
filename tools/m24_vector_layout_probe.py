@@ -73,6 +73,19 @@ def layout(vectors):
     return blocks, assignment, centers
 
 
+def chunked_layout(vectors, chunk_rows):
+    blocks = []
+    assignment = np.empty(len(vectors), dtype=np.int32)
+    for start in range(0, len(vectors), chunk_rows):
+        for local_ids in balanced_blocks(vectors[start:start + chunk_rows], MAX_ROWS):
+            ids = local_ids + start
+            assignment[ids] = len(blocks)
+            blocks.append(ids)
+    if not np.array_equal(np.sort(np.concatenate(blocks)), np.arange(len(vectors))):
+        raise AssertionError("chunked layout omitted or duplicated rows")
+    return blocks, assignment
+
+
 def representatives(vectors, blocks):
     selected = np.empty((len(blocks), PROTOTYPES, vectors.shape[1]), dtype=np.float32)
     for ordinal, ids in enumerate(blocks):
@@ -121,6 +134,14 @@ def summary(values):
         "queries_below_0_9": sum(value < 9 for value in values),
         "queries_below_0_8": sum(value < 8 for value in values),
     }
+
+
+def oracle_coverage(exact_ids, assignment):
+    hits = []
+    for neighbors in exact_ids:
+        counts = Counter(assignment[neighbors].tolist())
+        hits.append(sum(sorted(counts.values(), reverse=True)[:MAX_BLOCKS]))
+    return summary(hits)
 
 
 def measure(vectors, queries, exact_ids, blocks, assignment, centers, samples, filtered):
@@ -189,6 +210,19 @@ def main():
     cohort = base[::100].copy()
     cohort_blocks, cohort_assignment, cohort_centers = layout(cohort)
     cohort_samples = representatives(cohort, cohort_blocks)
+    chunk_blocks, chunk_assignment = chunked_layout(base, 6400)
+    chunk_result = {
+        "chunk_rows": 6400,
+        "blocks": len(chunk_blocks),
+        "min_rows_per_block": min(map(len, chunk_blocks)),
+        "max_rows_per_block": max(map(len, chunk_blocks)),
+        "oracle_eight_block": oracle_coverage(oracle["unfiltered_exact_ids"], chunk_assignment),
+    }
+    for bits in (4, 5, 8):
+        hits, details = quantized_routing(base, queries, chunk_assignment,
+                                          len(chunk_blocks), oracle["unfiltered_exact_ids"],
+                                          False, bits)
+        chunk_result[f"quantized_{bits}_bit_min_score"] = {**summary(hits), **details}
     result = {
         "version": 1,
         "dataset_sha256": {base_path.name: BASE_SHA256, query_path.name: QUERY_SHA256},
@@ -210,6 +244,7 @@ def main():
                               all_assignment, all_centers, all_samples, False),
         "one_percent_filter": measure(cohort, queries, oracle["filtered_exact_ids"], cohort_blocks,
                                       cohort_assignment, cohort_centers, cohort_samples, True),
+        "unfiltered_independent_6400_row_groups": chunk_result,
         "elapsed_ms": (time.monotonic() - start) * 1000,
     }
     args.output.mkdir(parents=True, exist_ok=False)
