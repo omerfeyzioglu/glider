@@ -1,4 +1,4 @@
-//! Exact-oracle upper bound for the current ID-sorted segmented block layout.
+//! Exact-oracle bounds and sketch-routing probes for segmented blocks.
 use glider::{
     retry::{Request, RequestId},
     segmented::SegmentedDatabase,
@@ -176,6 +176,111 @@ fn quantized_five_bit_route<S: glider::store::ObjectStore>(
     }))
 }
 
+/// Compare independent codebooks that can be rebuilt from one run or block.
+/// The corpus and codes are resident only in this offline decision probe.
+fn grouped_five_bit_route<S: glider::store::ObjectStore>(
+    db: &SegmentedDatabase<S>,
+    base: &[Vec<f32>],
+    queries: &[Vec<f32>],
+    exact_ids: &[Vec<u64>],
+    per_block: bool,
+) -> Result<serde_json::Value> {
+    let mut block_ordinals = BTreeMap::new();
+    let mut block_of_row = Vec::with_capacity(base.len());
+    let mut group_ordinals = BTreeMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for id in 0..base.len() {
+        let location = db
+            .current_block_of(id as u64)
+            .ok_or("grouped route ID missing from selected root")?;
+        let next_block = block_ordinals.len();
+        block_of_row.push(*block_ordinals.entry(location).or_insert(next_block));
+        let group_key = if per_block {
+            location
+        } else {
+            (location.0, usize::MAX)
+        };
+        let next_group = groups.len();
+        let group = *group_ordinals.entry(group_key).or_insert_with(|| {
+            groups.push(Vec::new());
+            next_group
+        });
+        groups[group].push(id);
+    }
+    let mut codes = vec![[0_u8; 128]; base.len()];
+    let mut books = Vec::with_capacity(groups.len());
+    for rows in &groups {
+        let mut minimum = [f64::INFINITY; 128];
+        let mut maximum = [f64::NEG_INFINITY; 128];
+        for &row in rows {
+            for (axis, &value) in base[row].iter().enumerate() {
+                minimum[axis] = minimum[axis].min(f64::from(value));
+                maximum[axis] = maximum[axis].max(f64::from(value));
+            }
+        }
+        let scale = std::array::from_fn::<_, 128, _>(|axis| {
+            let span = (maximum[axis] - minimum[axis]) / 31.;
+            if span == 0. {
+                1.
+            } else {
+                span
+            }
+        });
+        for &row in rows {
+            for axis in 0..128 {
+                codes[row][axis] = ((f64::from(base[row][axis]) - minimum[axis]) / scale[axis])
+                    .round_ties_even()
+                    .clamp(0., 31.) as u8;
+            }
+        }
+        books.push((minimum, scale));
+    }
+    let start = Instant::now();
+    let mut hits = Vec::with_capacity(queries.len());
+    for (query, neighbors) in queries.iter().zip(exact_ids) {
+        let mut best = vec![f64::INFINITY; block_ordinals.len()];
+        for (group, rows) in groups.iter().enumerate() {
+            let (minimum, scale) = &books[group];
+            let lookup = std::array::from_fn::<_, 128, _>(|axis| {
+                std::array::from_fn::<_, 32, _>(|code| {
+                    let difference =
+                        minimum[axis] + scale[axis] * code as f64 - f64::from(query[axis]);
+                    difference * difference
+                })
+            });
+            for &row in rows {
+                let distance = codes[row]
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, &code)| lookup[axis][code as usize])
+                    .sum::<f64>();
+                let block = block_of_row[row];
+                best[block] = best[block].min(distance);
+            }
+        }
+        let mut ranked: Vec<_> = best.into_iter().enumerate().collect();
+        ranked.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        let mut selected = vec![false; block_ordinals.len()];
+        for &(block, _) in ranked.iter().take(8) {
+            selected[block] = true;
+        }
+        hits.push(
+            neighbors
+                .iter()
+                .filter(|&&id| selected[block_of_row[id as usize]])
+                .count(),
+        );
+    }
+    Ok(json!({
+        "quality":summarize(&hits),
+        "codebook_groups":groups.len(),
+        "packed_code_bytes":base.len()*128*5/8,
+        "codebook_bytes":groups.len()*128*2*size_of::<f64>(),
+        "route_200_queries_ms":start.elapsed().as_secs_f64()*1000.,
+        "note":"offline unpacked codes resident; excludes object reads, reranking, RSS and writes",
+    }))
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().collect();
     if args.len() != 4 {
@@ -270,6 +375,8 @@ fn main() -> Result<()> {
         return Err("segmented exact search disagrees with independent oracle".into());
     }
     let quantized_route = quantized_five_bit_route(&db, &base, &queries, &unfiltered)?;
+    let run_local_route = grouped_five_bit_route(&db, &base, &queries, &unfiltered, false)?;
+    let block_local_route = grouped_five_bit_route(&db, &base, &queries, &unfiltered, true)?;
     println!(
         "{}",
         json!({
@@ -285,6 +392,8 @@ fn main() -> Result<()> {
             "unfiltered_oracle_block_bytes":unfiltered_bytes,
             "filtered_oracle_block_bytes":filtered_bytes,
             "unfiltered_quantized_5_bit_route":quantized_route,
+            "unfiltered_run_local_5_bit_route":run_local_route,
+            "unfiltered_block_local_5_bit_route":block_local_route,
             "unfiltered_exact_ids":unfiltered,"filtered_exact_ids":filtered,
         })
     );
