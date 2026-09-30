@@ -59,7 +59,7 @@ fn exact(base: &[Vec<f32>], query: &[f32], filtered: bool) -> Vec<Neighbor> {
 fn upper_bound<S: glider::store::ObjectStore>(
     db: &SegmentedDatabase<S>,
     neighbors: &[Neighbor],
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, usize)> {
     let mut counts = BTreeMap::new();
     for neighbor in neighbors {
         let block = db
@@ -68,9 +68,22 @@ fn upper_bound<S: glider::store::ObjectStore>(
         *counts.entry(block).or_insert(0_usize) += 1;
     }
     let distinct = counts.len();
-    let mut per_block: Vec<_> = counts.into_values().collect();
-    per_block.sort_unstable_by(|a, b| b.cmp(a));
-    Ok((per_block.into_iter().take(8).sum(), distinct))
+    let mut per_block: Vec<_> = counts
+        .into_iter()
+        .map(|((run, block), count)| -> Result<_> {
+            Ok((
+                count,
+                db.block_payload_len(run, block)
+                    .ok_or("selected block reference missing")?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    per_block.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    Ok((
+        per_block.iter().take(8).map(|item| item.0).sum(),
+        distinct,
+        per_block.iter().take(8).map(|item| item.1).sum(),
+    ))
 }
 
 fn summarize(values: &[usize]) -> serde_json::Value {
@@ -83,6 +96,84 @@ fn summarize(values: &[usize]) -> serde_json::Value {
         "queries_below_0_9":values.iter().filter(|&&n|n<9).count(),
         "queries_below_0_8":values.iter().filter(|&&n|n<8).count(),
     })
+}
+
+fn quantized_five_bit_route<S: glider::store::ObjectStore>(
+    db: &SegmentedDatabase<S>,
+    base: &[Vec<f32>],
+    queries: &[Vec<f32>],
+    exact_ids: &[Vec<u64>],
+) -> Result<serde_json::Value> {
+    let mut minima = [f32::INFINITY; 128];
+    let mut maxima = [f32::NEG_INFINITY; 128];
+    for vector in base {
+        for (axis, &value) in vector.iter().enumerate() {
+            minima[axis] = minima[axis].min(value);
+            maxima[axis] = maxima[axis].max(value);
+        }
+    }
+    let scales = std::array::from_fn::<_, 128, _>(|axis| {
+        let span = (maxima[axis] - minima[axis]) / 31.;
+        if span == 0. {
+            1.
+        } else {
+            span
+        }
+    });
+    let mut codes = Vec::with_capacity(base.len());
+    let mut locations = Vec::with_capacity(base.len());
+    let mut blocks = BTreeMap::new();
+    for (id, vector) in base.iter().enumerate() {
+        let code: [u8; 128] = std::array::from_fn(|axis| {
+            ((vector[axis] - minima[axis]) / scales[axis])
+                .round_ties_even()
+                .clamp(0., 31.) as u8
+        });
+        codes.push(code);
+        let location = db
+            .current_block_of(id as u64)
+            .ok_or("quantized route ID missing from selected root")?;
+        let next = blocks.len();
+        locations.push(*blocks.entry(location).or_insert(next));
+    }
+    let start = Instant::now();
+    let mut hits = Vec::with_capacity(queries.len());
+    for (query, neighbors) in queries.iter().zip(exact_ids) {
+        let lookup = std::array::from_fn::<_, 128, _>(|axis| {
+            std::array::from_fn::<_, 32, _>(|code| {
+                let value = minima[axis] + scales[axis] * code as f32;
+                let diff = f64::from(value) - f64::from(query[axis]);
+                diff * diff
+            })
+        });
+        let mut best = vec![f64::INFINITY; blocks.len()];
+        for (code, &block) in codes.iter().zip(&locations) {
+            let distance = code
+                .iter()
+                .enumerate()
+                .map(|(axis, &value)| lookup[axis][value as usize])
+                .sum::<f64>();
+            best[block] = best[block].min(distance);
+        }
+        let mut ranked: Vec<_> = best.into_iter().enumerate().collect();
+        ranked.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        let mut selected = vec![false; blocks.len()];
+        for &(block, _) in ranked.iter().take(8) {
+            selected[block] = true;
+        }
+        hits.push(
+            neighbors
+                .iter()
+                .filter(|&&id| selected[locations[id as usize]])
+                .count(),
+        );
+    }
+    Ok(json!({
+        "quality":summarize(&hits),
+        "packed_code_bytes":base.len()*128*5/8,
+        "route_200_queries_ms":start.elapsed().as_secs_f64()*1000.,
+        "note":"offline unpacked codes resident; excludes object reads, reranking, RSS and writes"
+    }))
 }
 
 fn main() -> Result<()> {
@@ -155,15 +246,19 @@ fn main() -> Result<()> {
     let mut filtered_cover = Vec::with_capacity(200);
     let mut unfiltered_distinct = Vec::with_capacity(200);
     let mut filtered_distinct = Vec::with_capacity(200);
+    let mut unfiltered_bytes = Vec::with_capacity(200);
+    let mut filtered_bytes = Vec::with_capacity(200);
     for query in &queries {
         let exact_unfiltered = exact(&base, query, false);
         let exact_filtered = exact(&base, query, true);
-        let (coverage, distinct) = upper_bound(&db, &exact_unfiltered)?;
+        let (coverage, distinct, bytes) = upper_bound(&db, &exact_unfiltered)?;
         unfiltered_cover.push(coverage);
         unfiltered_distinct.push(distinct);
-        let (coverage, distinct) = upper_bound(&db, &exact_filtered)?;
+        unfiltered_bytes.push(bytes);
+        let (coverage, distinct, bytes) = upper_bound(&db, &exact_filtered)?;
         filtered_cover.push(coverage);
         filtered_distinct.push(distinct);
+        filtered_bytes.push(bytes);
         unfiltered.push(exact_unfiltered.iter().map(|n| n.id).collect::<Vec<_>>());
         filtered.push(exact_filtered.iter().map(|n| n.id).collect::<Vec<_>>());
     }
@@ -174,6 +269,7 @@ fn main() -> Result<()> {
     {
         return Err("segmented exact search disagrees with independent oracle".into());
     }
+    let quantized_route = quantized_five_bit_route(&db, &base, &queries, &unfiltered)?;
     println!(
         "{}",
         json!({
@@ -186,6 +282,9 @@ fn main() -> Result<()> {
             "filtered_upper_bound":summarize(&filtered_cover),
             "unfiltered_distinct_blocks":unfiltered_distinct,
             "filtered_distinct_blocks":filtered_distinct,
+            "unfiltered_oracle_block_bytes":unfiltered_bytes,
+            "filtered_oracle_block_bytes":filtered_bytes,
+            "unfiltered_quantized_5_bit_route":quantized_route,
             "unfiltered_exact_ids":unfiltered,"filtered_exact_ids":filtered,
         })
     );

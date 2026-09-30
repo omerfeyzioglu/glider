@@ -201,3 +201,13 @@ globally regrouped, while block centroids alone cannot. Independently grouping
 6,400-row increments makes 4-bit miss the threshold; 5-bit passes in that
 approximation. It does not establish encoded byte, update, memory or latency
 acceptance. [Evidence](../benchmarks/M24.md).
+
+## 2026-09-30 — Vector-local physical blocks within ID-sorted runs
+
+The experimental seal now clusters up to 170 put records by vector, then keeps
+IDs sorted within each encoded block and in the authoritative run index.
+Publication and persisted versions stay unchanged. On 250,000 SIFT1M rows,
+the best eight encoded blocks improve unfiltered recall coverage from 0.855
+to 0.9455 within 913,347 payload bytes; filtered coverage remains 0.841.
+MinIO publication recovery passes, but no selective serving path exists yet.
+[Evidence](../benchmarks/M24.md).

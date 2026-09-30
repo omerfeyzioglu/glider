@@ -169,15 +169,29 @@ include metadata and in-flight reads, and eviction/cold starts must preserve
 logical results. The existing streaming reader is a useful baseline, not this
 completed serving/cache implementation.
 
-The ID-sorted authoritative runs are suitable for bounded changed-data writes,
-but their current one-block-per-GET read pattern is insufficient for the M21
-quality/request envelope: an oracle selecting the best eight committed blocks
+The original physical ID-sorted blocks were suitable for bounded changed-data
+writes but insufficient for the M21 one-block-per-GET quality/request envelope:
+an oracle selecting the best eight committed blocks
 reaches only 0.855 unfiltered and 0.800 filtered mean recall@10 on 200 SIFT1M
 queries. Selective serving therefore needs a measured vector-aware read layout
 or another block grouping that passes both byte and request limits. Any derived
 candidate structure must bind to a committed generation, tolerate missing or
 corrupt derived data through explicit rebuild/failure semantics, and leave the
 root and logs authoritative. See `benchmarks/M24.md` for the bound and limits.
+
+Experimental sealing now uses balanced vector-local groups of at most 170 put
+records, splitting again if the encoded block exceeds 128 KiB. Deletes occupy
+separate ID-sorted blocks. Records within a block and the authoritative run
+index remain ID-sorted; physical blocks need not be ordered by ID. The root,
+block and index format versions and log acknowledgement boundary are unchanged.
+The seal's fixed sequence still publishes packs and index before one root;
+consolidation and reclamation continue to reuse authenticated block references.
+On the M21 corpus this grouping improves the optimistic eight-block unfiltered
+recall ceiling to 0.9455 with at most 913,347 encoded block bytes across those
+eight, while the filtered ceiling is only 0.841. A scanned 5-bit offline
+sketch routes unfiltered queries at 0.925 mean recall. No persisted sketch,
+filter-specific copy or selective serving reader exists yet. The measured
+limits and MinIO recovery check are in `benchmarks/M24.md`.
 
 The target write path retains explicit durable acknowledgement and recovery.
 Routine maintenance should rewrite affected bounded data, rather than the full

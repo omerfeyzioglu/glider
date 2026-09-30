@@ -37,6 +37,8 @@ fn diagnostic_location_tracks_published_and_tail_visibility() {
     db.seal_delta().unwrap();
     assert_eq!(db.block_count(), 1);
     assert_eq!(db.current_block_of(42), Some((0, 0)));
+    assert!(db.block_payload_len(0, 0).is_some_and(|bytes| bytes > 0));
+    assert_eq!(db.block_payload_len(0, 1), None);
 
     db.apply_request(request(1, 2, put(vec![3., 4.]))).unwrap();
     assert_eq!(db.current_block_of(42), None);

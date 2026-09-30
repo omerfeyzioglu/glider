@@ -81,6 +81,138 @@ impl Block {
     }
 }
 
+/// Group a bounded sealed prefix by vector proximity without changing the
+/// authoritative ID index. Every physical block remains sorted by ID.
+fn vector_local_blocks(config: Config, records: Vec<BlockRecord>) -> Result<Vec<Block>> {
+    const TARGET_ROWS: usize = 170;
+    let mut puts = Vec::new();
+    let mut deletes = Vec::new();
+    for record in records {
+        if matches!(record.mutation, Mutation::Put { .. }) {
+            puts.push(record);
+        } else {
+            deletes.push(record);
+        }
+    }
+    let vector = |index: usize| match &puts[index].mutation {
+        Mutation::Put { vector, .. } => vector.as_slice(),
+        Mutation::Delete { .. } => unreachable!("only puts are clustered"),
+    };
+    let mut blocks = Vec::new();
+    let mut groups = vec![(0..puts.len()).collect::<Vec<_>>()];
+    while let Some(mut group) = groups.pop() {
+        if group.is_empty() {
+            continue;
+        }
+        if group.len() <= TARGET_ROWS {
+            group.sort_unstable_by_key(|&index| puts[index].id());
+            let block = Block::new(
+                config,
+                0,
+                group.iter().map(|&index| puts[index].clone()).collect(),
+            )?;
+            if encode(&block)?.len() <= MAX_BLOCK_BYTES {
+                blocks.push(block);
+                continue;
+            }
+            if group.len() == 1 {
+                return Err(Error::Invalid(format!(
+                    "segmented row {} exceeds block limit",
+                    puts[group[0]].id()
+                )));
+            }
+        }
+        let leaves = group.len().div_ceil(TARGET_ROWS).max(2);
+        let left_leaves = leaves / 2;
+        let left_len = ((group.len() as u128 * left_leaves as u128) / leaves as u128) as usize;
+        let mut means = vec![0_f64; config.dimensions];
+        let mut squares = vec![0_f64; config.dimensions];
+        for &index in &group {
+            for (axis, &value) in vector(index).iter().enumerate() {
+                let value = f64::from(value);
+                means[axis] += value;
+                squares[axis] += value * value;
+            }
+        }
+        let axis = (0..config.dimensions)
+            .max_by(|&a, &b| {
+                let variance = |i| squares[i] - means[i] * means[i] / group.len() as f64;
+                variance(a).total_cmp(&variance(b)).then_with(|| b.cmp(&a))
+            })
+            .unwrap();
+        group.sort_unstable_by(|&a, &b| {
+            vector(a)[axis]
+                .total_cmp(&vector(b)[axis])
+                .then_with(|| puts[a].id().cmp(&puts[b].id()))
+        });
+        for _ in 0..3 {
+            let mut direction = vec![0_f64; config.dimensions];
+            for &index in &group[..left_len] {
+                for (axis, &value) in vector(index).iter().enumerate() {
+                    direction[axis] -= f64::from(value) / left_len as f64;
+                }
+            }
+            for &index in &group[left_len..] {
+                for (axis, &value) in vector(index).iter().enumerate() {
+                    direction[axis] += f64::from(value) / (group.len() - left_len) as f64;
+                }
+            }
+            let mut projected: Vec<_> = group
+                .iter()
+                .map(|&index| {
+                    let score = vector(index)
+                        .iter()
+                        .zip(&direction)
+                        .map(|(&value, &weight)| f64::from(value) * weight)
+                        .sum::<f64>();
+                    (score, index)
+                })
+                .collect();
+            projected.sort_unstable_by(|&(score_a, a), &(score_b, b)| {
+                score_a
+                    .total_cmp(&score_b)
+                    .then_with(|| puts[a].id().cmp(&puts[b].id()))
+            });
+            group = projected.into_iter().map(|(_, index)| index).collect();
+        }
+        let right = group.split_off(left_len);
+        groups.push(right);
+        groups.push(group);
+    }
+    deletes.sort_unstable_by_key(BlockRecord::id);
+    let empty_size = encode(&Block {
+        version: 1,
+        config,
+        partition: 0,
+        records: Vec::new(),
+    })?
+    .len();
+    let mut current = Vec::new();
+    let mut size = empty_size;
+    for record in deletes {
+        let row_size = encode(&record)?.len();
+        if empty_size
+            .checked_add(row_size)
+            .is_none_or(|n| n > MAX_BLOCK_BYTES)
+        {
+            return Err(Error::Invalid(format!(
+                "segmented row {} exceeds block limit",
+                record.id()
+            )));
+        }
+        if size + row_size + usize::from(!current.is_empty()) > MAX_BLOCK_BYTES {
+            blocks.push(Block::new(config, 0, std::mem::take(&mut current))?);
+            size = empty_size;
+        }
+        size += row_size + usize::from(!current.is_empty());
+        current.push(record);
+    }
+    if !current.is_empty() {
+        blocks.push(Block::new(config, 0, current)?);
+    }
+    Ok(blocks)
+}
+
 /// Root-v1 metadata for one block inside an immutable physical pack.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -553,6 +685,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.root.runs.iter().map(|run| run.blocks.len()).sum()
     }
 
+    /// Encoded payload length for one block in the selected root.
+    pub fn block_payload_len(&self, run: usize, block: usize) -> Option<usize> {
+        self.root.runs.get(run)?.blocks.get(block).map(|r| r.length)
+    }
+
     /// Attach a disposable block cache. The namespace still opens and recovers
     /// from the object store; the cache never participates in acknowledgement.
     pub fn with_block_cache(
@@ -986,16 +1123,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         let first_sequence = self.root.sequence + 1;
         let boundary = self.sequence;
-        let empty = Block {
-            version: 1,
-            config: self.config,
-            partition: 0,
-            records: Vec::new(),
-        };
-        let empty_size = encode(&empty)?.len();
-        let mut blocks = Vec::new();
-        let mut current = Vec::new();
-        let mut size = empty_size;
+        let mut records = Vec::new();
         for (&id, &(sequence, ref document)) in &self.tail {
             let mutation = match document {
                 Some(document) => Mutation::Put {
@@ -1005,27 +1133,9 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 },
                 None => Mutation::Delete { id },
             };
-            let record = BlockRecord { sequence, mutation };
-            let row_size = encode(&record)?.len();
-            if empty_size
-                .checked_add(row_size)
-                .is_none_or(|n| n > MAX_BLOCK_BYTES)
-            {
-                return Err(Error::Invalid(format!(
-                    "segmented row {id} exceeds block limit"
-                )));
-            }
-            let additional = row_size + usize::from(!current.is_empty());
-            if size + additional > MAX_BLOCK_BYTES {
-                blocks.push(Block::new(self.config, 0, std::mem::take(&mut current))?);
-                size = empty_size;
-            }
-            size += row_size + usize::from(!current.is_empty());
-            current.push(record);
+            records.push(BlockRecord { sequence, mutation });
         }
-        if !current.is_empty() {
-            blocks.push(Block::new(self.config, 0, current)?);
-        }
+        let blocks = vector_local_blocks(self.config, records)?;
         let mut entries = Vec::new();
         for (ordinal, block) in blocks.iter().enumerate() {
             let block_ordinal = u32::try_from(ordinal)
@@ -1039,6 +1149,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 });
             }
         }
+        entries.sort_unstable_by_key(|entry| entry.id);
         if !blocks.is_empty() && self.root.runs.len() >= 64 {
             return Err(Error::MaintenanceRequired);
         }
@@ -1838,6 +1949,60 @@ mod tests {
     }
 
     #[test]
+    fn sealing_vector_local_blocks_keeps_the_id_directory_exact() {
+        let config = Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        for (batch, ids) in (0..340_u64).collect::<Vec<_>>().chunks(100).enumerate() {
+            db.apply_request(retry::Request {
+                id: retry::RequestId {
+                    boundary: batch as u64,
+                    nonce: [batch as u8; 16],
+                },
+                conditions: Vec::new(),
+                mutations: ids
+                    .iter()
+                    .map(|&id| Mutation::Put {
+                        id,
+                        vector: if id % 2 == 0 {
+                            vec![0., 0.]
+                        } else {
+                            vec![100., 100.]
+                        },
+                        metadata: BTreeMap::new(),
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        }
+        db.seal_delta().unwrap();
+        assert_eq!(db.block_count(), 2);
+        assert_ne!(db.current_block_of(0), db.current_block_of(1));
+        assert_eq!(db.current_block_of(0), db.current_block_of(2));
+        assert_eq!(db.current_block_of(1), db.current_block_of(3));
+        for reference in &db.root.runs[0].blocks {
+            let block = read_block(&db.store, config, reference).unwrap();
+            assert_eq!(block.records.len(), 170);
+            assert!(block
+                .records
+                .iter()
+                .all(|record| record.id() % 2 == block.records[0].id() % 2));
+        }
+        assert_eq!(
+            db.search_exact(&[0., 0.], 3, &[])
+                .unwrap()
+                .iter()
+                .map(|neighbor| neighbor.id)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+    }
+
+    #[test]
     fn sealing_a_fixed_prefix_preserves_newer_acknowledged_writes() {
         let config = Config {
             dimensions: 2,
@@ -2000,21 +2165,20 @@ mod tests {
         }
         db.seal_delta().unwrap();
         let old_pack = db.root.runs[0].blocks[0].object.clone();
-        for batch in 0..2 {
+        let overwritten: Vec<_> = (0..400_u64).filter(|id| id % 4 != 3).collect();
+        for (batch, ids) in overwritten.chunks(100).enumerate() {
             db.apply_request(retry::Request {
                 id: retry::RequestId {
-                    boundary: 4 + batch,
+                    boundary: 4 + batch as u64,
                     nonce: [4 + batch as u8; 16],
                 },
                 conditions: Vec::new(),
-                mutations: (0..100)
-                    .map(|offset| {
-                        let id = 2 * (batch * 100 + offset);
-                        Mutation::Put {
-                            id,
-                            vector: vec![1000. + id as f32; 128],
-                            metadata: BTreeMap::new(),
-                        }
+                mutations: ids
+                    .iter()
+                    .map(|&id| Mutation::Put {
+                        id,
+                        vector: vec![1000. + id as f32; 128],
+                        metadata: BTreeMap::new(),
                     })
                     .collect(),
             })
@@ -2029,8 +2193,8 @@ mod tests {
         ));
         db.apply_request(retry::Request {
             id: retry::RequestId {
-                boundary: 6,
-                nonce: [6; 16],
+                boundary: 7,
+                nonce: [7; 16],
             },
             conditions: Vec::new(),
             mutations: vec![Mutation::Put {
@@ -2579,22 +2743,21 @@ mod tests {
             vector_config,
         )
         .unwrap();
-        for batch in 0..2_u64 {
+        let overwritten: Vec<_> = (0..400_u64).filter(|id| id % 4 != 3).collect();
+        for (batch, ids) in overwritten.chunks(100).enumerate() {
             uncertain_reclaim
                 .apply_request(retry::Request {
                     id: retry::RequestId {
-                        boundary: 4 + batch,
+                        boundary: 4 + batch as u64,
                         nonce: [4 + batch as u8; 16],
                     },
                     conditions: Vec::new(),
-                    mutations: (0..100)
-                        .map(|offset| {
-                            let id = 2 * (batch * 100 + offset);
-                            Mutation::Put {
-                                id,
-                                vector: vec![1000. + id as f32; 128],
-                                metadata: BTreeMap::new(),
-                            }
+                    mutations: ids
+                        .iter()
+                        .map(|&id| Mutation::Put {
+                            id,
+                            vector: vec![1000. + id as f32; 128],
+                            metadata: BTreeMap::new(),
                         })
                         .collect(),
                 })
@@ -2610,13 +2773,13 @@ mod tests {
         assert_eq!(recovered_reclaim.root.generation, 2);
         assert_eq!(recovered_reclaim.root.sequence, 4);
         assert_eq!(recovered_reclaim.get(0).unwrap().unwrap().vector[0], 1000.);
-        assert_eq!(recovered_reclaim.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(recovered_reclaim.get(3).unwrap().unwrap().vector[0], 3.);
         assert_eq!(
             recovered_reclaim
-                .search_exact(&vec![1.; 128], 1, &[])
+                .search_exact(&vec![3.; 128], 1, &[])
                 .unwrap()[0]
                 .id,
-            1
+            3
         );
         while recovered_reclaim.cleanup_step(8).unwrap() != 0 {}
         assert!(!recovered_reclaim.known_keys.contains(&old_pack));
@@ -2624,8 +2787,8 @@ mod tests {
         let cached = recovered_reclaim
             .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
             .unwrap();
-        assert_eq!(cached.get(1).unwrap().unwrap().vector[0], 1.);
-        assert_eq!(cached.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(cached.get(3).unwrap().unwrap().vector[0], 3.);
+        assert_eq!(cached.get(3).unwrap().unwrap().vector[0], 3.);
         assert_eq!(cached.cache_stats().unwrap().unwrap().remote_fetches, 1);
         assert_eq!(cached.cache_stats().unwrap().unwrap().ram_hits, 1);
         drop(cached);
@@ -2633,7 +2796,7 @@ mod tests {
             .unwrap()
             .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
             .unwrap();
-        assert_eq!(warm.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(warm.get(3).unwrap().unwrap().vector[0], 3.);
         assert_eq!(warm.cache_stats().unwrap().unwrap().nvme_hits, 1);
         drop(warm);
         let disk = cache_dir.path().join("glider-block-cache-v1");
@@ -2648,7 +2811,7 @@ mod tests {
             .unwrap()
             .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
             .unwrap();
-        assert_eq!(corrupt.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(corrupt.get(3).unwrap().unwrap().vector[0], 3.);
         assert_eq!(corrupt.cache_stats().unwrap().unwrap().corrupt_entries, 1);
         assert_eq!(corrupt.cache_stats().unwrap().unwrap().remote_fetches, 1);
         drop(corrupt);
@@ -2657,7 +2820,7 @@ mod tests {
             .unwrap()
             .with_block_cache(cache_dir.path(), 2 * MAX_BLOCK_BYTES, 4 * MAX_BLOCK_BYTES)
             .unwrap();
-        assert_eq!(lost.get(1).unwrap().unwrap().vector[0], 1.);
+        assert_eq!(lost.get(3).unwrap().unwrap().vector[0], 3.);
         assert_eq!(lost.cache_stats().unwrap().unwrap().remote_fetches, 1);
         let selected_pack = lost.root.runs[0].blocks[0].object.clone();
         drop(lost);

@@ -751,7 +751,10 @@ Status: in progress; M21 selected addressable base blocks and bounded sorted
 delta runs with vector-partition summaries, jointly with M23's selective-read
 and cache requirements. The range-read contract and experimental segmented
 publication protocol are in [benchmarks/M22.md](benchmarks/M22.md). Production
-serving, broader index-size reclamation and acceptance remain pending. Staged
+serving, broader index-size reclamation and acceptance remain pending. The
+experimental seal now groups puts into bounded vector-local blocks, while the
+run index remains ID-sorted; its targeted MinIO evidence is in
+[benchmarks/M24.md](benchmarks/M24.md). Staged
 mixed-pack reclamation and fully dead block pruning probes are recorded in
 `benchmarks/M22.md`.
 
@@ -804,6 +807,9 @@ globally regrouped 4-bit sketch. Independent 6,400-row grouping lowers its
 unfiltered result to 0.895; 5-bit reaches 0.925 in that approximation. Encoded
 bytes, serving resources, updates and measured acceptance are pending; reuse
 validated M21–M23 evidence.
+The encoded vector-local seal reaches a 0.9455 unfiltered eight-block oracle
+ceiling and an offline 5-bit routed mean of 0.925, but its 1% filtered ceiling
+is 0.841; selective serving and all acceptance gates remain open.
 
 Steps:
 - Evaluate selective filtering/ANN on addressable segments when required by the
