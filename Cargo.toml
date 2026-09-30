@@ -54,3 +54,7 @@ required-features = ["s3", "experimental-segmented"]
 [[example]]
 name = "m24_layout_probe"
 required-features = ["experimental-segmented"]
+
+[[example]]
+name = "m24_selective"
+required-features = ["s3", "experimental-segmented"]

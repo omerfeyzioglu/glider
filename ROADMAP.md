@@ -799,17 +799,14 @@ losing either cache changes performance only. No multi-node work is required.
 
 ## M24 — Selective retrieval and single-machine cost acceptance
 
-Status: in progress. The [eight-block oracle bound](benchmarks/M24.md) shows
-that the current one-block-per-GET, ID-sorted reader cannot reach the M21 mean
-recall target with eight cold block fetches. A [vector-local offline probe](benchmarks/M24.md)
-found 0.945/1.000 mean recall for unfiltered/1% filtered queries with a
-globally regrouped 4-bit sketch. Independent 6,400-row grouping lowers its
-unfiltered result to 0.895; 5-bit reaches 0.925 in that approximation. Encoded
-bytes, serving resources, updates and measured acceptance are pending; reuse
-validated M21–M23 evidence.
-The encoded vector-local seal reaches a 0.9455 unfiltered eight-block oracle
-ceiling and an offline 5-bit routed mean of 0.925, but its 1% filtered ceiling
-is 0.841; selective serving and all acceptance gates remain open.
+Status: in progress. The [M24 evidence](benchmarks/M24.md) rejects the original
+ID-sorted physical blocks for the eight-GET quality target. The current
+vector-local seal and opt-in packed-sketch reader measure 0.9255 unfiltered
+mean recall and 31.5 ms NVMe-warm p95 on local MinIO. Rebuilding the derived
+index needs 7.34 s/2,970 GET after open, every root publication invalidates it,
+and the 1% filtered eight-block ceiling is only 0.841. Persisted derived-index
+recovery, incremental visibility, filtered selective reads, independent-load
+traffic and cost acceptance remain pending.
 
 Steps:
 - Evaluate selective filtering/ANN on addressable segments when required by the

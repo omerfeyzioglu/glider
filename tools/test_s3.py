@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--segmented-only", action="store_true", help="run only the M22 segmented publication recovery test")
     parser.add_argument("--segmented-capacity", type=Path, help="save one experimental segmented SIFT1M load/recovery probe")
     parser.add_argument("--segmented-cache", type=Path, help="save a targeted 250k-row segmented block-cache probe")
+    parser.add_argument("--segmented-selective", type=Path, help="save a targeted 250k-row selective-read probe")
     parser.add_argument("--data", type=Path, help="directory containing verified SIFT1M prefix and query files")
     parser.add_argument("--consolidate-runs", action="store_true", help="enable bounded run-index consolidation in the capacity probe")
     parser.add_argument("--overwrite-half", action="store_true", help="overwrite even IDs once after the capacity load")
@@ -37,14 +38,16 @@ def main():
     segmented_only = args.segmented_only
     capacity = args.segmented_capacity
     cache_probe = args.segmented_cache
-    targeted = sum((range_only, segmented_only, capacity is not None, cache_probe is not None))
+    selective_probe = args.segmented_selective
+    targeted = sum((range_only, segmented_only, capacity is not None,
+                    cache_probe is not None, selective_probe is not None))
     if targeted > 1 or (targeted and any((
             args.benchmark_smoke, args.segment_benchmarks,
             args.compaction_benchmarks, args.search_smoke))):
         parser.error("targeted segmented tests cannot be combined with other modes")
-    if (capacity or cache_probe) and not args.data:
+    if (capacity or cache_probe or selective_probe) and not args.data:
         parser.error("segmented probes require --data")
-    if args.data and not (capacity or cache_probe):
+    if args.data and not (capacity or cache_probe or selective_probe):
         parser.error("--data requires a segmented probe")
     if args.consolidate_runs and not capacity:
         parser.error("--consolidate-runs requires --segmented-capacity")
@@ -70,7 +73,7 @@ def main():
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
-    if capacity or cache_probe:
+    if capacity or cache_probe or selective_probe:
         expected = {
             "sift1m_base_250000.fvecs": "fab6b3f6c68d8bca09c72b0ee84a8126b80aebc635765fb52c0ab3efbda51960",
             "sift1m_query.fvecs": "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc",
@@ -87,10 +90,13 @@ def main():
         if cache_probe:
             run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
                 "--example", "m23_cache", env=env)
-        (capacity or cache_probe).mkdir(parents=True, exist_ok=False)
+        if selective_probe:
+            run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
+                "--example", "m24_selective", env=env)
+        (capacity or cache_probe or selective_probe).mkdir(parents=True, exist_ok=False)
     else:
         run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
-    if not (range_only or segmented_only or capacity or cache_probe):
+    if not (range_only or segmented_only or capacity or cache_probe or selective_probe):
         run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
@@ -117,12 +123,12 @@ def main():
                 "--", "--ignored", "--nocapture", env=env)
             print("M22 segmented publication MinIO recovery test passed.", flush=True)
             return
-        if capacity or cache_probe:
+        if capacity or cache_probe or selective_probe:
             namespace = "segmented-capacity-" + secrets.token_hex(6)
             command = ["target/release/examples/m22_capacity",
                        str(args.data / "sift1m_base_250000.fvecs"),
                        str(args.data / "sift1m_query.fvecs"), "250000", namespace]
-            if args.consolidate_runs or cache_probe:
+            if args.consolidate_runs or cache_probe or selective_probe:
                 command.append("--consolidate")
             if args.overwrite_half:
                 command.append("--overwrite-half")
@@ -144,6 +150,16 @@ def main():
                 if not cache["exact_results_equal"] or cache["exact_top10_ids"] != result["exact_top10_ids"]:
                     raise ValueError("segmented cache probe disagrees with exact oracle")
                 result = {"load": result, "cache": cache}
+            if selective_probe:
+                with tempfile.TemporaryDirectory(prefix="glider-m24-selective-") as cache_dir:
+                    selective = json.loads(run("target/release/examples/m24_selective",
+                                               str(args.data / "sift1m_query.fvecs"), namespace,
+                                               "benchmarks/m24/layout-vector-local-seal/run.json",
+                                               cache_dir, env=env, capture=True, timeout=1800))
+                if (selective["queries"] != 200 or selective["first_query_get"] > 8
+                        or not selective["cache_loss_result_equal"]):
+                    raise ValueError("selective probe returned an unexpected workload")
+                result = {"load": result, "selective": selective}
             result["dataset_sha256"] = expected
             result["minio_image"] = IMAGE
             result["environment"] = platform.platform()
@@ -151,7 +167,7 @@ def main():
                                   if platform.system() == "Darwin" else platform.processor())
             result["rustc"] = run("rustc", "--version", capture=True).strip()
             result["docker_server_version"] = run("docker", "version", "--format", "{{.Server.Version}}", capture=True).strip()
-            output_path = (capacity or cache_probe) / "run.json"
+            output_path = (capacity or cache_probe or selective_probe) / "run.json"
             with output_path.open("x") as output_file:
                 json.dump(result, output_file, indent=2, sort_keys=True)
                 output_file.write("\n")
