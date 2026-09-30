@@ -188,16 +188,27 @@ The seal's fixed sequence still publishes packs and index before one root;
 consolidation and reclamation continue to reuse authenticated block references.
 On the M21 corpus this grouping improves the optimistic eight-block unfiltered
 recall ceiling to 0.9455 with at most 913,347 encoded block bytes across those
-eight, while the filtered ceiling is only 0.841. A scanned 5-bit offline
-sketch routes unfiltered queries at 0.925 mean recall. No persisted sketch,
-filter-specific copy or selective serving reader exists yet. The measured
-limits and MinIO recovery check are in `benchmarks/M24.md`.
+eight, while the filtered ceiling is only 0.841. A persisted sketch and a
+filter-specific copy are still absent. An opt-in experimental unfiltered reader
+now builds a disposable five-bit scalar sketch through two authenticated root
+scans, within a caller-supplied byte limit. It pins one root generation,
+scores packed codes, reads at most the requested blocks through the cache,
+rejects stale root generations, ignores shadowed records and exactly reranks
+selected live records plus the acknowledged log tail. A root publication
+invalidates it; a query then needs an explicit rebuild. Construction and
+queries publish no durable object, and a missing or corrupt authoritative
+block fails the dependent operation. This prototype has no persisted sketch,
+filter support or production admission path. Fresh-process readiness is slow
+because rebuilding reads every root block twice. The measured limits and
+MinIO recovery check are in `benchmarks/M24.md`.
 
 The target write path retains explicit durable acknowledgement and recovery.
 Routine maintenance should rewrite affected bounded data, rather than the full
 collection at a fixed mutation count. M21 selects addressable immutable base
 blocks and bounded ID-sorted delta runs with per-run vector-partition summaries
-as the next layout to implement. A versioned root will name block identities,
+as its initial layout direction. The current experimental seal clusters physical
+blocks while retaining ID-sorted run indexes; per-run summaries are not yet
+implemented. A versioned root names block identities,
 sequence and retry state; immutable mutation logs remain authoritative until a
 complete root covers them. Readers need a bounded latest-ID directory to hide
 stale base candidates and an exact path for quality checks. Block identity and

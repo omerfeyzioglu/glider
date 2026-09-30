@@ -211,3 +211,12 @@ the best eight encoded blocks improve unfiltered recall coverage from 0.855
 to 0.9455 within 913,347 payload bytes; filtered coverage remains 0.841.
 MinIO publication recovery passes, but no selective serving path exists yet.
 [Evidence](../benchmarks/M24.md).
+
+## 2026-09-30 — Packed five-bit selective read prototype
+
+An opt-in in-memory sketch routes unfiltered queries to eight authenticated
+vector-local blocks and exactly reranks them with the current log tail. On
+250,000 SIFT1M rows it reaches 0.9255 mean recall, 31.5 ms NVMe-warm p95 and
+64.0 MB peak RSS. The 7.34 s full-root rebuild and lack of filtered routing
+prevent acceptance; the next design must persist and update the derived sketch
+without changing authoritative log/root semantics. [Evidence](../benchmarks/M24.md).

@@ -15,6 +15,8 @@ use std::{
 mod cache;
 use cache::BlockCache;
 pub use cache::CacheStats;
+mod sketch;
+use sketch::PackedSketch;
 
 pub(crate) const MAX_BLOCK_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_PACK_BYTES: usize = 1024 * 1024;
@@ -659,6 +661,7 @@ pub struct SegmentedDatabase<S> {
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
     cache: Option<Mutex<BlockCache>>,
+    selective: Option<PackedSketch>,
     seal: Option<SealState>,
     reclaim: Option<ReclaimState>,
     prune: Option<PruneState>,
@@ -839,6 +842,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             known_keys: listed,
             obsolete: VecDeque::new(),
             cache: None,
+            selective: None,
             seal: None,
             reclaim: None,
             prune: None,
@@ -1253,6 +1257,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .retain(|_, (sequence, _)| *sequence > seal.boundary);
         self.tail_objects -= (seal.boundary - self.root.sequence) as usize;
         self.root = root;
+        self.selective = None;
         self.schedule_obsolete();
         Ok(true)
     }
@@ -1389,6 +1394,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             }
         });
         self.root = root;
+        self.selective = None;
         self.schedule_obsolete();
         Ok(true)
     }
@@ -1526,6 +1532,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             );
         }
         self.root = state.root;
+        self.selective = None;
         self.schedule_obsolete();
         Ok(true)
     }
@@ -1695,6 +1702,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
         self.root = root;
+        self.selective = None;
         self.schedule_obsolete();
         Ok(true)
     }
@@ -2000,6 +2008,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 2, 4]
         );
+        assert!(db.build_selective_index(1).is_err());
+        db.build_selective_index(1024 * 1024).unwrap();
+        assert!(db
+            .selective_index_bytes()
+            .is_some_and(|bytes| bytes < 1024 * 1024));
+        let selected_ids = |db: &SegmentedDatabase<LocalStore>| {
+            db.search_selective_unfiltered(&[0., 0.], 3, 1)
+                .unwrap()
+                .into_iter()
+                .map(|neighbor| neighbor.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(selected_ids(&db), vec![0, 2, 4]);
+        db.apply_request(retry::Request {
+            id: retry::RequestId {
+                boundary: 4,
+                nonce: [4; 16],
+            },
+            conditions: Vec::new(),
+            mutations: vec![Mutation::Put {
+                id: 0,
+                vector: vec![200., 200.],
+                metadata: BTreeMap::new(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(selected_ids(&db), vec![2, 4, 6]);
+        db.seal_delta().unwrap();
+        assert!(db.search_selective_unfiltered(&[0., 0.], 3, 1).is_err());
     }
 
     #[test]
