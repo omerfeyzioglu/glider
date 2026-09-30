@@ -214,6 +214,7 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 /// decimal suffix for exactly represented small integers, preserving negative
 /// zero and the standard representation of every other value. This formatter
 /// is deliberately NOT used for retry identity, log records or chunk byte reuse.
+/// Segmented blocks also use it; their digests cover whatever bytes were written.
 struct SnapshotNumbers;
 impl serde_json::ser::Formatter for SnapshotNumbers {
     fn write_f32<W: std::io::Write + ?Sized>(
@@ -231,6 +232,17 @@ impl serde_json::ser::Formatter for SnapshotNumbers {
             serde_json::ser::CompactFormatter.write_f32(writer, value)
         }
     }
+}
+/// JSON with `SnapshotNumbers`: same schema and decoded values as `encode`.
+fn encode_compact<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    value
+        .serialize(&mut serde_json::Serializer::with_formatter(
+            &mut bytes,
+            SnapshotNumbers,
+        ))
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    Ok(bytes)
 }
 struct CountBytes(usize);
 impl std::io::Write for CountBytes {

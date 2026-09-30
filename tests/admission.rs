@@ -116,11 +116,16 @@ fn count_and_byte_limits_include_active_work_and_release_before_reply() {
         let bytes =
             serde_json::to_vec(&one).unwrap().len() + serde_json::to_vec(&two).unwrap().len() - 1;
         let limits = if byte_limit {
-            Limits { commands: 8, bytes }
+            Limits {
+                commands: 8,
+                bytes,
+                ..Limits::default()
+            }
         } else {
             Limits {
                 commands: 1,
                 bytes: 1_000_000,
+                ..Limits::default()
             }
         };
         let (gate, release) = store.arm();
@@ -294,4 +299,31 @@ fn dropping_service_stops_admission_but_does_not_cancel_active_publication() {
     release.send(Cut::Pass).unwrap();
     assert_eq!(active.wait().unwrap().value.sequence, 1);
     assert!(matches!(queued.wait(), Err(AdmissionError::Cancelled)));
+}
+
+#[test]
+fn read_priority_runs_queued_queries_before_unaged_writes() {
+    for (priority, expected) in [(None, 2), (Some(Duration::from_secs(60)), 1)] {
+        let store = Store::default();
+        let service = Service::start(
+            open(store.clone()),
+            Limits {
+                read_priority: priority,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        let client = service.client();
+        let (gate, release) = store.arm();
+        let first = client.write(request(1)).unwrap();
+        entered(&gate);
+        // The worker is inside the first PUT; queue a write, then a query.
+        let second = client.write(request(2)).unwrap();
+        let query = client.query(vec![0.], 1, vec![]).unwrap();
+        release.send(Cut::Pass).unwrap();
+        assert_eq!(first.wait().unwrap().value.sequence, 1);
+        assert_eq!(query.wait().unwrap().value.sequence, expected);
+        assert_eq!(second.wait().unwrap().value.sequence, 2);
+        service.shutdown(Shutdown::Drain).unwrap();
+    }
 }

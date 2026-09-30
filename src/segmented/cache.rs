@@ -28,6 +28,13 @@ pub struct CacheStats {
     pub nvme_entries: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Source {
+    Ram,
+    Nvme,
+    Remote,
+}
+
 pub(super) struct BlockCache {
     directory: PathBuf,
     nvme_available: bool,
@@ -124,44 +131,30 @@ impl BlockCache {
         config: Config,
         reference: &BlockRef,
     ) -> Result<Block> {
-        validate_block_ref(reference)?;
-        let name = filename(reference);
-        if let Some(bytes) = self.ram.get(&name).cloned() {
+        loop {
+            let (bytes, source) = self.fetch(store, reference)?;
             match decode_block_bytes(config, reference, &bytes) {
                 Ok(block) => {
-                    self.stats.ram_hits += 1;
-                    self.stats.ram_payload_bytes += bytes.len() as u64;
-                    touch(&mut self.ram_order, &name);
+                    self.accept(reference, source, &bytes);
                     return Ok(block);
                 }
-                Err(_) => {
-                    self.stats.corrupt_entries += 1;
-                    self.remove_ram(&name);
-                }
+                Err(error) if source == Source::Remote => return Err(error),
+                Err(_) => self.reject(reference, source),
             }
         }
-        if self.nvme.contains_key(&name) {
-            match fs::read(self.directory.join(&name)) {
-                Ok(bytes) => match decode_block_bytes(config, reference, &bytes) {
-                    Ok(block) => {
-                        self.stats.nvme_hits += 1;
-                        self.stats.nvme_payload_bytes += bytes.len() as u64;
-                        touch(&mut self.nvme_order, &name);
-                        self.put_ram(&name, &bytes);
-                        return Ok(block);
-                    }
-                    Err(_) => {
-                        self.stats.corrupt_entries += 1;
-                        self.remove_nvme(&name);
-                    }
-                },
-                Err(_) => {
-                    self.stats.cache_io_errors += 1;
-                    self.remove_nvme(&name);
-                }
-            }
+    }
+
+    /// Return candidate bytes from RAM, NVMe or object storage without
+    /// authenticating them. The caller must decode against the root reference,
+    /// then call `accept`, or `reject` for corrupt cached bytes and fetch again.
+    pub(super) fn fetch<S: ObjectStore>(
+        &mut self,
+        store: &S,
+        reference: &BlockRef,
+    ) -> Result<(Vec<u8>, Source)> {
+        if let Some(found) = self.lookup(reference)? {
+            return Ok(found);
         }
-        self.stats.remote_fetches += 1;
         let bytes = store
             .get_range(
                 &reference.object,
@@ -172,11 +165,65 @@ impl BlockCache {
             .ok_or_else(|| {
                 Error::Corrupt(format!("segmented pack missing: {}", reference.object))
             })?;
-        self.stats.remote_payload_bytes += bytes.len() as u64;
-        let block = decode_block_bytes(config, reference, &bytes)?;
-        self.put_ram(&name, &bytes);
-        self.put_nvme(&name, &bytes);
-        Ok(block)
+        self.count_remote(bytes.len());
+        Ok((bytes, Source::Remote))
+    }
+
+    /// Candidate bytes from RAM or NVMe, or `None` for a miss.
+    pub(super) fn lookup(&mut self, reference: &BlockRef) -> Result<Option<(Vec<u8>, Source)>> {
+        validate_block_ref(reference)?;
+        let name = filename(reference);
+        if let Some(bytes) = self.ram.get(&name) {
+            return Ok(Some((bytes.clone(), Source::Ram)));
+        }
+        if self.nvme.contains_key(&name) {
+            match fs::read(self.directory.join(&name)) {
+                Ok(bytes) => return Ok(Some((bytes, Source::Nvme))),
+                Err(_) => {
+                    self.stats.cache_io_errors += 1;
+                    self.remove_nvme(&name);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn count_remote(&mut self, bytes: usize) {
+        self.stats.remote_fetches += 1;
+        self.stats.remote_payload_bytes += bytes as u64;
+    }
+
+    /// Record authenticated bytes: count the hit or admit fetched bytes.
+    pub(super) fn accept(&mut self, reference: &BlockRef, source: Source, bytes: &[u8]) {
+        let name = filename(reference);
+        match source {
+            Source::Ram => {
+                self.stats.ram_hits += 1;
+                self.stats.ram_payload_bytes += bytes.len() as u64;
+                touch(&mut self.ram_order, &name);
+            }
+            Source::Nvme => {
+                self.stats.nvme_hits += 1;
+                self.stats.nvme_payload_bytes += bytes.len() as u64;
+                touch(&mut self.nvme_order, &name);
+                self.put_ram(&name, bytes);
+            }
+            Source::Remote => {
+                self.put_ram(&name, bytes);
+                self.put_nvme(&name, bytes);
+            }
+        }
+    }
+
+    /// Discard cached bytes that failed authentication.
+    pub(super) fn reject(&mut self, reference: &BlockRef, source: Source) {
+        let name = filename(reference);
+        self.stats.corrupt_entries += 1;
+        match source {
+            Source::Ram => self.remove_ram(&name),
+            Source::Nvme => self.remove_nvme(&name),
+            Source::Remote => {}
+        }
     }
 
     fn remove_ram(&mut self, name: &str) {

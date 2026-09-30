@@ -101,7 +101,7 @@ pub struct OwnedStore<S> {
 }
 
 impl<S: ObjectStore> OwnedStore<S> {
-    fn claim(mut inner: S) -> Result<Self> {
+    pub(crate) fn claim(mut inner: S) -> Result<Self> {
         match inner.get(ROOT)? {
             Some(_) => validate_root(&inner)?,
             None => inner.create(ROOT, ROOT_BYTES)?,
@@ -138,7 +138,7 @@ impl<S: ObjectStore> OwnedStore<S> {
         Ok(Self { inner, key })
     }
 
-    fn release(mut self) -> Result<()> {
+    pub(crate) fn release(mut self) -> Result<()> {
         self.inner.remove(&self.key)
     }
 }
@@ -156,6 +156,12 @@ impl<S: ObjectStore> ObjectStore for OwnedStore<S> {
     ) -> Result<Option<Vec<u8>>> {
         self.inner
             .get_range(key, offset, length, expected_payload_len)
+    }
+    fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.get_many(keys)
+    }
+    fn get_ranges(&self, ranges: &[(&str, usize, usize, usize)]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.get_ranges(ranges)
     }
     fn list(&self) -> Result<Vec<String>> {
         Ok(self
