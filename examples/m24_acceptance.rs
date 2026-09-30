@@ -339,11 +339,14 @@ fn load(args: &[String]) -> Result<Value> {
         if db.database().tail_objects() >= 32 {
             loop {
                 let step = Instant::now();
+                let peak_before = peak_footprint().unwrap_or(0);
                 let worked = db.maintenance_step()?;
                 let elapsed = step.elapsed();
-                let entry = units.entry(db.last_unit()).or_insert((0_u64, 0_f64));
+                let raised = peak_footprint().unwrap_or(0) - peak_before;
+                let entry = units.entry(db.last_unit()).or_insert((0_u64, 0_f64, 0_u64));
                 entry.0 += 1;
                 entry.1 = entry.1.max(ms(elapsed));
+                entry.2 += raised;
                 if !worked {
                     break;
                 }
@@ -369,6 +372,98 @@ fn oracle_ids(oracle: &Value, key: &str, index: usize) -> Result<Vec<u64>> {
         .iter()
         .map(|id| id.as_u64().ok_or_else(|| "invalid oracle ID".into()))
         .collect()
+}
+
+/// Delegating engine that attributes peak-footprint increases and time to
+/// commands and maintenance-unit kinds.
+struct Profiled {
+    inner: SegmentedServing<Counted>,
+    profile: Arc<Mutex<BTreeMap<&'static str, (u64, f64, u64)>>>,
+}
+
+impl Engine for Profiled {
+    fn config(&self) -> Config {
+        self.inner.config()
+    }
+    fn sequence(&self) -> u64 {
+        self.inner.sequence()
+    }
+    fn recovery_required(&self) -> bool {
+        self.inner.recovery_required()
+    }
+    fn maintenance_time(&self) -> Duration {
+        self.inner.maintenance_time()
+    }
+    fn apply_request(&mut self, request: Request) -> glider::Result<glider::retry::Outcome> {
+        let peak = peak_footprint().unwrap_or(0);
+        let started = Instant::now();
+        let result = self.inner.apply_request(request);
+        let (elapsed, raised) = (
+            ms(started.elapsed()),
+            peak_footprint().unwrap_or(0).saturating_sub(peak),
+        );
+        let mut profile = self.profile.lock().unwrap();
+        let entry = profile.entry("write").or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.max(elapsed);
+        entry.2 += raised;
+        result
+    }
+    fn revision(&self, id: u64) -> glider::retry::Revision {
+        self.inner.revision(id)
+    }
+    fn request_id(&self) -> glider::Result<RequestId> {
+        self.inner.request_id()
+    }
+    fn lookup_request(&self, id: RequestId) -> glider::Result<glider::retry::Lookup> {
+        self.inner.lookup_request(id)
+    }
+    fn query(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+    ) -> glider::Result<Vec<Neighbor>> {
+        let kind = if filter.is_empty() {
+            "query"
+        } else {
+            "filtered_query"
+        };
+        let peak = peak_footprint().unwrap_or(0);
+        let started = Instant::now();
+        let result = self.inner.query(query, k, filter);
+        let (elapsed, raised) = (
+            ms(started.elapsed()),
+            peak_footprint().unwrap_or(0).saturating_sub(peak),
+        );
+        let mut profile = self.profile.lock().unwrap();
+        let entry = profile.entry(kind).or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.max(elapsed);
+        entry.2 += raised;
+        result
+    }
+    fn idle_step(&mut self) -> glider::Result<bool> {
+        let peak = peak_footprint().unwrap_or(0);
+        let started = Instant::now();
+        let result = self.inner.idle_step();
+        let (elapsed, raised) = (
+            ms(started.elapsed()),
+            peak_footprint().unwrap_or(0).saturating_sub(peak),
+        );
+        let mut profile = self.profile.lock().unwrap();
+        let entry = profile.entry(self.inner.last_unit()).or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.max(elapsed);
+        entry.2 += raised;
+        result
+    }
+    fn remote_reads(&self) -> (u64, u64) {
+        self.inner.remote_reads()
+    }
+    fn close(self) -> glider::Result<()> {
+        self.inner.close()
+    }
 }
 
 struct Write {
@@ -464,8 +559,12 @@ fn serve(args: &[String]) -> Result<Value> {
     let cache_after_static = db.database().cache_stats()?;
     drop(oracle);
     let initial_sequence = db.sequence();
+    let profile = Arc::new(Mutex::new(BTreeMap::new()));
     let service = Service::start(
-        db,
+        Profiled {
+            inner: db,
+            profile: profile.clone(),
+        },
         Limits {
             read_priority: Some(Duration::from_millis(50)),
             ..Limits::default()
@@ -595,9 +694,31 @@ fn serve(args: &[String]) -> Result<Value> {
         let stop = sampler_stop.clone();
         std::thread::spawn(move || {
             let mut series = Vec::new();
+            let mut tick = 0_u64;
             while stop.load(Ordering::Acquire) == 0 {
+                if env::var("GLIDER_DEBUG_RSS").is_ok() {
+                    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+                    unsafe {
+                        libc::proc_pid_rusage(
+                            std::process::id() as i32,
+                            libc::RUSAGE_INFO_V4,
+                            info.as_mut_ptr().cast(),
+                        )
+                    };
+                    let info = unsafe { info.assume_init() };
+                    eprintln!(
+                        "{} {} {}",
+                        tick, info.ri_resident_size, info.ri_phys_footprint
+                    );
+                    std::thread::sleep(Duration::from_millis(100));
+                    tick += 1;
+                    if tick % 10 != 0 {
+                        continue;
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
                 series.push(rss());
-                std::thread::sleep(Duration::from_secs(1));
             }
             series
         })
@@ -674,6 +795,9 @@ fn serve(args: &[String]) -> Result<Value> {
         "maintenance_errors":status.maintenance_errors,
         "http":counts(&before,&after),"requests_by_kind":kinds,"get_payload_bytes":downloaded,
         "peak_rss_bytes":peak_rss_bytes,"peak_physical_footprint_bytes":peak_footprint(),
+        "engine_profile":profile.lock().unwrap().iter().map(|(kind, (count, max_ms, raised))| {
+            (kind.to_string(), json!({"count":count,"max_ms":max_ms,"peak_footprint_raised_bytes":raised}))
+        }).collect::<BTreeMap<_, _>>(),
         "cache":cache_after_static,
         "peak_rss_per_second":rss_series,
         "peak_rss_stages":{"before_open":rss_before_open,"after_open":rss_after_open,
@@ -764,6 +888,20 @@ fn verify(args: &[String]) -> Result<Value> {
         ("uniform_10", ReadBudget::uniform(10)),
         ("uniform_12", ReadBudget::uniform(12)),
         ("serving", serving_budget),
+        (
+            "serving_16",
+            ReadBudget {
+                blocks: 16,
+                ..serving_budget
+            },
+        ),
+        (
+            "serving_24",
+            ReadBudget {
+                blocks: 24,
+                ..serving_budget
+            },
+        ),
     ] {
         let mut recall = [0_usize; 2];
         for oracle in &oracles {
@@ -779,6 +917,27 @@ fn verify(args: &[String]) -> Result<Value> {
         }
         budgets.insert(label, recall[0] as f64 / recall[1] as f64);
     }
+    // Best possible coverage by any 8 committed blocks (tail rows count as
+    // found): separates layout locality from routing quality.
+    let mut ceiling = [0_usize; 2];
+    for oracle in oracles.iter().filter(|oracle| !oracle.filtered) {
+        let mut per_block = BTreeMap::<(usize, usize), usize>::new();
+        let mut tail = 0;
+        for &(_, id) in &oracle.heap {
+            match db.database().current_block_of(id) {
+                Some(block) => *per_block.entry(block).or_default() += 1,
+                None => tail += 1,
+            }
+        }
+        let mut counts: Vec<_> = per_block.into_values().collect();
+        counts.sort_unstable_by(|a, b| b.cmp(a));
+        ceiling[0] += tail + counts.iter().take(8).sum::<usize>();
+        ceiling[1] += oracle.heap.len();
+    }
+    budgets.insert(
+        "oracle_best_8_blocks",
+        ceiling[0] as f64 / ceiling[1] as f64,
+    );
     let mut quality = BTreeMap::<&str, (Vec<f64>, usize)>::new();
     let mut first_results = Vec::new();
     for oracle in &oracles {

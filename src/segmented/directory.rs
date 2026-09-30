@@ -41,6 +41,11 @@ pub(super) struct Directory {
 }
 
 impl Directory {
+    /// Reserve room for `additional` more entries in one allocation.
+    pub(super) fn reserve(&mut self, additional: usize) {
+        self.slots.reserve_exact(additional);
+    }
+
     pub(super) fn len(&self) -> usize {
         self.slots.len()
     }

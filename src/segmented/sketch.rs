@@ -1,7 +1,10 @@
 //! Persisted per-pack five-bit routing sketches for the experimental segmented
 //! reader. Each immutable pack starts with a derived sketch frame bound to the
 //! digests of its blocks; the root and logs remain authoritative.
-use super::{consider, decode_block_bytes, Block, BlockRef, Ranked, Root, SegmentedDatabase};
+use super::{
+    authenticate, codec, consider, decode_block_bytes, Block, BlockRef, Ranked, Root,
+    SegmentedDatabase,
+};
 use crate::{store::ObjectStore, Config, Error, Metric, Mutation, Neighbor, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,11 +15,12 @@ const LEVELS: f64 = 31.;
 const MAGIC: &[u8; 8] = b"GLSKT001";
 
 /// Blocks an unfiltered selective query reads. Routing ranks `blocks`
-/// candidates; in rank order a candidate is chosen if the chosen blocks still
-/// total at most `bytes` and form at most `requests` ranges, where blocks
-/// adjacent in one pack share a range. The choice never depends on cache
-/// contents, so each query issues at most `requests` range GETs and
-/// downloads at most `bytes` payload bytes.
+/// candidates. In rank order each candidate widens its pack's span, a single
+/// byte range from the first to the last chosen block of that pack, if all
+/// spans still total at most `bytes` and number at most `requests`. Every
+/// live block inside a span is reranked, since its bytes are read anyway.
+/// The choice never depends on cache contents, so each query issues at most
+/// `requests` range GETs and downloads at most `bytes` payload bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadBudget {
     pub blocks: usize,
@@ -25,7 +29,7 @@ pub struct ReadBudget {
 }
 
 impl ReadBudget {
-    /// The first `blocks` routed blocks, without a byte limit.
+    /// Spans for the first `blocks` routed blocks, without a byte limit.
     pub fn uniform(blocks: usize) -> Self {
         Self {
             blocks,
@@ -35,44 +39,42 @@ impl ReadBudget {
     }
 }
 
-/// Choose candidates in rank order under the budget; returns chosen candidate
-/// indexes and the coalesced `(object, offset, length)` ranges.
+/// Pack spans `(object, offset, length, payload_len)` chosen in rank order.
 fn choose<'a>(
     candidates: &[&'a BlockRef],
     budget: ReadBudget,
-) -> (Vec<usize>, Vec<(&'a str, usize, usize, usize)>) {
-    let mut chosen: Vec<usize> = Vec::new();
-    let mut ranges: Vec<(&str, usize, usize, usize)> = Vec::new();
+) -> Vec<(&'a str, usize, usize, usize)> {
+    let mut spans: Vec<(&str, usize, usize, usize)> = Vec::new();
     let mut bytes = 0_usize;
-    for (index, reference) in candidates.iter().enumerate() {
-        let Some(total) = bytes
-            .checked_add(reference.length)
-            .filter(|&t| t <= budget.bytes)
-        else {
-            continue;
-        };
-        let mut next = ranges.clone();
-        next.push((
-            reference.object.as_str(),
-            reference.offset,
-            reference.length,
-            reference.payload_len,
-        ));
-        next.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        let mut merged: Vec<(&str, usize, usize, usize)> = Vec::with_capacity(next.len());
-        for range in next {
-            match merged.last_mut() {
-                Some(last) if last.0 == range.0 && last.1 + last.2 == range.1 => last.2 += range.2,
-                _ => merged.push(range),
+    for reference in candidates {
+        let (start, end) = (reference.offset, reference.offset + reference.length);
+        match spans.iter().position(|span| span.0 == reference.object) {
+            Some(index) => {
+                let (_, old_start, old_end, _) = spans[index];
+                let (new_start, new_end) = (old_start.min(start), old_end.max(end));
+                let total = bytes - (old_end - old_start) + (new_end - new_start);
+                if total <= budget.bytes {
+                    spans[index].1 = new_start;
+                    spans[index].2 = new_end;
+                    bytes = total;
+                }
+            }
+            None => {
+                if spans.len() < budget.requests
+                    && bytes
+                        .checked_add(end - start)
+                        .is_some_and(|t| t <= budget.bytes)
+                {
+                    spans.push((reference.object.as_str(), start, end, reference.payload_len));
+                    bytes += end - start;
+                }
             }
         }
-        if merged.len() <= budget.requests {
-            ranges = merged;
-            bytes = total;
-            chosen.push(index);
-        }
     }
-    (chosen, ranges)
+    spans
+        .into_iter()
+        .map(|(object, start, end, payload)| (object, start, end - start, payload))
+        .collect()
 }
 
 /// Namespace-level derived-index declaration, persisted in segmented metadata
@@ -543,42 +545,50 @@ impl PackSketch {
     fn compact(&mut self) {
         let width = self.codes.len() / self.ids.len().max(1);
         let dimensions = self.minima.len();
-        let (mut ids, mut codes) = (Vec::new(), Vec::new());
-        let (mut resident_rows, mut resident_vectors) = (Vec::new(), Vec::new());
-        let mut resident = self.resident_rows.iter().enumerate().peekable();
+        // Rows move only toward the front, so compaction is in place and the
+        // shrink below needs no second full-size buffer.
+        let (mut kept, mut kept_resident, mut resident_index) = (0, 0, 0);
         for block in &mut self.blocks {
-            let start = ids.len();
+            let start = kept;
             for row in block.start..block.end {
-                let resident_index = match resident.peek() {
-                    Some(&(index, &at)) if at as usize == row => {
-                        resident.next();
-                        Some(index)
-                    }
-                    _ => None,
-                };
-                if !(self.live[row / 64] & (1 << (row % 64)) != 0) {
+                let resident = self
+                    .resident_rows
+                    .get(resident_index)
+                    .is_some_and(|&at| at as usize == row);
+                if resident {
+                    resident_index += 1;
+                }
+                if self.live[row / 64] & (1 << (row % 64)) == 0 {
                     continue;
                 }
-                if let Some(index) = resident_index {
-                    resident_rows.push(ids.len() as u32);
-                    resident_vectors.extend_from_slice(
-                        &self.resident_vectors[index * dimensions..(index + 1) * dimensions],
+                if resident {
+                    self.resident_rows[kept_resident] = kept as u32;
+                    self.resident_vectors.copy_within(
+                        (resident_index - 1) * dimensions..resident_index * dimensions,
+                        kept_resident * dimensions,
                     );
+                    kept_resident += 1;
                 }
-                ids.push(self.ids[row]);
-                codes.extend_from_slice(&self.codes[row * width..(row + 1) * width]);
+                self.ids[kept] = self.ids[row];
+                self.codes
+                    .copy_within(row * width..(row + 1) * width, kept * width);
+                kept += 1;
             }
             block.start = start;
-            block.end = ids.len();
+            block.end = kept;
         }
-        self.live = vec![u64::MAX; ids.len().div_ceil(64)];
-        if !ids.len().is_multiple_of(64) {
-            *self.live.last_mut().unwrap() = (1 << (ids.len() % 64)) - 1;
+        self.ids.truncate(kept);
+        self.ids.shrink_to_fit();
+        self.codes.truncate(kept * width);
+        self.codes.shrink_to_fit();
+        self.resident_rows.truncate(kept_resident);
+        self.resident_rows.shrink_to_fit();
+        self.resident_vectors.truncate(kept_resident * dimensions);
+        self.resident_vectors.shrink_to_fit();
+        self.live = vec![u64::MAX; kept.div_ceil(64)];
+        if !kept.is_multiple_of(64) {
+            *self.live.last_mut().unwrap() = (1 << (kept % 64)) - 1;
         }
-        self.ids = ids;
-        self.codes = codes;
-        self.resident_rows = resident_rows;
-        self.resident_vectors = resident_vectors;
     }
 
     fn is_live(&self, row: usize) -> bool {
@@ -983,25 +993,49 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         budget: ReadBudget,
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<()> {
-        let targets: Vec<_> = ranked
+        let candidates: Vec<_> = ranked
             .iter()
             .map(|&(_, slot, index)| {
-                let sketch = &self.sketches.packs[slot];
-                let block = &sketch.blocks[index];
-                let (run, ordinal) = block.root.expect("routed blocks are rooted");
-                let live = (block.start..block.end)
-                    .filter(|&row| sketch.is_live(row))
-                    .count();
-                (run, ordinal, live)
+                let (run, ordinal) = self.sketches.packs[slot].blocks[index]
+                    .root
+                    .expect("routed blocks are rooted");
+                &self.root.runs[run].blocks[ordinal]
             })
             .collect();
-        let references: Vec<_> = targets
-            .iter()
-            .map(|&(run, ordinal, _)| &self.root.runs[run].blocks[ordinal])
-            .collect();
-        let (chosen, ranges) = choose(&references, budget);
-        let targets: Vec<_> = chosen.iter().map(|&index| targets[index]).collect();
-        let references: Vec<_> = chosen.iter().map(|&index| references[index]).collect();
+        let ranges = choose(&candidates, budget);
+        // Every rooted block inside a chosen span, in span and offset order.
+        let mut targets = Vec::new();
+        let mut references = Vec::new();
+        for &(object, offset, length, _) in &ranges {
+            let slot = ranked
+                .iter()
+                .zip(&candidates)
+                .find(|(_, reference)| reference.object == object)
+                .map(|(&(_, slot, _), _)| slot)
+                .expect("each span comes from a candidate");
+            let sketch = &self.sketches.packs[slot];
+            let mut inside: Vec<_> = sketch
+                .blocks
+                .iter()
+                .filter_map(|block| {
+                    let (run, ordinal) = block.root?;
+                    let reference = &self.root.runs[run].blocks[ordinal];
+                    (reference.offset >= offset
+                        && reference.offset + reference.length <= offset + length)
+                        .then(|| {
+                            let live = (block.start..block.end)
+                                .filter(|&row| sketch.is_live(row))
+                                .count();
+                            (reference.offset, (run, ordinal, live), reference)
+                        })
+                })
+                .collect();
+            inside.sort_by_key(|&(at, _, _)| at);
+            for (_, target, reference) in inside {
+                targets.push(target);
+                references.push(reference);
+            }
+        }
         let fetched = self.fetch_blocks(&references, &ranges)?;
         let (config, latest, tail) = (self.config, &self.latest, &self.tail);
         // Current records of one authenticated block, as a local top-k.
@@ -1043,10 +1077,68 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             }
             Ok(local.into_vec())
         };
+        // Version 2 blocks stream records from a reused buffer; version 1
+        // blocks decode to a `Block` first.
+        let stream = |index: usize, bytes: &[u8]| -> Result<Vec<Ranked>> {
+            let (run, ordinal, live) = targets[index];
+            let reference = references[index];
+            let mut local = BinaryHeap::new();
+            let (mut seen, mut first, mut last) = (0, None, 0);
+            let mut vector = Vec::with_capacity(config.dimensions);
+            let (partition, count) = codec::visit(config, bytes, |view| {
+                first.get_or_insert(view.id);
+                last = view.id;
+                if tail.contains_key(&view.id) {
+                    return Ok(());
+                }
+                let Some(location) = latest.get(&view.id) else {
+                    return Ok(());
+                };
+                if location.run != run
+                    || location.entry.block as usize != ordinal
+                    || location.entry.sequence != view.sequence
+                {
+                    return Ok(());
+                }
+                match view.put {
+                    Some((components, _, _)) if !location.entry.deleted => {
+                        seen += 1;
+                        codec::components(components, &mut vector);
+                        consider(&mut local, k, config, query, view.id, &vector);
+                    }
+                    None if location.entry.deleted => {}
+                    _ => {
+                        return Err(Error::Corrupt(
+                            "selective block disagrees with latest-ID directory".into(),
+                        ))
+                    }
+                }
+                Ok(())
+            })?;
+            if partition != reference.partition
+                || count != reference.rows
+                || first != Some(reference.first_id)
+                || last != reference.last_id
+            {
+                return Err(Error::Corrupt("segmented block reference mismatch".into()));
+            }
+            if seen != live {
+                return Err(Error::Corrupt(
+                    "segmented sketch disagrees with selected block".into(),
+                ));
+            }
+            Ok(local.into_vec())
+        };
         // Outer error: bytes failed authentication. Inner error: fatal.
         let work = |index: usize| -> std::result::Result<Result<Vec<Ranked>>, Error> {
-            decode_block_bytes(config, references[index], &fetched[index].0)
-                .map(|block| scan(index, block))
+            let bytes = &fetched[index].0;
+            authenticate(references[index], bytes)?;
+            Ok(if codec::is_v2(bytes) {
+                stream(index, bytes)
+            } else {
+                decode_block_bytes(config, references[index], bytes)
+                    .and_then(|block| scan(index, block))
+            })
         };
         let threads = self.query_threads.clamp(1, targets.len().max(1));
         let outcomes: Vec<_> = if threads == 1 {
@@ -1128,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn read_budget_coalesces_adjacent_blocks_and_caps_requests_and_bytes() {
+    fn read_budget_widens_pack_spans_within_request_and_byte_caps() {
         use super::{choose, ReadBudget};
         use crate::segmented::BlockRef;
         let block = |object: &str, offset: usize, length: usize| BlockRef {
@@ -1145,24 +1237,29 @@ mod tests {
         let refs = [
             block("a", 100, 100),
             block("b", 0, 300),
-            block("a", 200, 100), // adjacent to the first: shares its range
-            block("c", 0, 400),   // would exceed the byte cap
-            block("a", 0, 100),   // adjacent before the first
-            block("d", 0, 50),    // needs a third range
+            block("a", 300, 100), // widens a to 100..400 (300 bytes)
+            block("c", 0, 100),   // a third span exceeds two requests
+            block("a", 600, 100), // widening a to 100..700 exceeds 700 bytes
+            block("b", 300, 50),  // widens b to 0..350
         ];
         let refs: Vec<_> = refs.iter().collect();
-        let (chosen, ranges) = choose(
-            &refs,
-            ReadBudget {
-                blocks: 6,
-                requests: 2,
-                bytes: 700,
-            },
+        let budget = ReadBudget {
+            blocks: 6,
+            requests: 2,
+            bytes: 700,
+        };
+        assert_eq!(
+            choose(&refs, budget),
+            vec![("a", 100, 300, 1_000), ("b", 0, 350, 1_000)]
         );
-        assert_eq!(chosen, vec![0, 1, 2, 4]);
-        assert_eq!(ranges, vec![("a", 0, 300, 1_000), ("b", 0, 300, 1_000)]);
-        let (chosen, _) = choose(&refs, ReadBudget::uniform(6));
-        assert_eq!(chosen, (0..6).collect::<Vec<_>>());
+        assert_eq!(
+            choose(&refs, ReadBudget::uniform(6)),
+            vec![
+                ("a", 100, 600, 1_000),
+                ("b", 0, 350, 1_000),
+                ("c", 0, 100, 1_000)
+            ]
+        );
     }
 
     /// Pruned, threaded routing must choose exactly the blocks a full scan of

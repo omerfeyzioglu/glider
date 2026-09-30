@@ -190,63 +190,93 @@ eight, while the filtered ceiling is only 0.841. See `benchmarks/M24.md`.
 
 ### Persisted pack sketches and selective reads
 
-Every published pack `sgpack-{suffix}` has one derived sketch object
-`sgsketch-{suffix}`, created immediately after the pack in the same seal or
-reclamation step and before any root references the pack. Its binary payload
-starts with the versioned magic `GLSKT001`, then dimensions, metric, five-bit
+Every pack written by a seal or reclamation begins with a sketch frame: the
+versioned magic `GLPKSK01`, the sketch length (u64 little-endian), the
+SHA-256 of the sketch bytes, then the sketch; block offsets follow the frame
+and remain covered by the root's block digests. The sketch payload starts
+with its own versioned magic `GLSKT001`, then dimensions, metric, five-bit
 width, the SHA-256 of the namespace's derived-index options, the pack key and,
 per block, the block's SHA-256 digest and put-row count. The body holds one
 per-pack affine codebook (f32 minimum and step per dimension), row IDs in
 block order, packed five-bit codes (little-endian bit fields) and full f32
 vectors of rows matching the declared resident predicate. Tombstones have no
 row. A per-pack codebook is between the measured run-local and block-local
-granularities; it has the same lifetime as its immutable pack, so run
-consolidation and pruning reuse sketches unchanged and only reclamation writes
-a new one. Discovery uses the key derived from each referenced pack and the
-open-time listing; the root format is unchanged.
+granularities. Embedding the sketch gives it exactly its pack's lifetime and
+costs no extra PUT or DELETE: consolidation and pruning reuse packs and their
+sketches unchanged, and reclamation writes a new pack with a new sketch. The
+root format is unchanged. Packs are at most 1 MiB of blocks plus a sketch of
+at most 1 MiB. Blocks are JSON block version 1 encoded with the compact
+integral-float formatter (exactly represented integers without a decimal
+suffix, negative zero and every other value unchanged); decoding yields the
+same f32 bits, so no block version change is needed.
 
-The sketch is derived, never authoritative. Opening loads the sketch of every
-referenced pack and binds each root block reference to a sketch block with the
-same digest. A missing sketch, a store-reported corrupt sketch or one failing
-decoding or identity checks is rebuilt in memory from that pack's authenticated
-referenced blocks and counted (`sketch_rebuilds`); nothing is republished at
-that immutable key. An interrupted pack/sketch publication leaves unreferenced
-objects that cleanup removes; the prior root remains selected. Liveness is a
-per-row bit derived from the latest-ID directory and log tail: an acknowledged
-tail write clears its prior row, a published seal or reclamation activates its
-new pack's current rows, and consolidation/pruning only rebind locations.
-Root publications therefore no longer invalidate the reader, and recovery
-reconstructs identical bits. A failure to bind after a root publication
-poisons the handle.
+The sketch is derived, never authoritative. Opening reads a bounded prefix
+of each referenced pack through batched range reads (16 at a time), re-reads
+a longer prefix if the frame needs it, verifies the frame digest (range reads
+bypass the whole-object envelope) and decodes it, then binds each root block
+reference to a sketch block with the same digest. A pack without a valid
+frame, a store-reported corrupt range, or a sketch failing decoding or
+identity checks has its sketch rebuilt in memory from that pack's
+authenticated referenced blocks and counted (`sketch_rebuilds`). An
+interrupted pack publication leaves an unreferenced pack that cleanup removes;
+the prior root remains selected. Liveness is a per-row bit derived from the
+latest-ID directory and log tail: an acknowledged tail write clears its prior
+row, a published seal or reclamation activates its new pack's current rows,
+and consolidation/pruning only rebind locations. A cleared row never becomes
+live again, so an in-memory compaction (at open and as an idle maintenance
+unit) drops shadowed rows and keeps resident routing state proportional to
+the live set; reopening reloads the full persisted sketches. Root
+publications do not invalidate the reader, and recovery reconstructs
+identical bits. A failure to bind after a root publication poisons the
+handle. The latest-ID directory is a sorted vector of 24-byte slots, merged
+in place.
 
-`search_selective(query, k, max_blocks, filter)` supports two modes. With no
-filter it scores every live code, reads at most `max_blocks` highest-ranked
-blocks through the block cache, verifies that each block's current records
-match the sketch's live rows, and exactly reranks them plus the live tail; it
-is approximate and may miss neighbors outside the selected blocks. With exactly
-the declared resident predicate it scans the resident full-precision vectors
-and matching tail rows and is exact, with no block reads. Other filters return
-an explicit error; `search_exact` remains the oracle. Segmented metadata
-version 3 declares `SegmentedOptions { resident_filter }` once at namespace
-creation; version 2 namespaces have no resident predicate, and opening with
-different options fails. A resident predicate is justified only when its
-matching rows fit the index budget: at M21's 1% cohort it adds about 1.3 MB.
-Filter-specific grouped block copies were rejected because each overwrite
-would publish a second authoritative-sized copy and the exact resident posting
-already meets the query gates.
+`search_selective_within(query, k, budget, filter)` supports two modes. With
+no filter it scores live codes, visiting packs in order of a per-pack lower
+bound and abandoning a row once its prefix sum exceeds both its block's best
+and the current last kept candidate; sums of nonnegative terms never
+decrease, so the ranked blocks equal those of a full scan. It ranks
+`budget.blocks` candidates by minimum approximate row distance and chooses,
+in rank order, those fitting `budget.requests` coalesced ranges (adjacent
+blocks in one pack share a range) and `budget.bytes`. The choice never
+depends on cache contents, so each query issues at most that many range GETs
+and bytes, and losing a cache changes latency only. Chosen blocks are fetched
+through the cache (a range containing any miss is fetched whole, in one
+batched read), authenticated, checked against the sketch's live rows and
+exactly reranked with the live tail on scoped threads. The result is
+approximate. With exactly the declared resident predicate the query scans the
+resident full-precision vectors and matching tail rows and is exact, with no
+block reads. Other filters return an explicit error; `search_exact` remains
+the oracle. Segmented metadata version 3 declares
+`SegmentedOptions { resident_filter }` once at namespace creation; version 2
+namespaces have no resident predicate, and opening with different options
+fails. A resident predicate is justified only when its matching rows fit the
+index budget: at M21's 1% cohort it adds about 1.3 MB. Filter-specific
+grouped block copies were rejected because each overwrite would publish a
+second copy and the exact resident posting already meets the query gates.
+
+Reclamation freezes, together, the mostly dead packs with the most garbage
+whose estimated live bytes fit 7/8 of one pack (the margin covers estimation
+error), rewrites their live records into one new pack block for block, and
+publishes one root; this bounds reclamation PUTs, DELETEs and roots per dead
+byte. `ObjectStore::get_many` and `get_ranges` batch independent reads; the
+S3 backend issues up to 16 concurrently, and other backends default to serial
+reads. Opening uses them for run indexes, the log tail and sketch frames.
 
 ### Segmented serving
 
 `SegmentedServing` claims the namespace with the owned-store protocol, opens
 it with a sketch byte budget and an optional block cache, and implements the
 `admission::Engine` trait, so `admission::Service` runs it on the single
-committer thread. Queries use `search_selective` with a fixed block budget;
+committer thread. Queries use `search_selective_within` with a fixed read
+budget (M21: 12 ranked candidates, 8 range requests, 1 MiB);
 unfiltered results are approximate under the M21 quality policy (mean
 recall@10 >=0.90, fifth percentile >=0.80, <1% short results), and the
 resident predicate is exact. Maintenance never runs concurrently with a
 command: while the queue is empty the worker executes one bounded unit (one
-seal/prune/reclaim step, a seal plan, one run consolidation, a prune/reclaim
-plan or a four-object cleanup batch) and then rechecks the queue. A seal starts
+seal/prune/reclaim step, an in-memory sketch compaction of one pack, a seal
+plan, one run consolidation, a prune/reclaim plan or a four-object cleanup
+batch) and then rechecks the queue. A seal starts
 at 32 unsealed log objects. If the tail reaches the hard bound of 64 before
 idle time allows the seal, the next write finishes any staged prune/reclaim
 and a full seal synchronously, reported as that command's maintenance time.
@@ -254,8 +284,8 @@ A failed idle read leaves state unchanged, is counted and retried after the
 next command; an uncertain write poisons the engine and fails the service.
 
 `backup_to` copies root zero, the selected root, its indexes, packs (each
-verified against the root's block digests before its PUT), available sketches
-and the acknowledged log tail into an empty destination, writes `metadata`
+verified against the root's block digests before its PUT; packs carry their
+sketches) and the acknowledged log tail into an empty destination, writes `metadata`
 last, then opens the destination and compares sequence, root generation and
 live counts. Destination failure does not poison the source; a failed or
 partial destination must not be promoted.
@@ -265,8 +295,8 @@ Routine maintenance should rewrite affected bounded data, rather than the full
 collection at a fixed mutation count. M21 selects addressable immutable base
 blocks and bounded ID-sorted delta runs with per-run vector-partition summaries
 as its initial layout direction. The current experimental seal clusters physical
-blocks while retaining ID-sorted run indexes; per-run summaries are not yet
-implemented. A versioned root names block identities,
+blocks while retaining ID-sorted run indexes; the vector summaries are the
+per-pack sketches above rather than per-run summaries. A versioned root names block identities,
 sequence and retry state; immutable mutation logs remain authoritative until a
 complete root covers them. Readers need a bounded latest-ID directory to hide
 stale base candidates and an exact path for quality checks. Block identity and

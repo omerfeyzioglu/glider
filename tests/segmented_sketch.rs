@@ -117,7 +117,7 @@ fn open(path: &Path, hooks: &Arc<Mutex<Hooks>>) -> Result<SegmentedDatabase<Hook
         config(),
         options(),
     )
-    .map(|db| db.with_query_threads(3))
+    .map(|db| db.with_query_threads(3).with_reclaim_min_garbage(1))
 }
 
 fn ids(results: Vec<glider::Neighbor>) -> Vec<(u64, u64)> {
@@ -328,4 +328,99 @@ fn namespace_options_are_declared_once() {
         options()
     )
     .is_err());
+}
+
+#[test]
+fn writes_between_seal_steps_keep_sealed_and_newer_versions() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("db");
+    let hooks = Arc::new(Mutex::new(Hooks::default()));
+    let mut db = open(&path, &hooks).unwrap();
+    let mut rng = Rng(99);
+    let mut model = BTreeMap::new();
+    let mut nonce = 0_u128;
+    let mut write = |db: &mut SegmentedDatabase<HookStore>,
+                     ids: Vec<u64>,
+                     rng: &mut Rng,
+                     model: &mut BTreeMap<u64, Vec<f32>>| {
+        nonce += 1;
+        let mutations = ids
+            .into_iter()
+            .map(|id| {
+                let vector = rng.vector();
+                model.insert(id, vector.clone());
+                Mutation::Put {
+                    id,
+                    vector,
+                    metadata: BTreeMap::new(),
+                }
+            })
+            .collect();
+        db.apply_request(Request {
+            id: RequestId {
+                boundary: db.sequence(),
+                nonce: nonce.to_le_bytes(),
+            },
+            conditions: Vec::new(),
+            mutations,
+        })
+        .unwrap();
+    };
+    for batch in 0..30_u64 {
+        write(
+            &mut db,
+            (batch * 100..batch * 100 + 100).collect(),
+            &mut rng,
+            &mut model,
+        );
+    }
+    db.start_seal().unwrap();
+    let mut steps = 0;
+    // Overwrite sealed IDs after every staged step, including twice per ID.
+    while db.seal_step().unwrap() {
+        steps += 1;
+        let ids = (0..50)
+            .map(|_| rng.below(3_000))
+            .collect::<std::collections::BTreeSet<_>>();
+        write(&mut db, ids.into_iter().collect(), &mut rng, &mut model);
+    }
+    assert!(steps >= 4, "multi-pack seal expected, got {steps} steps");
+    let check = |db: &SegmentedDatabase<HookStore>, rng: &mut Rng| {
+        for _ in 0..5 {
+            let query = rng.vector();
+            let mut expected: Vec<_> = model
+                .iter()
+                .map(|(&id, vector)| {
+                    let distance: f64 = query
+                        .iter()
+                        .zip(vector)
+                        .map(|(a, b)| (f64::from(*a) - f64::from(*b)).powi(2))
+                        .sum();
+                    (distance.to_bits(), id)
+                })
+                .collect();
+            expected.sort_unstable();
+            let found: Vec<_> = db
+                .search_exact(&query, 10, &[])
+                .unwrap()
+                .into_iter()
+                .map(|n| (n.distance.to_bits(), n.id))
+                .collect();
+            assert_eq!(found, expected[..10]);
+            let swapped: Vec<_> = found.iter().map(|&(bits, id)| (id, bits)).collect();
+            assert_eq!(
+                ids(db
+                    .search_selective(&query, 10, db.block_count(), &[])
+                    .unwrap()),
+                swapped
+            );
+        }
+    };
+    check(&db, &mut rng);
+    for (&id, vector) in &model {
+        assert_eq!(&db.get(id).unwrap().unwrap().vector, vector);
+    }
+    drop(db);
+    let db = open(&path, &hooks).unwrap();
+    check(&db, &mut rng);
 }

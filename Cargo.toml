@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = []
-experimental-segmented = []
+experimental-segmented = ["dep:zstd"]
 s3 = ["dep:object_store", "dep:tokio", "dep:futures", "dep:async-trait"]
 
 [dependencies]
@@ -18,6 +18,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 getrandom = "0.2"
+zstd = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 libc = "0.2"
