@@ -4,6 +4,7 @@
 //! bounded admission queue. Writes are acknowledged only after durable
 //! publication; every write carries a request ID (supplied by the client for
 //! safe retries, otherwise issued by the server and returned).
+use crate::segmented::QueryOptions;
 use crate::{
     admission::{self, Client, Limits, Service, Shutdown},
     ownership::is_control_key,
@@ -557,6 +558,10 @@ struct QueryBody {
     k: usize,
     #[serde(default)]
     filter: BTreeMap<String, String>,
+    #[serde(default)]
+    include_metadata: bool,
+    #[serde(default)]
+    include_vector: bool,
 }
 
 fn default_k() -> usize {
@@ -576,16 +581,34 @@ async fn query(
     }
     let client = state.client.clone();
     blocking(move || {
+        let options = QueryOptions {
+            include_metadata: body.include_metadata,
+            include_vector: body.include_vector,
+        };
         let result = client
-            .query(body.vector, body.k, body.filter.into_iter().collect())?
+            .query_with_options(
+                body.vector,
+                body.k,
+                body.filter.into_iter().collect(),
+                options,
+            )?
             .wait()?
             .value;
         Ok(Json(json!({
             "sequence": result.sequence,
             "results": result
-                .neighbors
+                .hits
                 .iter()
-                .map(|neighbor| json!({ "id": neighbor.id, "distance": neighbor.distance }))
+                .map(|hit| {
+                    let mut result = json!({ "id": hit.id, "distance": hit.distance });
+                    if let Some(metadata) = &hit.metadata {
+                        result["metadata"] = json!(metadata);
+                    }
+                    if let Some(vector) = &hit.vector {
+                        result["vector"] = json!(vector);
+                    }
+                    result
+                })
                 .collect::<Vec<_>>(),
         })))
     })

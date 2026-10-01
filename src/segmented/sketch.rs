@@ -2,8 +2,8 @@
 //! reader. Each immutable pack starts with a derived sketch frame bound to the
 //! digests of its blocks; the root and logs remain authoritative.
 use super::{
-    authenticate, codec, consider, decode_block_bytes, Block, BlockRef, Ranked, Root,
-    SegmentedDatabase,
+    authenticate, codec, consider, consider_with, decode_block_bytes, Block, BlockRef, QueryHit,
+    QueryOptions, Ranked, Root, SegmentedDatabase,
 };
 use crate::{store::ObjectStore, Config, Error, Metric, Mutation, Neighbor, Result};
 use serde::{Deserialize, Serialize};
@@ -1018,13 +1018,31 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         budget: ReadBudget,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
+        Ok(self
+            .search_selective_within_options(query, k, budget, filter, QueryOptions::default())?
+            .iter()
+            .map(QueryHit::neighbor)
+            .collect())
+    }
+
+    /// Selective search with optional fields from the scored record. For the
+    /// resident predicate, only final hits require document block reads.
+    pub fn search_selective_within_options(
+        &self,
+        query: &[f32],
+        k: usize,
+        budget: ReadBudget,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
         let query = self.config.query(query)?;
         if k == 0 {
             return Ok(Vec::new());
         }
         let mut heap = BinaryHeap::new();
+        let mut resident = false;
         match filter {
-            [] => self.route_and_rerank(&query, k, budget, &[], &mut heap)?,
+            [] => self.route_and_rerank(&query, k, budget, &[], options, &mut heap)?,
             [(key, value)]
                 if self
                     .options
@@ -1032,6 +1050,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .as_ref()
                     .is_some_and(|(k, v)| k == key && v == value) =>
             {
+                resident = true;
                 let dimensions = self.config.dimensions;
                 for sketch in &self.sketches.packs {
                     for (index, &row) in sketch.resident_rows.iter().enumerate() {
@@ -1052,17 +1071,49 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             }
             // Other predicates: read the same routed blocks and keep only
             // matching records. Approximate, and may return fewer than k.
-            _ => self.route_and_rerank(&query, k, budget, filter, &mut heap)?,
+            _ => self.route_and_rerank(&query, k, budget, filter, options, &mut heap)?,
         }
         for (&id, (_, document)) in &self.tail {
             if let Some(document) = document {
                 if crate::matches_filter(&document.metadata, filter) {
-                    consider(&mut heap, k, self.config, &query, id, &document.vector);
+                    consider_with(
+                        &mut heap,
+                        k,
+                        self.config,
+                        &query,
+                        id,
+                        &document.vector,
+                        || {
+                            (
+                                options.include_metadata.then(|| document.metadata.clone()),
+                                options.include_vector.then(|| document.vector.clone()),
+                            )
+                        },
+                    );
                 }
             }
         }
         let mut results: Vec<_> = heap.into_iter().map(|ranked: Ranked| ranked.0).collect();
         results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        if resident && (options.include_metadata || options.include_vector) {
+            for hit in &mut results {
+                if hit.metadata.is_some() || hit.vector.is_some() {
+                    continue;
+                }
+                let document = self.get(hit.id)?.ok_or_else(|| {
+                    Error::Corrupt("resident hit missing from current documents".into())
+                })?;
+                if self.config.metric.score(&query, &document.vector).to_bits()
+                    != hit.distance.to_bits()
+                {
+                    return Err(Error::Corrupt(
+                        "resident hit differs from scored version".into(),
+                    ));
+                }
+                hit.metadata = options.include_metadata.then_some(document.metadata);
+                hit.vector = options.include_vector.then_some(document.vector);
+            }
+        }
         Ok(results)
     }
 
@@ -1072,6 +1123,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         k: usize,
         budget: ReadBudget,
         filter: &[(&str, &str)],
+        options: QueryOptions,
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<()> {
         if budget.blocks == 0 || budget.requests == 0 {
@@ -1080,7 +1132,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             ));
         }
         let ranked = self.route(query, budget.blocks, filter);
-        self.rerank(query, k, &ranked, budget, filter, heap)
+        self.rerank(query, k, &ranked, budget, (filter, options), heap)
     }
 
     /// The `max_blocks` rooted blocks with the smallest minimum approximate
@@ -1229,9 +1281,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         k: usize,
         ranked: &[(f64, usize, usize)],
         budget: ReadBudget,
-        filter: &[(&str, &str)],
+        selection: (&[(&str, &str)], QueryOptions),
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<()> {
+        let (filter, options) = selection;
         let candidates: Vec<_> = ranked
             .iter()
             .map(|&(_, slot, index)| {
@@ -1302,7 +1355,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     } if !location.entry.deleted => {
                         seen += 1;
                         if crate::matches_filter(&metadata, filter) {
-                            consider(&mut local, k, config, query, id, &vector);
+                            consider_with(&mut local, k, config, query, id, &vector, || {
+                                (
+                                    options.include_metadata.then(|| metadata.clone()),
+                                    options.include_vector.then(|| vector.clone()),
+                                )
+                            });
                         }
                     }
                     Mutation::Delete { .. } if location.entry.deleted => {}
@@ -1348,7 +1406,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         seen += 1;
                         if codec::metadata_matches(entries, metadata, filter) {
                             codec::components(components, &mut vector);
-                            consider(&mut local, k, config, query, view.id, &vector);
+                            consider_with(&mut local, k, config, query, view.id, &vector, || {
+                                (
+                                    options
+                                        .include_metadata
+                                        .then(|| codec::metadata(entries, metadata)),
+                                    options.include_vector.then(|| vector.clone()),
+                                )
+                            });
                         }
                     }
                     None if location.entry.deleted => {}

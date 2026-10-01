@@ -517,6 +517,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "zstd",
 ]
 
