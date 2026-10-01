@@ -230,3 +230,18 @@ run-local books, and 0.936 with 1,485 block-local books. Run-local books add
 Immutable seal-group sketch components are the next candidate for incremental
 derived-index publication; serving and recovery remain unmeasured.
 [Evidence](../benchmarks/M24.md).
+
+## 2026-10-01 — Segmented serving accepted on the M21 envelope
+
+Packs now carry digest-framed five-bit sketches with per-pack codebooks, so a
+fresh process routes without rescanning blocks and root publications keep the
+reader valid. Blocks moved to a zstd-compressed binary format (v2), queries
+read deterministic pack spans within 8 range GETs and 1 MiB, the declared 1%
+predicate is answered exactly from resident vectors, and `SegmentedServing`
+runs bounded maintenance units on the single admission committer. Measuring
+against the gates drove the changes: logs alone use 4 of 6 PUT/s, so sketches
+moved into packs and reclamation merges packs; JSON float parsing and seal and
+consolidation transients pushed RSS over 64 MiB until removed; mimalloc and
+row-count block routing were measured and rejected. The final 300-second
+MinIO run passed every M21 gate; a reduced AWS check confirmed correctness and
+found a forced-seal defect. [Evidence](../benchmarks/M24.md).

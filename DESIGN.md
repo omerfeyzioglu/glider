@@ -184,39 +184,151 @@ records, splitting again if the encoded block exceeds 128 KiB. Deletes occupy
 separate ID-sorted blocks. Records within a block and the authoritative run
 index remain ID-sorted; physical blocks need not be ordered by ID. The root,
 block and index format versions and log acknowledgement boundary are unchanged.
-The seal's fixed sequence still publishes packs and index before one root;
-consolidation and reclamation continue to reuse authenticated block references.
 On the M21 corpus this grouping improves the optimistic eight-block unfiltered
 recall ceiling to 0.9455 with at most 913,347 encoded block bytes across those
-eight, while the filtered ceiling is only 0.841. A persisted sketch and a
-filter-specific copy are still absent. An opt-in experimental unfiltered reader
-now builds a disposable five-bit scalar sketch through two authenticated root
-scans, within a caller-supplied byte limit. It pins one root generation,
-scores packed codes, reads at most the requested blocks through the cache,
-rejects stale root generations, ignores shadowed records and exactly reranks
-selected live records plus the acknowledged log tail. A root publication
-invalidates it; a query then needs an explicit rebuild. Construction and
-queries publish no durable object, and a missing or corrupt authoritative
-block fails the dependent operation. This prototype has no persisted sketch,
-filter support or production admission path. Fresh-process readiness is slow
-because rebuilding reads every root block twice. The measured limits and
-MinIO recovery check are in `benchmarks/M24.md`.
+eight, while the filtered ceiling is only 0.841. See `benchmarks/M24.md`.
+
+### Persisted pack sketches and selective reads
+
+Every pack written by a seal or reclamation begins with a sketch frame: the
+versioned magic `GLPKSK01`, the sketch length (u64 little-endian), the
+SHA-256 of the sketch bytes, then the sketch; block offsets follow the frame
+and remain covered by the root's block digests. The sketch payload starts
+with its own versioned magic `GLSKT001`, then dimensions, metric, five-bit
+width, the SHA-256 of the namespace's derived-index options, the pack key and,
+per block, the block's SHA-256 digest and put-row count. The body holds one
+per-pack affine codebook (f32 minimum and step per dimension), row IDs in
+block order, packed five-bit codes (little-endian bit fields) and full f32
+vectors of rows matching the declared resident predicate. Tombstones have no
+row. A per-pack codebook is between the measured run-local and block-local
+granularities. Embedding the sketch gives it exactly its pack's lifetime and
+costs no extra PUT or DELETE: consolidation and pruning reuse packs and their
+sketches unchanged, and reclamation writes a new pack with a new sketch. The
+root format is unchanged. Packs are at most 1 MiB of blocks plus a sketch of
+at most 1 MiB; a sealed pack holds at most 12 blocks, which bounds the region
+its codebook covers.
+
+New blocks use block format version 2: the magic `GLB2`, the raw length as
+u32, then a zstd frame of a binary layout (dimensions, metric, partition,
+record count; per record ID, sequence, kind, little-endian f32 components and
+length-prefixed UTF-8 metadata in key order). Raw layouts are at most 120 KiB
+so a compressed block stays within 128 KiB. Readers accept version 1 JSON
+blocks and version 2 by magic; both are authenticated by the root's block
+digest before decoding, and version 2 decoding validates configuration, ID
+order, sequences, finite components, metadata encoding and length. SIFT
+blocks compress about threefold, so the per-query byte budget covers more
+candidate rows, uploads and cache footprint shrink, and reranking scans
+records from a reused buffer without per-record allocation instead of parsing
+JSON floats. Logs, roots and indexes keep their formats.
+
+The sketch is derived, never authoritative. Opening reads a bounded prefix
+of each referenced pack through batched range reads (8 at a time), re-reads
+a longer prefix if the frame needs it, verifies the frame digest (range reads
+bypass the whole-object envelope) and decodes it, then binds each root block
+reference to a sketch block with the same digest. A pack without a valid
+frame, a store-reported corrupt range, or a sketch failing decoding or
+identity checks has its sketch rebuilt in memory from that pack's
+authenticated referenced blocks and counted (`sketch_rebuilds`). An
+interrupted pack publication leaves an unreferenced pack that cleanup removes;
+the prior root remains selected. Liveness is a per-row bit derived from the
+latest-ID directory and log tail: an acknowledged tail write clears its prior
+row, a published seal or reclamation activates its new pack's current rows,
+and consolidation/pruning only rebind locations. A cleared row never becomes
+live again, so an in-memory compaction (at open and as an idle maintenance
+unit) drops shadowed rows and keeps resident routing state proportional to
+the live set; reopening reloads the full persisted sketches. Root
+publications do not invalidate the reader, and recovery reconstructs
+identical bits. A failure to bind after a root publication poisons the
+handle. The latest-ID directory is a sorted vector of 24-byte slots, sized
+once at open and merged in place. Sketch row IDs are stored as u32 offsets
+from the pack's smallest ID when its span allows, else as u64.
+
+`search_selective_within(query, k, budget, filter)` supports two modes. With
+no filter it scores live codes, visiting packs in order of a per-pack lower
+bound and abandoning a row once its prefix sum exceeds both its block's best
+and the current last kept candidate; sums of nonnegative terms never
+decrease, so the ranked blocks equal those of a full scan. It ranks
+`budget.blocks` candidates by minimum approximate row distance. In rank order
+each candidate widens its pack's span, one byte range from the first to the
+last chosen block of that pack, while all spans total at most `budget.bytes`
+and number at most `budget.requests`; every live block inside a span is
+reranked because its bytes are read anyway. The choice never depends on cache
+contents, so each query issues at most that many range GETs and bytes, and
+losing a cache changes latency only. Blocks are looked up in the cache; a span
+containing any miss is fetched whole in one batched read and its blocks share
+that buffer. Blocks are authenticated, checked against the sketch's live rows
+and exactly reranked with the live tail on scoped threads. The result is
+approximate. With exactly the declared resident predicate the query scans the
+resident full-precision vectors and matching tail rows and is exact, with no
+block reads. Other filters return an explicit error; `search_exact` remains
+the oracle. Segmented metadata version 3 declares
+`SegmentedOptions { resident_filter }` once at namespace creation; version 2
+namespaces have no resident predicate, and opening with different options
+fails. A resident predicate is justified only when its matching rows fit the
+index budget: at M21's 1% cohort it adds about 1.3 MB. Filter-specific
+grouped block copies were rejected because each overwrite would publish a
+second copy and the exact resident posting already meets the query gates.
+
+Reclamation freezes, together, the mostly dead packs with the most garbage
+whose estimated live bytes fit 7/8 of one pack (the margin covers estimation
+error) and whose live rows fit 12 blocks (decoded records are held until the
+new pack is written), rewrites their live records into one new pack block for
+block, and publishes one root; this bounds reclamation PUTs, DELETEs, roots
+and memory per dead byte. A pack is reclaimed only if it frees at least the
+configured minimum garbage (default 64 KiB).
+
+A seal plans block membership by ID from borrowed tail vectors, then each
+step materializes only its own pack's records. If a newer write replaces a
+tail version the seal still has to publish, that version moves into the
+seal's side map, so the seal publishes exactly its frozen prefix. Run
+consolidation merges two run indexes straight into the output entries only
+while their encoded sizes total at most 512 KiB, bounding its memory and time. `ObjectStore::get_many` and `get_ranges` batch independent reads; the
+S3 backend issues up to 16 concurrently, and other backends default to serial
+reads. Opening uses them for run indexes, the log tail and sketch frames.
+
+### Segmented serving
+
+`SegmentedServing` claims the namespace with the owned-store protocol, opens
+it with a sketch byte budget and an optional block cache, and implements the
+`admission::Engine` trait, so `admission::Service` runs it on the single
+committer thread. Queries use `search_selective_within` with a fixed read
+budget (M21: 12 ranked candidates, 8 range requests, 1 MiB);
+unfiltered results are approximate under the M21 quality policy (mean
+recall@10 >=0.90, fifth percentile >=0.80, <1% short results), and the
+resident predicate is exact. Maintenance never runs concurrently with a
+command: while the queue is empty the worker executes one bounded unit (one
+seal/prune/reclaim step, an in-memory sketch compaction of one pack, a seal
+plan, one run consolidation, a prune/reclaim plan or a four-object cleanup
+batch) and then rechecks the queue. A seal starts
+at 32 unsealed log objects. If the tail reaches the hard bound of 64 before
+idle time allows the seal, the next write finishes any staged prune/reclaim
+and a full seal synchronously, reported as that command's maintenance time.
+A failed idle read leaves state unchanged, is counted and retried after the
+next command; an uncertain write poisons the engine and fails the service.
+
+`backup_to` copies root zero, the selected root, its indexes, packs (each
+verified against the root's block digests before its PUT; packs carry their
+sketches) and the acknowledged log tail into an empty destination, writes `metadata`
+last, then opens the destination and compares sequence, root generation and
+live counts. Destination failure does not poison the source; a failed or
+partial destination must not be promoted.
 
 The target write path retains explicit durable acknowledgement and recovery.
 Routine maintenance should rewrite affected bounded data, rather than the full
 collection at a fixed mutation count. M21 selects addressable immutable base
 blocks and bounded ID-sorted delta runs with per-run vector-partition summaries
 as its initial layout direction. The current experimental seal clusters physical
-blocks while retaining ID-sorted run indexes; per-run summaries are not yet
-implemented. A versioned root names block identities,
+blocks while retaining ID-sorted run indexes; the vector summaries are the
+per-pack sketches above rather than per-run summaries. A versioned root names block identities,
 sequence and retry state; immutable mutation logs remain authoritative until a
 complete root covers them. Readers need a bounded latest-ID directory to hide
 stale base candidates and an exact path for quality checks. Block identity and
 digest bind disposable RAM/NVMe cache entries to a pinned root in the
-experimental namespace; production serving is not yet integrated. The measured
-10,000-row independent-arrival boundary and alternatives are in
-`benchmarks/M21.md`. The experimental `experimental-segmented` API defines
-metadata v2 and root/block/index/log v1 in a fresh namespace. It acknowledges
+segmented namespace; `SegmentedServing` serves it, and the declared M21
+250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
+measured 10,000-row independent-arrival boundary and alternatives are in
+`benchmarks/M21.md`. The `experimental-segmented` API defines metadata v2/v3,
+root/index/log v1 and block v1/v2 in a fresh namespace. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
 requires reopen. It can coalesce adjacent small ID indexes through another root
@@ -229,23 +341,23 @@ still exist in physical blocks. New acknowledged logs may shadow retained
 records during staging, while seal and run consolidation wait for the root.
 The old pack remains authoritative until root publication; an interrupted
 attempt leaves an unreferenced pack for cleanup on reopen. For a run index no
-larger than 1 MiB, a separate staged pruning plan removes references to fully
+larger than 512 KiB, a separate staged pruning plan removes references to fully
 dead blocks, remaps surviving block ordinals in a new index, then publishes one
 root. A completely dead run disappears. Logs may grow during this plan, but
 seal, run consolidation and repacking wait for its root; uncertain index or
 root creation requires reopen. Indexes above this size are not pruned yet.
 The opt-in block cache reads through bounded RAM and a versioned local NVMe
-directory. Its key includes object, range, complete payload length and block
-digest; every hit is checked against the selected root before decoding.
+directory. Its key is a SHA-256 of object, range, complete payload length and
+block digest, kept as 32 bytes in memory with tick-ordered LRU; every hit is
+checked against the selected root before decoding.
 Missing or corrupt cache bytes trigger an authoritative range fetch. Opening
 rejects a missing selected pack, and corrupt bytes fetched from object storage
 fail closed. Cache bytes never acknowledge mutations or participate in root
-recovery. The in-process cache
-mutex bounds this experimental reader to one in-flight block fetch per handle.
-It has no selective search or production serving integration, so the
-larger-than-RAM target remains unaccepted. If maintenance overlaps writes, its
-generation boundary, backlog, memory, reclamation and crash behavior must be
-explicit. More background threads alone do not reduce total work.
+recovery. The cache mutex covers lookup, remote fetch and admission; a
+selective query fetches its blocks serially under it, then authenticates,
+decodes and scores them on scoped threads before settling hits or rejecting
+corrupt cached bytes. Maintenance never overlaps a command: the segmented
+serving engine runs bounded units only while the admission queue is empty.
 
 Read latency, write acknowledgement latency, index visibility and object-store
 cost are separate targets. One experiment should answer a specific decision,
@@ -259,8 +371,8 @@ single-machine limit and explicit coordination semantics.
 [OpenData](https://github.com/opendata-oss/opendata) are references for economics
 and operating behavior. OpenData's SlateDB foundation is not an adoption decision
 for glider's owned storage engine. The next measurable stages are M21–M24 in
-`ROADMAP.md`; segmented publication and caching are experimental, while
-selective serving and the larger-than-RAM acceptance remain open.
+`ROADMAP.md`; the segmented engine remains behind the `experimental-segmented`
+feature, and its acceptance evidence is in `benchmarks/M24.md`.
 
 ### Target invariants
 
@@ -326,7 +438,7 @@ whole-object checksum for each slice. A caller must compare returned bytes with
 the SHA-256 digest committed for that logical block before decoding or caching
 them. Full `get` retains whole-envelope validation; the local backend's range
 default uses it. This read API creates no new acknowledgement or durable format,
-and no serving path uses it yet. The intended M22 physical segment may bundle
+and the segmented reader uses it for block reads. The M22 physical segment bundles
 small addressable blocks in one larger PUT; M23's cache key includes object key,
 range and committed block digest.
 
@@ -763,7 +875,8 @@ are in `docs/SERVING.md` and `docs/RECOVERY.md`.
 
 ## Bounded concurrent admission (M16)
 
-`admission::Service` moves one `SingleMachine` to a single blocking worker.
+`admission::Service` moves one engine (`SingleMachine` or `SegmentedServing`,
+through the `admission::Engine` trait) to a single blocking worker.
 Cloneable clients share a FIFO of writes, exact queries, revision observations
 and result lookups. At most eight commands and 320 KiB of encoded payload are
 admitted by default, including active work. Count and byte exhaustion returns
@@ -774,8 +887,14 @@ admission measure, not allocator RSS. Count, operation/filter limits and payload
 limits also bound container overhead; caller-owned inputs and completed results
 are outside the service's retention budget.
 
-One owner executes commands in enqueue order, with no priority bypass, group
-commit or batching delay. Clients choose their own atomic M15 batches. Due
+One owner executes commands in enqueue order by default, with no group commit
+or batching delay. `Limits::read_priority` optionally lets a queued query run
+before queued writes, lookups and observations younger than the configured
+age; queued commands are concurrent, so either order is linearizable, and a
+query submitted after an acknowledgement still observes that write. When the
+queue is empty the worker may run one bounded engine maintenance unit, then
+rechecks the queue; a unit is never preempted, so its duration adds to the
+wait of commands that arrive during it. Clients choose their own atomic M15 batches. Due
 maintenance stays synchronous. Each result reports queue wait, execution and
 maintenance separately; client end-to-end latency additionally includes admission
 and response delivery. Admission capacity is released before delivery. Numeric

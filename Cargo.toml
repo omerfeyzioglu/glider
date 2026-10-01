@@ -18,6 +18,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 getrandom = "0.2"
+zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 libc = "0.2"
@@ -56,5 +57,5 @@ name = "m24_layout_probe"
 required-features = ["experimental-segmented"]
 
 [[example]]
-name = "m24_selective"
+name = "m24_acceptance"
 required-features = ["s3", "experimental-segmented"]

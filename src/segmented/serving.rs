@@ -1,0 +1,356 @@
+//! Single-owner segmented serving. Queries use the persisted sketches; seal,
+//! consolidation, pruning, reclamation and cleanup advance in bounded units
+//! that the admission worker runs only while no command is queued.
+use super::{root_key, ReadBudget, SegmentedDatabase, SegmentedOptions};
+use crate::{
+    admission::Engine,
+    ownership::OwnedStore,
+    retry::{Lookup, Outcome, Request, RequestId, Revision},
+    store::ObjectStore,
+    Config, Error, Neighbor, Result,
+};
+use sha2::{Digest, Sha256};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+#[derive(Debug, Clone)]
+pub struct SegmentedServingOptions {
+    /// Start a seal when this many acknowledged log objects are unsealed.
+    /// The engine rejects writes at 64, which forces synchronous maintenance.
+    pub seal_tail_objects: usize,
+    /// Blocks an unfiltered selective query may read, and its remote budget.
+    pub read_budget: ReadBudget,
+    /// Obsolete objects removed by one cleanup unit.
+    pub cleanup_objects: usize,
+    /// Opening fails if loaded sketches charge more than this many bytes.
+    pub max_index_bytes: usize,
+    /// Optional disposable block cache: directory, RAM bytes, NVMe bytes.
+    pub cache: Option<(PathBuf, usize, usize)>,
+    /// Scoped threads used to score sketches for one query.
+    pub query_threads: usize,
+}
+
+impl SegmentedServingOptions {
+    /// The M21 250,000-row envelope: 64 MiB engine RSS and a 256 MiB NVMe
+    /// cache. The RAM block tier is disabled: NVMe (and the OS page cache)
+    /// hold the working set, leaving the RAM budget for engine state.
+    pub fn m21(cache_directory: PathBuf) -> Self {
+        Self {
+            seal_tail_objects: 32,
+            read_budget: ReadBudget {
+                blocks: 12,
+                requests: 8,
+                bytes: 1024 * 1024,
+            },
+            cleanup_objects: 4,
+            max_index_bytes: 24 * 1024 * 1024,
+            cache: Some((cache_directory, 0, 256 * 1024 * 1024)),
+            query_threads: 4,
+        }
+    }
+}
+
+/// Completed maintenance units, per handle.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct ServingCounters {
+    pub seal_starts: u64,
+    pub seal_steps: u64,
+    pub consolidations: u64,
+    pub prune_starts: u64,
+    pub prune_steps: u64,
+    pub reclaim_starts: u64,
+    pub reclaim_steps: u64,
+    pub removed_objects: u64,
+    /// Seals forced inside a write because the log tail reached its bound.
+    pub forced_seals: u64,
+    pub sketch_compactions: u64,
+}
+
+pub struct SegmentedServing<S: ObjectStore> {
+    db: SegmentedDatabase<OwnedStore<S>>,
+    options: SegmentedServingOptions,
+    maintenance_time: Duration,
+    /// A root changed since prune/reclaim last found no candidate.
+    scan_pending: bool,
+    counters: ServingCounters,
+    last_unit: &'static str,
+}
+
+impl<S: ObjectStore> SegmentedServing<S> {
+    /// Claim exclusive ownership, then open the segmented namespace. A failed
+    /// open can leave the claim; follow the stopped-owner procedure.
+    pub fn open(
+        store: S,
+        config: Config,
+        segmented: SegmentedOptions,
+        options: SegmentedServingOptions,
+    ) -> Result<Self> {
+        if options.seal_tail_objects == 0
+            || options.seal_tail_objects >= 64
+            || options.read_budget.blocks == 0
+            || options.read_budget.requests == 0
+            || options.cleanup_objects == 0
+        {
+            return Err(Error::Invalid(
+                "segmented serving bounds are invalid".into(),
+            ));
+        }
+        let mut db =
+            SegmentedDatabase::open_with_options(OwnedStore::claim(store)?, config, segmented)?;
+        if db.selective_index_bytes() > options.max_index_bytes {
+            db.into_store().release()?;
+            return Err(Error::Invalid(
+                "segmented sketches exceed the serving index budget".into(),
+            ));
+        }
+        db = db.with_query_threads(options.query_threads);
+        if let Some((directory, ram, nvme)) = &options.cache {
+            db = db.with_block_cache(directory, *ram, *nvme)?;
+        }
+        Ok(Self {
+            db,
+            options,
+            maintenance_time: Duration::ZERO,
+            scan_pending: true,
+            counters: ServingCounters::default(),
+            last_unit: "none",
+        })
+    }
+
+    pub fn database(&self) -> &SegmentedDatabase<OwnedStore<S>> {
+        &self.db
+    }
+
+    pub fn counters(&self) -> ServingCounters {
+        self.counters
+    }
+
+    /// Kind of the most recent maintenance unit, for diagnostics.
+    pub fn last_unit(&self) -> &'static str {
+        self.last_unit
+    }
+
+    /// One bounded unit: a staged step, a seal plan, a run consolidation, a
+    /// prune/reclaim plan or a cleanup batch. Returns false when idle.
+    pub fn maintenance_step(&mut self) -> Result<bool> {
+        if self.db.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        let started = Instant::now();
+        let worked = self.step();
+        self.maintenance_time += started.elapsed();
+        worked
+    }
+
+    fn step(&mut self) -> Result<bool> {
+        let db = &mut self.db;
+        let counters = &mut self.counters;
+        if db.seal.is_some() {
+            self.last_unit = "seal_step";
+            db.seal_step()?;
+            counters.seal_steps += 1;
+            self.scan_pending |= db.seal.is_none();
+            return Ok(true);
+        }
+        if db.prune.is_some() {
+            self.last_unit = "prune_step";
+            db.prune_step()?;
+            counters.prune_steps += 1;
+            self.scan_pending |= db.prune.is_none();
+            return Ok(true);
+        }
+        if db.reclaim.is_some() {
+            self.last_unit = "reclaim_step";
+            db.reclaim_step()?;
+            counters.reclaim_steps += 1;
+            self.scan_pending |= db.reclaim.is_none();
+            return Ok(true);
+        }
+        // In-memory only: drop shadowed sketch rows so resident routing state
+        // tracks the live set rather than accumulated overwrites.
+        self.last_unit = "sketch_compaction";
+        if db.compact_sketch(64) {
+            counters.sketch_compactions += 1;
+            return Ok(true);
+        }
+        if db.tail_objects >= self.options.seal_tail_objects {
+            self.last_unit = "seal_plan";
+            db.start_seal()?;
+            counters.seal_starts += 1;
+            return Ok(true);
+        }
+        self.last_unit = "consolidation";
+        if db.consolidate_runs_step()? {
+            counters.consolidations += 1;
+            self.scan_pending = true;
+            return Ok(true);
+        }
+        if self.scan_pending {
+            self.last_unit = "prune_reclaim_scan";
+            if db.start_prune()? {
+                counters.prune_starts += 1;
+                return Ok(true);
+            }
+            if db.start_reclaim()? {
+                counters.reclaim_starts += 1;
+                return Ok(true);
+            }
+            self.scan_pending = false;
+        }
+        self.last_unit = "cleanup";
+        let removed = db.cleanup_step(self.options.cleanup_objects)?;
+        counters.removed_objects += removed as u64;
+        Ok(removed > 0)
+    }
+
+    /// Stage the current committed root, its referenced objects (packs carry
+    /// their sketches) and the acknowledged log tail into an empty,
+    /// nonoverlapping destination.
+    /// Every copied pack is checked against the root's block digests before
+    /// its PUT. Metadata is written last; the destination is then opened and
+    /// compared. Destination failure does not poison this handle, and a failed
+    /// destination must not be promoted or reused.
+    pub fn backup_to<D: ObjectStore>(&mut self, mut destination: D) -> Result<()> {
+        if self.db.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        if !destination.list()?.is_empty() {
+            return Err(Error::Invalid("backup destination must be empty".into()));
+        }
+        let db = &self.db;
+        let mut keys = vec![root_key(0), root_key(db.root.generation)];
+        keys.dedup();
+        let mut packs = std::collections::BTreeMap::<&str, Vec<_>>::new();
+        for run in &db.root.runs {
+            keys.push(run.index_object.clone());
+            for block in &run.blocks {
+                packs.entry(block.object.as_str()).or_default().push(block);
+            }
+        }
+        for sequence in db.root.sequence + 1..=db.sequence {
+            keys.push(super::log_key(sequence));
+        }
+        let copy = |destination: &mut D, key: &str| -> Result<Vec<u8>> {
+            let bytes = db
+                .store
+                .get(key)?
+                .ok_or_else(|| Error::Corrupt(format!("backup source missing: {key}")))?;
+            destination.create(key, &bytes)?;
+            Ok(bytes)
+        };
+        for key in &keys {
+            copy(&mut destination, key)?;
+        }
+        for (pack, blocks) in &packs {
+            let bytes = db
+                .store
+                .get(pack)?
+                .ok_or_else(|| Error::Corrupt(format!("backup source missing: {pack}")))?;
+            for block in blocks {
+                let range = bytes
+                    .get(block.offset..block.offset + block.length)
+                    .filter(|_| bytes.len() == block.payload_len);
+                if range.is_none_or(|range| format!("{:x}", Sha256::digest(range)) != block.sha256)
+                {
+                    return Err(Error::Corrupt(format!(
+                        "backup pack digest mismatch: {pack}"
+                    )));
+                }
+            }
+            destination.create(pack, &bytes)?;
+        }
+        copy(&mut destination, "metadata")?;
+        let restored =
+            SegmentedDatabase::open_with_options(destination, db.config, db.options.clone())?;
+        if restored.sequence != db.sequence
+            || restored.root.generation != db.root.generation
+            || restored.latest.len() != db.latest.len()
+            || restored.tail.len() != db.tail.len()
+        {
+            return Err(Error::Corrupt(
+                "backup does not match its source view".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
+    fn config(&self) -> Config {
+        self.db.config
+    }
+    fn sequence(&self) -> u64 {
+        self.db.sequence
+    }
+    fn recovery_required(&self) -> bool {
+        self.db.poisoned
+    }
+    fn maintenance_time(&self) -> Duration {
+        self.maintenance_time
+    }
+    /// At the hard log-tail bound, finish a seal synchronously before
+    /// publishing; that time is reported as command maintenance.
+    fn apply_request(&mut self, request: Request) -> Result<Outcome> {
+        if self.db.tail_objects >= super::MAX_TAIL_OBJECTS && !self.db.poisoned {
+            let started = Instant::now();
+            self.counters.forced_seals += 1;
+            let result = (|| -> Result<()> {
+                while self.db.prune.is_some() {
+                    self.db.prune_step()?;
+                }
+                while self.db.reclaim.is_some() {
+                    self.db.reclaim_step()?;
+                }
+                // Finish a seal started while idle; it may already free the
+                // tail. Only then start another.
+                while self.db.seal.is_some() {
+                    self.db.seal_step()?;
+                }
+                if self.db.tail_objects >= super::MAX_TAIL_OBJECTS {
+                    self.db.seal_delta()?;
+                }
+                Ok(())
+            })();
+            self.maintenance_time += started.elapsed();
+            result?;
+            self.scan_pending = true;
+        }
+        self.db.apply_request(request)
+    }
+    fn revision(&self, id: u64) -> Revision {
+        self.db.revision(id)
+    }
+    fn request_id(&self) -> Result<RequestId> {
+        self.db.request_id()
+    }
+    fn lookup_request(&self, id: RequestId) -> Result<Lookup> {
+        self.db.lookup_request(id)
+    }
+    /// Unfiltered queries are approximate within the sketch/block budget; the
+    /// declared resident predicate is exact. Other filters are rejected.
+    fn query(&mut self, query: &[f32], k: usize, filter: &[(&str, &str)]) -> Result<Vec<Neighbor>> {
+        self.db
+            .search_selective_within(query, k, self.options.read_budget, filter)
+    }
+    fn idle_step(&mut self) -> Result<bool> {
+        self.maintenance_step()
+    }
+    fn remote_reads(&self) -> (u64, u64) {
+        self.db
+            .cache_stats()
+            .ok()
+            .flatten()
+            .map_or((0, 0), |stats| {
+                (stats.remote_fetches, stats.remote_payload_bytes)
+            })
+    }
+    /// A clean handle releases its claim; an uncertain one keeps it.
+    fn close(self) -> Result<()> {
+        if self.db.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        self.db.into_store().release()
+    }
+}

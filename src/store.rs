@@ -41,6 +41,19 @@ pub trait ObjectStore {
         }
         Ok(Some(bytes[offset..end].to_vec()))
     }
+    /// `get` for several independent keys, results in input order. Backends
+    /// may issue the reads concurrently; the default is serial.
+    fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        keys.iter().map(|key| self.get(key)).collect()
+    }
+    /// `get_range` for several `(key, offset, length, expected_payload_len)`
+    /// requests, results in input order. Backends may read concurrently.
+    fn get_ranges(&self, ranges: &[(&str, usize, usize, usize)]) -> Result<Vec<Option<Vec<u8>>>> {
+        ranges
+            .iter()
+            .map(|&(key, offset, length, payload)| self.get_range(key, offset, length, payload))
+            .collect()
+    }
     fn list(&self) -> Result<Vec<String>>;
     fn create(&mut self, key: &str, value: &[u8]) -> Result<()>;
     /// Durably remove an object; absence is success. Errors may have removed it.

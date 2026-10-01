@@ -276,3 +276,37 @@ serial library API has no HTTP listener or background scheduler. See
 [serving operations](docs/SERVING.md) for status, backup/restore, failure handling,
 and the 30-minute soak command. After uncertainty, follow the
 [fresh-prefix recovery procedure](docs/RECOVERY.md).
+
+## Larger-than-RAM segmented serving (experimental)
+
+With the `experimental-segmented` feature (plus `s3` for object storage),
+`SegmentedServing` keeps only a compact ID directory, persisted per-pack
+five-bit routing sketches and the unsealed log tail in memory. Vectors stay in
+immutable object-storage packs read through a bounded RAM/NVMe block cache.
+Unfiltered queries are approximate: they read a fixed number of routed blocks
+and rerank them exactly. The one equality predicate declared at namespace
+creation is answered exactly from full-precision vectors kept in the sketches;
+other filters are rejected, and `search_exact` remains the oracle. Run it
+behind `admission::Service`, which executes seal, consolidation, reclamation
+and cleanup in bounded units while no command is queued.
+
+```rust
+use glider::{admission::{Limits, Service, Shutdown}, Config, Metric};
+use glider::segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOptions};
+let config = Config { dimensions: 128, metric: Metric::SquaredEuclidean };
+let declared = SegmentedOptions {
+    resident_filter: Some(("cohort".into(), "one-percent".into())),
+};
+let engine = SegmentedServing::open(
+    store, config, declared, SegmentedServingOptions::m21("block-cache".into()))?;
+let service = Service::start(engine, Limits {
+    read_priority: Some(std::time::Duration::from_millis(50)),
+    ..Limits::default()
+})?;
+let client = service.client();
+let hits = client.query(vec![0.; 128], 10, vec![])?.wait()?;
+service.shutdown(Shutdown::Drain)?;
+```
+
+The measured 250,000-row envelope, its gates and the reproduction command are
+in [benchmarks/M24.md](benchmarks/M24.md#single-machine-acceptance-protocol-declared-before-the-run).

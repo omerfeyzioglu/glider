@@ -194,7 +194,7 @@ fn batch(client: u64, round: u64) -> Vec<Mutation> {
         .collect()
 }
 #[derive(Clone)]
-struct Target(Client<Observed>);
+struct Target(Client<glider::serving::SingleMachine<Observed>>);
 impl Target {
     fn write(&self, request: Request) -> Result<Timed<Outcome>> {
         Ok(self.0.write(request)?.wait()?)

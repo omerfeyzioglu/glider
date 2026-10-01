@@ -79,7 +79,7 @@ fn batch(client: u64, round: u64) -> Vec<Mutation> {
 #[derive(Clone)]
 enum Target {
     Mutex(Arc<Mutex<Db>>),
-    Worker(Client<S3Store>),
+    Worker(Client<glider::serving::SingleMachine<S3Store>>),
 }
 impl Target {
     fn write(&self, request: Request) -> Result<Timed<Outcome>> {
@@ -131,6 +131,8 @@ impl Target {
                     value: QueryResult {
                         sequence: db.status().maintenance.sequence,
                         neighbors,
+                        remote_reads: 0,
+                        remote_bytes: 0,
                     },
                     queue_wait,
                     execution: start.elapsed(),

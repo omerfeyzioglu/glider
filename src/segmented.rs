@@ -14,14 +14,25 @@ use std::{
 
 mod cache;
 use cache::BlockCache;
+mod codec;
+mod directory;
+use directory::Directory;
+mod serving;
 pub use cache::CacheStats;
+pub use serving::{SegmentedServing, SegmentedServingOptions, ServingCounters};
 mod sketch;
-use sketch::PackedSketch;
+use sketch::{frame, unframe, Framed, PackSketch, SketchSet, FRAME_PREFIX_READ, MAX_SKETCH_BYTES};
+pub use sketch::{ReadBudget, SegmentedOptions};
 
 pub(crate) const MAX_BLOCK_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_PACK_BYTES: usize = 1024 * 1024;
+/// Sealed packs hold at most this many blocks, which bounds the region each
+/// per-pack sketch codebook covers.
+const MAX_PACK_BLOCKS: usize = 12;
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
-const MAX_CONSOLIDATION_INDEX_BYTES: usize = 1024 * 1024;
+/// Two run indexes are merged only while their sum stays within this bound,
+/// which caps a consolidation unit's transient memory and time.
+const MAX_CONSOLIDATION_INDEX_BYTES: usize = 512 * 1024;
 const INDEX_MAGIC: &[u8; 8] = b"GLRIDX01";
 const MAX_TAIL_OBJECTS: usize = 64;
 
@@ -84,43 +95,35 @@ impl Block {
 }
 
 /// Group a bounded sealed prefix by vector proximity without changing the
-/// authoritative ID index. Every physical block remains sorted by ID.
-fn vector_local_blocks(config: Config, records: Vec<BlockRecord>) -> Result<Vec<Block>> {
+/// authoritative ID index: returns the IDs of each block, each sorted by ID,
+/// put blocks first. Rows are borrowed as `(id, vector, raw length)`;
+/// deletes as `(id, raw length)`.
+fn plan_vector_local(
+    config: Config,
+    puts: &[(u64, &[f32], usize)],
+    deletes: &[(u64, usize)],
+) -> Result<Vec<Vec<u64>>> {
     const TARGET_ROWS: usize = 170;
-    let mut puts = Vec::new();
-    let mut deletes = Vec::new();
-    for record in records {
-        if matches!(record.mutation, Mutation::Put { .. }) {
-            puts.push(record);
-        } else {
-            deletes.push(record);
-        }
-    }
-    let vector = |index: usize| match &puts[index].mutation {
-        Mutation::Put { vector, .. } => vector.as_slice(),
-        Mutation::Delete { .. } => unreachable!("only puts are clustered"),
-    };
-    let mut blocks = Vec::new();
+    let id = |index: usize| puts[index].0;
+    let vector = |index: usize| puts[index].1;
+    let empty_size = codec::block_len([]);
+    let mut planned = Vec::new();
     let mut groups = vec![(0..puts.len()).collect::<Vec<_>>()];
     while let Some(mut group) = groups.pop() {
         if group.is_empty() {
             continue;
         }
         if group.len() <= TARGET_ROWS {
-            group.sort_unstable_by_key(|&index| puts[index].id());
-            let block = Block::new(
-                config,
-                0,
-                group.iter().map(|&index| puts[index].clone()).collect(),
-            )?;
-            if encode(&block)?.len() <= MAX_BLOCK_BYTES {
-                blocks.push(block);
+            group.sort_unstable_by_key(|&index| id(index));
+            let size = empty_size + group.iter().map(|&index| puts[index].2).sum::<usize>();
+            if size <= codec::MAX_RAW_BLOCK_BYTES {
+                planned.push(group.iter().map(|&index| id(index)).collect());
                 continue;
             }
             if group.len() == 1 {
                 return Err(Error::Invalid(format!(
                     "segmented row {} exceeds block limit",
-                    puts[group[0]].id()
+                    id(group[0])
                 )));
             }
         }
@@ -145,7 +148,7 @@ fn vector_local_blocks(config: Config, records: Vec<BlockRecord>) -> Result<Vec<
         group.sort_unstable_by(|&a, &b| {
             vector(a)[axis]
                 .total_cmp(&vector(b)[axis])
-                .then_with(|| puts[a].id().cmp(&puts[b].id()))
+                .then_with(|| id(a).cmp(&id(b)))
         });
         for _ in 0..3 {
             let mut direction = vec![0_f64; config.dimensions];
@@ -171,9 +174,7 @@ fn vector_local_blocks(config: Config, records: Vec<BlockRecord>) -> Result<Vec<
                 })
                 .collect();
             projected.sort_unstable_by(|&(score_a, a), &(score_b, b)| {
-                score_a
-                    .total_cmp(&score_b)
-                    .then_with(|| puts[a].id().cmp(&puts[b].id()))
+                score_a.total_cmp(&score_b).then_with(|| id(a).cmp(&id(b)))
             });
             group = projected.into_iter().map(|(_, index)| index).collect();
         }
@@ -181,38 +182,22 @@ fn vector_local_blocks(config: Config, records: Vec<BlockRecord>) -> Result<Vec<
         groups.push(right);
         groups.push(group);
     }
-    deletes.sort_unstable_by_key(BlockRecord::id);
-    let empty_size = encode(&Block {
-        version: 1,
-        config,
-        partition: 0,
-        records: Vec::new(),
-    })?
-    .len();
+    let mut deletes = deletes.to_vec();
+    deletes.sort_unstable();
     let mut current = Vec::new();
     let mut size = empty_size;
-    for record in deletes {
-        let row_size = encode(&record)?.len();
-        if empty_size
-            .checked_add(row_size)
-            .is_none_or(|n| n > MAX_BLOCK_BYTES)
-        {
-            return Err(Error::Invalid(format!(
-                "segmented row {} exceeds block limit",
-                record.id()
-            )));
-        }
-        if size + row_size + usize::from(!current.is_empty()) > MAX_BLOCK_BYTES {
-            blocks.push(Block::new(config, 0, std::mem::take(&mut current))?);
+    for (id, row_size) in deletes {
+        if size + row_size > codec::MAX_RAW_BLOCK_BYTES {
+            planned.push(std::mem::take(&mut current));
             size = empty_size;
         }
-        size += row_size + usize::from(!current.is_empty());
-        current.push(record);
+        size += row_size;
+        current.push(id);
     }
     if !current.is_empty() {
-        blocks.push(Block::new(config, 0, current)?);
+        planned.push(current);
     }
-    Ok(blocks)
+    Ok(planned)
 }
 
 /// Root-v1 metadata for one block inside an immutable physical pack.
@@ -405,7 +390,7 @@ fn valid_digest(digest: &str) -> bool {
 fn validate_block_ref(reference: &BlockRef) -> Result<()> {
     if reference.length == 0
         || reference.length > MAX_BLOCK_BYTES
-        || reference.payload_len > MAX_PACK_BYTES
+        || reference.payload_len > MAX_PACK_BYTES + sketch::FRAME_HEADER + MAX_SKETCH_BYTES
         || reference
             .offset
             .checked_add(reference.length)
@@ -420,8 +405,11 @@ fn validate_block_ref(reference: &BlockRef) -> Result<()> {
 }
 
 pub(crate) fn read_run_index<S: ObjectStore>(store: &S, run: &RunRef) -> Result<RunIndex> {
-    let bytes = store
-        .get(&run.index_object)?
+    decode_run_index(run, store.get(&run.index_object)?)
+}
+
+fn decode_run_index(run: &RunRef, bytes: Option<Vec<u8>>) -> Result<RunIndex> {
+    let bytes = bytes
         .ok_or_else(|| Error::Corrupt(format!("segmented index missing: {}", run.index_object)))?;
     if bytes.len() != run.index_len || format!("{:x}", Sha256::digest(&bytes)) != run.index_sha256 {
         return Err(Error::Corrupt(format!(
@@ -451,7 +439,7 @@ pub(crate) fn encode_pack(
     let mut references = Vec::with_capacity(blocks.len());
     for block in blocks {
         block.validate(config)?;
-        let bytes = encode(block)?;
+        let bytes = codec::encode(block)?;
         let end = payload
             .len()
             .checked_add(bytes.len())
@@ -480,6 +468,48 @@ pub(crate) fn encode_pack(
     Ok((payload, references))
 }
 
+/// Encode a pack that starts with the sketch frame for its blocks; block
+/// offsets follow the frame.
+fn encode_pack_with_sketch(
+    object: &str,
+    config: Config,
+    options: &SegmentedOptions,
+    options_digest: &[u8; 32],
+    blocks: &[Block],
+) -> Result<(Vec<u8>, Vec<BlockRef>, PackSketch)> {
+    let (payload, mut references) = encode_pack(object, config, blocks)?;
+    let pairs: Vec<_> = references.iter().zip(blocks).collect();
+    let sketch = PackSketch::build(config, options, object, &pairs)?;
+    let encoded = sketch.encode(config, options_digest);
+    if encoded.len() > MAX_SKETCH_BYTES {
+        return Err(Error::Invalid(
+            "segmented pack sketch exceeds byte limit".into(),
+        ));
+    }
+    let mut bytes = frame(&encoded);
+    let shift = bytes.len();
+    bytes.extend_from_slice(&payload);
+    for reference in &mut references {
+        reference.offset += shift;
+        reference.payload_len = bytes.len();
+    }
+    Ok((bytes, references, sketch))
+}
+
+/// A block's bytes within a shared fetched buffer.
+pub(crate) struct Slice {
+    data: std::sync::Arc<Vec<u8>>,
+    start: usize,
+    end: usize,
+}
+
+impl std::ops::Deref for Slice {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.data[self.start..self.end]
+    }
+}
+
 /// A selected block is authenticated before its records can affect a result.
 pub(crate) fn read_block<S: ObjectStore>(
     store: &S,
@@ -498,7 +528,8 @@ pub(crate) fn read_block<S: ObjectStore>(
     decode_block_bytes(config, reference, &bytes)
 }
 
-fn decode_block_bytes(config: Config, reference: &BlockRef, bytes: &[u8]) -> Result<Block> {
+/// Bytes must match the committed length and digest before decoding.
+fn authenticate(reference: &BlockRef, bytes: &[u8]) -> Result<()> {
     if bytes.len() != reference.length || format!("{:x}", Sha256::digest(bytes)) != reference.sha256
     {
         return Err(Error::Corrupt(format!(
@@ -506,8 +537,19 @@ fn decode_block_bytes(config: Config, reference: &BlockRef, bytes: &[u8]) -> Res
             reference.object
         )));
     }
-    let block: Block = decode(bytes)?;
-    block.validate(config)?;
+    Ok(())
+}
+
+/// Decode an authenticated block of version 2 (binary) or 1 (JSON).
+fn decode_block_bytes(config: Config, reference: &BlockRef, bytes: &[u8]) -> Result<Block> {
+    authenticate(reference, bytes)?;
+    let block = if codec::is_v2(bytes) {
+        codec::decode(config, bytes)?
+    } else {
+        let block: Block = decode(bytes)?;
+        block.validate(config)?;
+        block
+    };
     if block.partition != reference.partition
         || block.records.len() != reference.rows
         || block.records.first().unwrap().id() != reference.first_id
@@ -523,6 +565,50 @@ fn decode_block_bytes(config: Config, reference: &BlockRef, bytes: &[u8]) -> Res
 struct MetadataV2 {
     version: u32,
     config: Config,
+}
+
+/// Version 3 adds the namespace's derived-index declaration.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataV3 {
+    version: u32,
+    config: Config,
+    options: SegmentedOptions,
+}
+
+#[derive(Deserialize)]
+struct MetadataVersion {
+    version: u32,
+}
+
+fn metadata_bytes(config: Config, options: &SegmentedOptions) -> Result<Vec<u8>> {
+    if *options == SegmentedOptions::default() {
+        encode(&MetadataV2 { version: 2, config })
+    } else {
+        encode(&MetadataV3 {
+            version: 3,
+            config,
+            options: options.clone(),
+        })
+    }
+}
+
+fn check_metadata(bytes: &[u8], config: Config, options: &SegmentedOptions) -> Result<()> {
+    let (stored_config, stored_options) = match decode::<MetadataVersion>(bytes)?.version {
+        2 => {
+            let metadata: MetadataV2 = decode(bytes)?;
+            (metadata.config, SegmentedOptions::default())
+        }
+        3 => {
+            let metadata: MetadataV3 = decode(bytes)?;
+            (metadata.config, metadata.options)
+        }
+        _ => return Err(Error::Corrupt("invalid segmented metadata".into())),
+    };
+    if stored_config != config || stored_options != *options {
+        return Err(Error::Corrupt("invalid segmented metadata".into()));
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -572,6 +658,7 @@ struct Location {
 struct PackStats {
     payload_len: usize,
     estimated_live_bytes: usize,
+    live_rows: usize,
     locations: Vec<(usize, usize)>,
     has_empty_block: bool,
 }
@@ -582,6 +669,7 @@ struct ReclaimState {
     blocks: Vec<Block>,
     key: String,
     references: Option<Vec<BlockRef>>,
+    sketch: Option<PackSketch>,
 }
 
 struct PruneState {
@@ -638,9 +726,13 @@ struct SealState {
     boundary: u64,
     first_sequence: u64,
     retry: retry::State,
-    blocks: Vec<Block>,
+    /// Planned block membership by ID; records are materialized per pack.
+    blocks: Vec<Vec<u64>>,
+    /// Sealed versions a newer tail write displaced during this seal.
+    displaced: BTreeMap<u64, (u64, Option<Document>)>,
     entries: Vec<IndexEntry>,
     references: Vec<BlockRef>,
+    sketches: Vec<PackSketch>,
     next_block: usize,
     next_pack: u32,
     index_published: bool,
@@ -655,13 +747,17 @@ pub struct SegmentedDatabase<S> {
     root: Root,
     sequence: u64,
     retry: retry::State,
-    latest: BTreeMap<u64, Location>,
+    latest: Directory,
     tail: BTreeMap<u64, (u64, Option<Document>)>,
     tail_objects: usize,
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
     cache: Option<Mutex<BlockCache>>,
-    selective: Option<PackedSketch>,
+    options: SegmentedOptions,
+    options_digest: [u8; 32],
+    sketches: SketchSet,
+    query_threads: usize,
+    reclaim_min_garbage: usize,
     seal: Option<SealState>,
     reclaim: Option<ReclaimState>,
     prune: Option<PruneState>,
@@ -669,6 +765,54 @@ pub struct SegmentedDatabase<S> {
 }
 
 impl<S: ObjectStore> SegmentedDatabase<S> {
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    pub fn tail_objects(&self) -> usize {
+        self.tail_objects
+    }
+
+    /// Observe an ID at the current acknowledged sequence.
+    pub fn revision(&self, id: u64) -> retry::Revision {
+        retry::Revision {
+            id,
+            boundary: self.sequence,
+        }
+    }
+
+    /// Generate locally without publishing; retain the ID for all retries.
+    pub fn request_id(&self) -> Result<retry::RequestId> {
+        let mut nonce = [0; 16];
+        getrandom::getrandom(&mut nonce).map_err(|e| Error::Invalid(e.to_string()))?;
+        Ok(retry::RequestId {
+            boundary: self.sequence,
+            nonce,
+        })
+    }
+
+    pub fn lookup_request(&self, id: retry::RequestId) -> Result<retry::Lookup> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        Ok(self.retry.lookup(id, self.sequence))
+    }
+
+    pub(crate) fn into_store(self) -> S {
+        self.store
+    }
+
+    /// Reclaim a mostly dead pack only if it frees at least this many
+    /// encoded bytes (default 64 KiB), so tiny gains do not cost a PUT.
+    pub fn with_reclaim_min_garbage(mut self, bytes: usize) -> Self {
+        self.reclaim_min_garbage = bytes;
+        self
+    }
+
     pub fn run_count(&self) -> usize {
         self.root.runs.len()
     }
@@ -731,15 +875,127 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
     }
 
-    pub fn open(mut store: S, config: Config) -> Result<Self> {
+    fn lock_cache(&self) -> Result<Option<std::sync::MutexGuard<'_, BlockCache>>> {
+        self.cache
+            .as_ref()
+            .map(|cache| {
+                cache
+                    .lock()
+                    .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))
+            })
+            .transpose()
+    }
+
+    /// Fetch unauthenticated candidate bytes for the chosen blocks. Cache hits
+    /// are local; every coalesced `range` containing a miss is fetched whole
+    /// in one batched read the backend may issue concurrently, then split.
+    /// The caller authenticates each block against its reference, then
+    /// settles the cache with `accept` or `reject`.
+    fn fetch_blocks(
+        &self,
+        references: &[&BlockRef],
+        ranges: &[(&str, usize, usize, usize)],
+    ) -> Result<Vec<(Slice, cache::Source)>> {
+        let mut cache = self.lock_cache()?;
+        let mut hits = Vec::with_capacity(references.len());
+        for reference in references {
+            validate_block_ref(reference)?;
+            hits.push(match cache.as_mut() {
+                Some(cache) => cache.lookup(reference)?,
+                None => None,
+            });
+        }
+        let within = |reference: &BlockRef, range: &(&str, usize, usize, usize)| {
+            range.0 == reference.object
+                && range.1 <= reference.offset
+                && reference.offset + reference.length <= range.1 + range.2
+        };
+        let needed: Vec<_> = ranges
+            .iter()
+            .filter(|range| {
+                references
+                    .iter()
+                    .zip(&hits)
+                    .any(|(reference, hit)| hit.is_none() && within(reference, range))
+            })
+            .copied()
+            .collect();
+        let payloads: Vec<_> = self
+            .store
+            .get_ranges(&needed)?
+            .into_iter()
+            .map(|payload| payload.map(std::sync::Arc::new))
+            .collect();
+        if let Some(cache) = cache.as_mut() {
+            for payload in payloads.iter().flatten() {
+                cache.count_remote(payload.len());
+            }
+        }
+        references
+            .iter()
+            .zip(hits)
+            .map(|(reference, hit)| {
+                if let Some((bytes, source)) = hit {
+                    let end = bytes.len();
+                    return Ok((
+                        Slice {
+                            data: std::sync::Arc::new(bytes),
+                            start: 0,
+                            end,
+                        },
+                        source,
+                    ));
+                }
+                let (range, payload) = needed
+                    .iter()
+                    .zip(&payloads)
+                    .find(|(range, _)| within(reference, range))
+                    .ok_or_else(|| Error::Invalid("chosen block outside its range".into()))?;
+                let payload = payload.as_ref().ok_or_else(|| {
+                    Error::Corrupt(format!("segmented pack missing: {}", reference.object))
+                })?;
+                // Blocks share their span's buffer instead of copying it.
+                let start = reference.offset - range.1;
+                Ok((
+                    Slice {
+                        data: payload.clone(),
+                        start,
+                        end: start + reference.length,
+                    },
+                    cache::Source::Remote,
+                ))
+            })
+            .collect()
+    }
+
+    pub fn open(store: S, config: Config) -> Result<Self> {
+        Self::open_with_options(store, config, SegmentedOptions::default())
+    }
+
+    /// Open or create a namespace whose metadata declares `options`. Opening
+    /// with options different from the persisted declaration fails.
+    pub fn open_with_options(
+        mut store: S,
+        config: Config,
+        options: SegmentedOptions,
+    ) -> Result<Self> {
         config.validate()?;
+        if options
+            .resident_filter
+            .as_ref()
+            .is_some_and(|(key, _)| key.is_empty())
+        {
+            return Err(Error::Invalid(
+                "resident filter key must be nonempty".into(),
+            ));
+        }
         let mut keys = store.list()?;
         keys.sort();
         if keys.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(Error::Corrupt("duplicate segmented object key".into()));
         }
         if keys.is_empty() {
-            store.create("metadata", &encode(&MetadataV2 { version: 2, config })?)?;
+            store.create("metadata", &metadata_bytes(config, &options)?)?;
             store.create(&root_key(0), &encode(&Root::empty(config))?)?;
             keys = vec!["metadata".into(), root_key(0)];
         } else if keys == ["metadata"] {
@@ -747,10 +1003,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             let bytes = store
                 .get("metadata")?
                 .ok_or_else(|| Error::Corrupt("listed metadata missing".into()))?;
-            let metadata: MetadataV2 = decode(&bytes)?;
-            if metadata.version != 2 || metadata.config != config {
-                return Err(Error::Corrupt("invalid segmented metadata".into()));
-            }
+            check_metadata(&bytes, config, &options)?;
             store.create(&root_key(0), &encode(&Root::empty(config))?)?;
             keys.push(root_key(0));
         }
@@ -761,14 +1014,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 "segmented metadata or root zero missing".into(),
             ));
         }
-        let metadata: MetadataV2 = decode(
+        check_metadata(
             &store
                 .get("metadata")?
                 .ok_or_else(|| Error::Corrupt("listed segmented metadata missing".into()))?,
+            config,
+            &options,
         )?;
-        if metadata.version != 2 || metadata.config != config {
-            return Err(Error::Corrupt("invalid segmented metadata".into()));
-        }
         let listed: BTreeSet<_> = keys.iter().cloned().collect();
         let mut latest_generation = 0;
         let mut logs = Vec::new();
@@ -799,8 +1051,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if root.generation != latest_generation {
             return Err(Error::Corrupt("segmented root generation mismatch".into()));
         }
-        let mut latest = BTreeMap::new();
-        for (run_ordinal, run) in root.runs.iter().enumerate() {
+        let mut latest = Directory::default();
+        // Size the directory once from the index entry counts, so merging
+        // runs does not reallocate it repeatedly.
+        latest.reserve(root.runs.iter().map(|run| (run.index_len - 24) / 24).sum());
+        for run in &root.runs {
             if !listed.contains(&run.index_object)
                 || run
                     .blocks
@@ -811,15 +1066,28 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     "selected segmented run object missing".into(),
                 ));
             }
-            let index = read_run_index(&store, run)?;
-            for entry in index.entries {
-                latest.insert(
-                    entry.id,
-                    Location {
-                        run: run_ordinal,
-                        entry,
-                    },
-                );
+        }
+        // At most two indexes are in flight at once.
+        let mut indexes = Vec::new();
+        for (chunk_start, chunk) in root.runs.chunks(2).enumerate() {
+            let keys: Vec<_> = chunk.iter().map(|run| run.index_object.clone()).collect();
+            for (offset, bytes) in store.get_many(&keys)?.into_iter().enumerate() {
+                let run_ordinal = chunk_start * 2 + offset;
+                indexes.push((
+                    run_ordinal,
+                    decode_run_index(&root.runs[run_ordinal], bytes)?,
+                ));
+            }
+            for (run_ordinal, index) in indexes.drain(..) {
+                latest.merge_sorted(index.entries.into_iter().map(|entry| {
+                    (
+                        entry.id,
+                        Location {
+                            run: run_ordinal,
+                            entry,
+                        },
+                    )
+                }));
             }
         }
         logs.sort_unstable();
@@ -842,26 +1110,134 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             known_keys: listed,
             obsolete: VecDeque::new(),
             cache: None,
-            selective: None,
+            options_digest: Sha256::digest(encode(&options)?).into(),
+            options,
+            sketches: SketchSet::default(),
+            query_threads: 1,
+            reclaim_min_garbage: 64 * 1024,
             seal: None,
             reclaim: None,
             prune: None,
             poisoned: false,
         };
-        for log_sequence in tail_logs {
-            if db.sequence.checked_add(1) != Some(log_sequence) {
-                return Err(Error::Corrupt("segmented mutation log gap".into()));
+        for chunk in tail_logs.chunks(8) {
+            let keys: Vec<_> = chunk.iter().map(|&sequence| log_key(sequence)).collect();
+            for (&log_sequence, bytes) in chunk.iter().zip(db.store.get_many(&keys)?) {
+                if db.sequence.checked_add(1) != Some(log_sequence) {
+                    return Err(Error::Corrupt("segmented mutation log gap".into()));
+                }
+                let record: LogRecordV1 = decode(
+                    &bytes.ok_or_else(|| Error::Corrupt("listed segmented log missing".into()))?,
+                )?;
+                db.replay(record, log_sequence)?;
+                db.tail_objects += 1;
             }
-            let record: LogRecordV1 = decode(
-                &db.store
-                    .get(&log_key(log_sequence))?
-                    .ok_or_else(|| Error::Corrupt("listed segmented log missing".into()))?,
-            )?;
-            db.replay(record, log_sequence)?;
-            db.tail_objects += 1;
         }
+        db.load_sketches()?;
         db.schedule_obsolete();
         Ok(db)
+    }
+
+    /// Load the derived sketch of every referenced pack. A missing or invalid
+    /// sketch is rebuilt in memory from that pack's authenticated blocks.
+    fn load_sketches(&mut self) -> Result<()> {
+        let mut packs: BTreeMap<String, Vec<BlockRef>> = BTreeMap::new();
+        for run in &self.root.runs {
+            for block in &run.blocks {
+                packs
+                    .entry(block.object.clone())
+                    .or_default()
+                    .push(block.clone());
+            }
+        }
+        let packs: Vec<_> = packs.into_iter().collect();
+        // At most eight prefix reads (2 MiB) are in flight at once.
+        for chunk in packs.chunks(8) {
+            let requests: Vec<_> = chunk
+                .iter()
+                .map(|(pack, references)| {
+                    let payload_len = references[0].payload_len;
+                    (
+                        pack.as_str(),
+                        0,
+                        FRAME_PREFIX_READ.min(payload_len),
+                        payload_len,
+                    )
+                })
+                .collect();
+            // A store-reported corrupt range fails the batch; read that chunk
+            // serially so each pack is judged on its own bytes.
+            let mut prefixes = match self.store.get_ranges(&requests) {
+                Ok(values) => values,
+                Err(Error::Corrupt(_)) => requests
+                    .iter()
+                    .map(|&(key, offset, length, payload)| {
+                        match self.store.get_range(key, offset, length, payload) {
+                            Err(Error::Corrupt(_)) => Ok(None),
+                            other => other,
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                Err(error) => return Err(error),
+            };
+            for (index, (pack, references)) in chunk.iter().enumerate() {
+                let payload_len = references[0].payload_len;
+                let mut decoded = None;
+                for _ in 0..2 {
+                    let Some(bytes) = prefixes[index].as_deref() else {
+                        break;
+                    };
+                    match unframe(bytes, payload_len) {
+                        Framed::Sketch(sketch) => {
+                            decoded =
+                                PackSketch::decode(sketch, self.config, &self.options_digest, pack)
+                                    .ok();
+                            break;
+                        }
+                        Framed::Need(length) => {
+                            prefixes[index] =
+                                match self.store.get_range(pack, 0, length, payload_len) {
+                                    Err(Error::Corrupt(_)) => None,
+                                    other => other?,
+                                };
+                        }
+                        Framed::Invalid => break,
+                    }
+                }
+                prefixes[index] = None;
+                let sketch = match decoded {
+                    Some(sketch) => sketch,
+                    None => {
+                        let mut references = references.clone();
+                        references.sort_by_key(|reference| reference.offset);
+                        let blocks = references
+                            .iter()
+                            .map(|reference| read_block(&self.store, self.config, reference))
+                            .collect::<Result<Vec<_>>>()?;
+                        let pairs: Vec<_> = references.iter().zip(&blocks).collect();
+                        self.sketches.rebuilt += 1;
+                        PackSketch::build(self.config, &self.options, pack, &pairs)?
+                    }
+                };
+                self.sketches.install(sketch);
+            }
+        }
+        self.sketches.refresh(&self.root)?;
+        self.activate_sketches(None);
+        self.sketches.compact_all();
+        Ok(())
+    }
+
+    fn activate_sketches(&mut self, packs: Option<&BTreeSet<String>>) {
+        let (latest, tail) = (&self.latest, &self.tail);
+        self.sketches.activate(packs, |id, run, block| {
+            !tail.contains_key(&id)
+                && latest.get(&id).is_some_and(|location| {
+                    location.run == run
+                        && location.entry.block as usize == block
+                        && !location.entry.deleted
+                })
+        });
     }
 
     fn schedule_obsolete(&mut self) {
@@ -896,16 +1272,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(())
     }
 
-    fn publish_pack(
-        &mut self,
-        attempt: &str,
-        ordinal: u32,
-        blocks: &[Block],
-    ) -> Result<Vec<BlockRef>> {
-        let key = format!("sgpack-{attempt}-{ordinal:08}");
-        let (bytes, references) = encode_pack(&key, self.config, blocks)?;
-        self.create_staged(&key, &bytes)?;
-        Ok(references)
+    /// Publish one pack beginning with its derived sketch frame. Neither is
+    /// state until a root references the pack.
+    fn publish_pack(&mut self, key: &str, blocks: &[Block]) -> Result<(Vec<BlockRef>, PackSketch)> {
+        let (bytes, references, sketch) = encode_pack_with_sketch(
+            key,
+            self.config,
+            &self.options,
+            &self.options_digest,
+            blocks,
+        )?;
+        self.create_staged(key, &bytes)?;
+        Ok((references, sketch))
     }
 
     fn replay(&mut self, record: LogRecordV1, expected: u64) -> Result<()> {
@@ -939,25 +1317,29 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 
     fn apply_tail(&mut self, sequence: u64, mutations: &[Mutation]) {
         for mutation in mutations {
-            match mutation {
+            let (id, entry) = match mutation {
                 Mutation::Put {
                     id,
                     vector,
                     metadata,
-                } => {
-                    self.tail.insert(
-                        *id,
-                        (
-                            sequence,
-                            Some(Document {
-                                vector: vector.clone(),
-                                metadata: metadata.clone(),
-                            }),
-                        ),
-                    );
-                }
-                Mutation::Delete { id } => {
-                    self.tail.insert(*id, (sequence, None));
+                } => (
+                    *id,
+                    (
+                        sequence,
+                        Some(Document {
+                            vector: vector.clone(),
+                            metadata: metadata.clone(),
+                        }),
+                    ),
+                ),
+                Mutation::Delete { id } => (*id, (sequence, None)),
+            };
+            let old = self.tail.insert(id, entry);
+            // A version an in-progress seal will publish must outlive its
+            // replacement in the tail until that seal materializes it.
+            if let (Some(seal), Some(old)) = (self.seal.as_mut(), old) {
+                if old.0 <= seal.boundary {
+                    seal.displaced.entry(id).or_insert(old);
                 }
             }
         }
@@ -997,6 +1379,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.retry.advance(next, applied);
         self.retry.retain(&request, outcome)?;
         self.apply_tail(next, applied);
+        for mutation in applied {
+            let (Mutation::Put { id, .. } | Mutation::Delete { id }) = mutation;
+            if let Some(location) = self.latest.get(id) {
+                self.sketches
+                    .mark(location.run, location.entry.block as usize, *id, false);
+            }
+        }
         self.sequence = next;
         self.tail_objects += 1;
         self.poisoned = false;
@@ -1055,10 +1444,28 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Ok(Vec::new());
         }
         let mut heap = BinaryHeap::new();
+        self.scan_live(|id, vector, metadata| {
+            if matches_filter(metadata, filter) {
+                consider(&mut heap, k, self.config, query, id, vector);
+            }
+            Ok(())
+        })?;
+        let mut results: Vec<_> = heap.into_iter().map(|ranked| ranked.0).collect();
+        results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        Ok(results)
+    }
+
+    /// Visit every live document exactly once: authenticated current records
+    /// of the selected root in physical order, then the acknowledged log tail.
+    /// Fails if any directory entry is missing from its block.
+    pub fn scan_live(
+        &self,
+        mut visit: impl FnMut(u64, &[f32], &BTreeMap<String, String>) -> Result<()>,
+    ) -> Result<()> {
         let expected = self
             .latest
-            .keys()
-            .filter(|id| !self.tail.contains_key(id))
+            .iter()
+            .filter(|(id, _)| !self.tail.contains_key(id))
             .count();
         let mut seen = 0;
         for (run_ordinal, run) in self.root.runs.iter().enumerate() {
@@ -1089,9 +1496,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         vector, metadata, ..
                     } = record.mutation
                     {
-                        if matches_filter(&metadata, filter) {
-                            consider(&mut heap, k, self.config, query, id, &vector);
-                        }
+                        visit(id, &vector, &metadata)?;
                     }
                 }
             }
@@ -1103,14 +1508,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         for (&id, (_, document)) in &self.tail {
             if let Some(document) = document {
-                if matches_filter(&document.metadata, filter) {
-                    consider(&mut heap, k, self.config, query, id, &document.vector);
-                }
+                visit(id, &document.vector, &document.metadata)?;
             }
         }
-        let mut results: Vec<_> = heap.into_iter().map(|ranked| ranked.0).collect();
-        results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
-        Ok(results)
+        Ok(())
     }
 
     /// Freeze an acknowledged prefix for publication. Subsequent writes may
@@ -1127,29 +1528,40 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         let first_sequence = self.root.sequence + 1;
         let boundary = self.sequence;
-        let mut records = Vec::new();
-        for (&id, &(sequence, ref document)) in &self.tail {
-            let mutation = match document {
-                Some(document) => Mutation::Put {
+        let mut puts = Vec::new();
+        let mut deletes = Vec::new();
+        for (&id, (sequence, document)) in &self.tail {
+            match document {
+                Some(document) => puts.push((
                     id,
-                    vector: document.vector.clone(),
-                    metadata: document.metadata.clone(),
-                },
-                None => Mutation::Delete { id },
-            };
-            records.push(BlockRecord { sequence, mutation });
+                    document.vector.as_slice(),
+                    codec::record_len(&BlockRecord {
+                        sequence: *sequence,
+                        mutation: Mutation::Delete { id },
+                    }) + codec::put_len(&document.vector, &document.metadata),
+                )),
+                None => deletes.push((
+                    id,
+                    codec::record_len(&BlockRecord {
+                        sequence: *sequence,
+                        mutation: Mutation::Delete { id },
+                    }),
+                )),
+            }
         }
-        let blocks = vector_local_blocks(self.config, records)?;
+        let blocks = plan_vector_local(self.config, &puts, &deletes)?;
+        drop(puts);
         let mut entries = Vec::new();
-        for (ordinal, block) in blocks.iter().enumerate() {
+        for (ordinal, ids) in blocks.iter().enumerate() {
             let block_ordinal = u32::try_from(ordinal)
                 .map_err(|_| Error::Invalid("too many segmented blocks".into()))?;
-            for record in &block.records {
+            for id in ids {
+                let (sequence, document) = &self.tail[id];
                 entries.push(IndexEntry {
-                    id: record.id(),
-                    sequence: record.sequence,
+                    id: *id,
+                    sequence: *sequence,
                     block: block_ordinal,
-                    deleted: matches!(record.mutation, Mutation::Delete { .. }),
+                    deleted: document.is_none(),
                 });
             }
         }
@@ -1164,8 +1576,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             first_sequence,
             retry: self.retry.clone(),
             blocks,
+            displaced: BTreeMap::new(),
             entries,
             references: Vec::new(),
+            sketches: Vec::new(),
             next_block: 0,
             next_pack: 0,
             index_published: false,
@@ -1185,22 +1599,47 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if seal.next_block < seal.blocks.len() {
             let start = seal.next_block;
             let mut end = start;
+            // Materialize only this pack's sealed versions. Raw lengths bound
+            // compressed lengths from above, up to zstd's small framing
+            // overhead covered by the 64 KiB margin.
             let mut bytes = 0;
-            while end < seal.blocks.len() {
-                let length = encode(&seal.blocks[end])?.len();
-                if end > start && bytes + length > MAX_PACK_BYTES {
+            let mut blocks = Vec::new();
+            while end < seal.blocks.len() && end - start < MAX_PACK_BLOCKS {
+                let mut records = Vec::with_capacity(seal.blocks[end].len());
+                for id in &seal.blocks[end] {
+                    let (sequence, document) = seal
+                        .displaced
+                        .get(id)
+                        .or_else(|| self.tail.get(id))
+                        .filter(|(sequence, _)| *sequence <= seal.boundary)
+                        .ok_or_else(|| Error::Corrupt("sealed version missing".into()))?;
+                    records.push(BlockRecord {
+                        sequence: *sequence,
+                        mutation: match document {
+                            Some(document) => Mutation::Put {
+                                id: *id,
+                                vector: document.vector.clone(),
+                                metadata: document.metadata.clone(),
+                            },
+                            None => Mutation::Delete { id: *id },
+                        },
+                    });
+                }
+                let length = codec::block_len(records.iter().map(codec::record_len));
+                if end > start && bytes + length > MAX_PACK_BYTES - 64 * 1024 {
                     break;
                 }
                 bytes += length;
+                blocks.push(Block::new(self.config, 0, records)?);
                 end += 1;
             }
+            let key = format!("sgpack-{}-{:08}", seal.attempt, seal.next_pack);
             self.poisoned = true;
-            seal.references.extend(self.publish_pack(
-                &seal.attempt,
-                seal.next_pack,
-                &seal.blocks[start..end],
-            )?);
+            let (references, sketch) = self.publish_pack(&key, &blocks)?;
             self.poisoned = false;
+            drop(blocks);
+            seal.references.extend(references);
+            seal.sketches.push(sketch);
             seal.next_block = end;
             seal.next_pack += 1;
             self.seal = Some(seal);
@@ -1249,15 +1688,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = false;
         if !seal.entries.is_empty() {
             let run = root.runs.len() - 1;
-            for entry in seal.entries {
-                self.latest.insert(entry.id, Location { run, entry });
-            }
+            self.latest.merge_sorted(
+                seal.entries
+                    .into_iter()
+                    .map(|entry| (entry.id, Location { run, entry })),
+            );
         }
         self.tail
             .retain(|_, (sequence, _)| *sequence > seal.boundary);
         self.tail_objects -= (seal.boundary - self.root.sequence) as usize;
         self.root = root;
-        self.selective = None;
+        let packs: BTreeSet<_> = seal.sketches.iter().map(|s| s.pack().to_owned()).collect();
+        for sketch in seal.sketches {
+            self.sketches.install(sketch);
+        }
+        self.refresh_sketches(Some(&packs))?;
         self.schedule_obsolete();
         Ok(true)
     }
@@ -1301,25 +1746,29 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let second = &self.root.runs[pair + 1];
         let left = read_run_index(&self.store, first)?;
         let right = read_run_index(&self.store, second)?;
-        let mut latest_pair = BTreeMap::new();
-        for entry in left.entries {
-            if self.latest.get(&entry.id).is_some_and(|at| at.run == pair) {
-                latest_pair.insert(entry.id, (pair, entry));
-            }
-        }
-        for entry in right.entries {
-            if self
-                .latest
-                .get(&entry.id)
-                .is_some_and(|at| at.run == pair + 1)
-            {
-                latest_pair.insert(entry.id, (pair + 1, entry));
-            }
-        }
+        // Both indexes are ID-sorted and an ID is current in at most one run,
+        // so a linear merge yields the surviving entries in ID order.
+        let latest = &self.latest;
+        let keep = |run: usize| {
+            move |entry: &IndexEntry| latest.get(&entry.id).is_some_and(|at| at.run == run)
+        };
+        let mut left = left.entries.into_iter().filter(keep(pair)).peekable();
+        let mut right = right.entries.into_iter().filter(keep(pair + 1)).peekable();
         let mut blocks = Vec::new();
         let mut block_map = BTreeMap::new();
         let mut entries = Vec::new();
-        for (id, (run_ordinal, mut entry)) in latest_pair {
+        loop {
+            let take_left = match (left.peek(), right.peek()) {
+                (Some(a), Some(b)) => a.id < b.id,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            let (run_ordinal, mut entry) = if take_left {
+                (pair, left.next().unwrap())
+            } else {
+                (pair + 1, right.next().unwrap())
+            };
             if pair == 0 && entry.deleted {
                 continue;
             }
@@ -1332,9 +1781,9 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     u32::try_from(blocks.len() - 1).expect("bounded block reference count")
                 });
             entry.block = ordinal;
-            debug_assert_eq!(id, entry.id);
             entries.push(entry);
         }
+        drop((left, right));
         let mut root = self.root.clone();
         root.generation = root
             .generation
@@ -1346,9 +1795,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         } else {
             let index = RunIndex {
                 sequence: second.last_sequence,
-                entries: entries.clone(),
+                entries: std::mem::take(&mut entries),
             };
             let bytes = index.encode(first.first_sequence, blocks.len())?;
+            entries = index.entries;
             let object = format!("sgindex-{attempt}");
             Some((
                 RunRef {
@@ -1379,7 +1829,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let replacement_count = usize::from(replacement.is_some());
         self.latest.retain(|id, location| {
             if location.run == pair || location.run == pair + 1 {
-                if let Ok(index) = entries.binary_search_by_key(id, |entry| entry.id) {
+                if let Ok(index) = entries.binary_search_by_key(&id, |entry| entry.id) {
                     location.run = pair;
                     location.entry = entries[index];
                     true
@@ -1394,9 +1844,22 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             }
         });
         self.root = root;
-        self.selective = None;
+        self.refresh_sketches(None)?;
         self.schedule_obsolete();
         Ok(true)
+    }
+
+    /// Rebind sketches after a root change. Liveness of retained rows does not
+    /// change; only newly installed packs need activation.
+    fn refresh_sketches(&mut self, new_packs: Option<&BTreeSet<String>>) -> Result<()> {
+        if let Err(error) = self.sketches.refresh(&self.root) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        if let Some(packs) = new_packs {
+            self.activate_sketches(Some(packs));
+        }
+        Ok(())
     }
 
     /// Remove fully dead block references from one <=1 MiB index run. This
@@ -1415,7 +1878,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .iter()
             .map(|run| vec![0; run.blocks.len()])
             .collect();
-        for (&id, location) in &self.latest {
+        for (id, location) in self.latest.iter() {
             if !self.tail.contains_key(&id) {
                 *live_counts
                     .get_mut(location.run)
@@ -1449,7 +1912,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             }
         }
         let mut entries = Vec::new();
-        for (&id, location) in &self.latest {
+        for (id, location) in self.latest.iter() {
             if location.run == run && !self.tail.contains_key(&id) {
                 let mut entry = location.entry;
                 entry.block = remap[entry.block as usize]
@@ -1522,22 +1985,23 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 true
             }
         });
-        for entry in state.entries {
-            self.latest.insert(
-                entry.id,
-                Location {
-                    run: state.run,
-                    entry,
-                },
-            );
-        }
+        self.latest
+            .merge_sorted(state.entries.into_iter().map(|entry| {
+                (
+                    entry.id,
+                    Location {
+                        run: state.run,
+                        entry,
+                    },
+                )
+            }));
         self.root = state.root;
-        self.selective = None;
+        self.refresh_sketches(None)?;
         self.schedule_obsolete();
         Ok(true)
     }
 
-    /// Freeze one <=1 MiB pack for reclamation. The live set is fixed before
+    /// Freeze reclaimable packs whose live bytes fit one new pack. The live set is fixed before
     /// reading blocks; later acknowledged log writes may safely shadow it.
     pub fn start_reclaim(&mut self) -> Result<bool> {
         if self.poisoned {
@@ -1547,7 +2011,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Err(Error::MaintenanceRequired);
         }
         let mut live_counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-        for (&id, location) in &self.latest {
+        for (id, location) in self.latest.iter() {
             if !self.tail.contains_key(&id) {
                 *live_counts
                     .entry((location.run, location.entry.block as usize))
@@ -1566,6 +2030,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 let entry = packs.entry(reference.object.clone()).or_insert(PackStats {
                     payload_len: reference.payload_len,
                     estimated_live_bytes: 0,
+                    live_rows: 0,
                     locations: Vec::new(),
                     has_empty_block: false,
                 });
@@ -1576,35 +2041,64 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 }
                 entry.estimated_live_bytes +=
                     ((reference.length as u128 * live as u128) / reference.rows as u128) as usize;
+                entry.live_rows += live;
                 entry.locations.push((run, block));
                 entry.has_empty_block |= live == 0;
             }
         }
-        let candidate = packs
+        // Merge the packs with the most garbage into one new pack while their
+        // estimated live bytes stay within 7/8 of the pack limit; the margin
+        // covers estimation error so encoding cannot exceed the limit.
+        let mut candidates: Vec<_> = packs
             .into_iter()
             .filter(|(_, pack)| {
                 !pack.has_empty_block
                     && pack.estimated_live_bytes <= pack.payload_len / 2
-                    && pack.payload_len.saturating_sub(pack.estimated_live_bytes) >= 64 * 1024
+                    && pack.payload_len.saturating_sub(pack.estimated_live_bytes)
+                        >= self.reclaim_min_garbage
             })
-            .max_by(|(a_key, a), (b_key, b)| {
-                a.payload_len
-                    .saturating_sub(a.estimated_live_bytes)
-                    .cmp(&b.payload_len.saturating_sub(b.estimated_live_bytes))
-                    .then_with(|| b_key.cmp(a_key))
-            });
-        let Some((_, mut pack)) = candidate else {
+            .collect();
+        candidates.sort_by(|(a_key, a), (b_key, b)| {
+            b.payload_len
+                .saturating_sub(b.estimated_live_bytes)
+                .cmp(&a.payload_len.saturating_sub(a.estimated_live_bytes))
+                .then_with(|| a_key.cmp(b_key))
+        });
+        // Live rows are capped too: reclaimed blocks are decoded in memory
+        // until the new pack is written.
+        const MAX_RECLAIM_ROWS: usize = MAX_PACK_BLOCKS * 170;
+        let mut locations = Vec::new();
+        let (mut live, mut rows) = (0_usize, 0_usize);
+        for (_, pack) in candidates {
+            if !locations.is_empty()
+                && (live + pack.estimated_live_bytes > MAX_PACK_BYTES / 8 * 7
+                    || rows + pack.live_rows > MAX_RECLAIM_ROWS)
+            {
+                continue;
+            }
+            live += pack.estimated_live_bytes;
+            rows += pack.live_rows;
+            let mut pack_locations = pack.locations;
+            pack_locations.sort_by_key(|&(run, block)| self.root.runs[run].blocks[block].offset);
+            locations.extend(pack_locations);
+        }
+        if locations.is_empty() {
             return Ok(false);
+        }
+        let pack = PackStats {
+            payload_len: 0,
+            estimated_live_bytes: live,
+            live_rows: rows,
+            locations,
+            has_empty_block: false,
         };
-        pack.locations
-            .sort_by_key(|&(run, block)| self.root.runs[run].blocks[block].offset);
         let mut expected_by_location: BTreeMap<_, BTreeMap<_, _>> = pack
             .locations
             .iter()
             .copied()
             .map(|location| (location, BTreeMap::new()))
             .collect();
-        for (&id, location) in &self.latest {
+        for (id, location) in self.latest.iter() {
             if !self.tail.contains_key(&id) {
                 if let Some(expected) =
                     expected_by_location.get_mut(&(location.run, location.entry.block as usize))
@@ -1628,6 +2122,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             blocks: Vec::new(),
             key: format!("sgpack-{}-00000000", attempt_id()?),
             references: None,
+            sketch: None,
         });
         Ok(true)
     }
@@ -1678,11 +2173,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Ok(true);
         }
         if state.references.is_none() {
-            let (bytes, references) = encode_pack(&state.key, self.config, &state.blocks)?;
             self.poisoned = true;
-            self.create_staged(&state.key, &bytes)?;
+            let (references, sketch) = self.publish_pack(&state.key.clone(), &state.blocks)?;
             self.poisoned = false;
             state.references = Some(references);
+            state.sketch = Some(sketch);
             state.blocks.clear();
             state.expected.clear();
             self.reclaim = Some(state);
@@ -1702,7 +2197,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
         self.root = root;
-        self.selective = None;
+        let sketch = state.sketch.expect("reclaim sketch staged with its pack");
+        let packs = BTreeSet::from([sketch.pack().to_owned()]);
+        self.sketches.install(sketch);
+        self.refresh_sketches(Some(&packs))?;
         self.schedule_obsolete();
         Ok(true)
     }
@@ -1748,6 +2246,22 @@ mod tests {
     use crate::{store::LocalStore, Metric};
     use std::collections::BTreeMap;
 
+    /// `base + id` on every axis plus under 0.01 of noise on axes after the
+    /// first, so test blocks do not compress to a trivial size.
+    fn noisy(base: f32, id: u64) -> Vec<f32> {
+        (0..128_u64)
+            .map(|axis| {
+                let noise = (id.wrapping_mul(2_654_435_761) ^ axis.wrapping_mul(40_503)) % 1_000;
+                base + id as f32
+                    + if axis == 0 {
+                        0.
+                    } else {
+                        noise as f32 / 100_000.
+                    }
+            })
+            .collect()
+    }
+
     #[test]
     fn packed_blocks_round_trip_and_reject_corrupt_references() {
         let config = Config {
@@ -1785,6 +2299,121 @@ mod tests {
             read_block(&store, config, &missing),
             Err(Error::Corrupt(_))
         ));
+    }
+
+    #[test]
+    fn block_formats_preserve_every_component_bit() {
+        let config = Config {
+            dimensions: 6,
+            metric: Metric::SquaredEuclidean,
+        };
+        let vector = vec![3., -0., 0.1, -7., 1e30, 16_777_216.];
+        let block = Block::new(
+            config,
+            0,
+            vec![BlockRecord {
+                sequence: 1,
+                mutation: Mutation::Put {
+                    id: 9,
+                    vector: vector.clone(),
+                    metadata: BTreeMap::new(),
+                },
+            }],
+        )
+        .unwrap();
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let (bytes, references) =
+            encode_pack("sgpack-x-00000000", config, std::slice::from_ref(&block)).unwrap();
+        assert!(codec::is_v2(&bytes));
+        // Version 1 JSON blocks written by earlier binaries remain readable.
+        let json = encode(&block).unwrap();
+        let json_reference = BlockRef {
+            length: json.len(),
+            payload_len: json.len(),
+            sha256: format!("{:x}", Sha256::digest(&json)),
+            ..references[0].clone()
+        };
+        for (reference, bytes) in [(&references[0], &bytes), (&json_reference, &json)] {
+            let decoded = decode_block_bytes(config, reference, bytes).unwrap();
+            let Mutation::Put { vector: found, .. } = &decoded.records[0].mutation else {
+                panic!("put expected");
+            };
+            assert_eq!(bits(found), bits(&vector));
+        }
+        let mut corrupt = bytes.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 1;
+        assert!(codec::decode(config, &corrupt).is_err());
+    }
+
+    #[test]
+    fn reclamation_merges_several_mostly_dead_packs_into_one() {
+        let config = Config {
+            dimensions: 128,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        let mut nonce = 0_u8;
+        let mut write =
+            |db: &mut SegmentedDatabase<LocalStore>, ids: std::ops::Range<u64>, value: f32| {
+                for chunk in ids.collect::<Vec<_>>().chunks(100) {
+                    nonce += 1;
+                    db.apply_request(retry::Request {
+                        id: retry::RequestId {
+                            boundary: db.sequence(),
+                            nonce: [nonce; 16],
+                        },
+                        conditions: Vec::new(),
+                        mutations: chunk
+                            .iter()
+                            .map(|&id| Mutation::Put {
+                                id,
+                                vector: noisy(value, id),
+                                metadata: BTreeMap::new(),
+                            })
+                            .collect(),
+                    })
+                    .unwrap();
+                }
+            };
+        write(&mut db, 0..400, 1_000.);
+        db.seal_delta().unwrap();
+        write(&mut db, 400..800, 2_000.);
+        db.seal_delta().unwrap();
+        let packs = |db: &SegmentedDatabase<LocalStore>| {
+            db.root
+                .runs
+                .iter()
+                .flat_map(|run| run.blocks.iter().map(|block| block.object.clone()))
+                .collect::<BTreeSet<_>>()
+        };
+        let before = packs(&db);
+        assert_eq!(before.len(), 2);
+        write(&mut db, 0..300, 5_000.);
+        write(&mut db, 400..700, 6_000.);
+        db.seal_delta().unwrap();
+        // Fully dead blocks are pruned first; reclamation needs live blocks.
+        while db.start_prune().unwrap() {
+            while db.prune_step().unwrap() {}
+        }
+        assert!(before.is_subset(&packs(&db)));
+        let generation = db.root.generation;
+        assert!(db.reclaim_pack_step().unwrap());
+        assert_eq!(db.root.generation, generation + 1);
+        let after = packs(&db);
+        assert!(before.iter().all(|pack| !after.contains(pack)));
+        assert_eq!(after.len(), 2);
+        let exact = db.search_exact(&[1_350.; 128], 5, &[]).unwrap();
+        assert_eq!(
+            db.search_selective(&[1_350.; 128], 5, 1_000, &[]).unwrap(),
+            exact
+        );
+        drop(db);
+        let db = SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        assert_eq!(db.sketch_rebuilds(), 0);
+        assert_eq!(db.search_exact(&[1_350.; 128], 5, &[]).unwrap(), exact);
     }
 
     #[test]
@@ -2008,13 +2637,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 2, 4]
         );
-        assert!(db.build_selective_index(1).is_err());
-        db.build_selective_index(1024 * 1024).unwrap();
-        assert!(db
-            .selective_index_bytes()
-            .is_some_and(|bytes| bytes < 1024 * 1024));
+        assert!(db.selective_index_bytes() < 1024 * 1024);
         let selected_ids = |db: &SegmentedDatabase<LocalStore>| {
-            db.search_selective_unfiltered(&[0., 0.], 3, 1)
+            db.search_selective(&[0., 0.], 3, 1, &[])
                 .unwrap()
                 .into_iter()
                 .map(|neighbor| neighbor.id)
@@ -2036,7 +2661,12 @@ mod tests {
         .unwrap();
         assert_eq!(selected_ids(&db), vec![2, 4, 6]);
         db.seal_delta().unwrap();
-        assert!(db.search_selective_unfiltered(&[0., 0.], 3, 1).is_err());
+        assert_eq!(selected_ids(&db), vec![2, 4, 6]);
+        assert!(db.search_selective(&[0., 0.], 3, 1, &[("a", "b")]).is_err());
+        drop(db);
+        let db = SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        assert_eq!(db.sketch_rebuilds(), 0);
+        assert_eq!(selected_ids(&db), vec![2, 4, 6]);
     }
 
     #[test]
@@ -2062,7 +2692,7 @@ mod tests {
         };
         db.apply_request(put(0, 1, 42, 1.)).unwrap();
         db.start_seal().unwrap();
-        assert!(db.seal_step().unwrap()); // pack for sequence 1
+        assert!(db.seal_step().unwrap()); // pack and sketch for sequence 1
         db.apply_request(put(1, 2, 42, 3.)).unwrap();
         assert!(db.seal_step().unwrap()); // index for sequence 1
         db.apply_request(put(2, 3, 7, 4.)).unwrap();
@@ -2192,7 +2822,7 @@ mod tests {
                         let id = batch * 100 + offset;
                         Mutation::Put {
                             id,
-                            vector: vec![id as f32; 128],
+                            vector: noisy(0., id),
                             metadata: BTreeMap::new(),
                         }
                     })
@@ -2214,7 +2844,7 @@ mod tests {
                     .iter()
                     .map(|&id| Mutation::Put {
                         id,
-                        vector: vec![1000. + id as f32; 128],
+                        vector: noisy(1000., id),
                         metadata: BTreeMap::new(),
                     })
                     .collect(),
@@ -2283,7 +2913,7 @@ mod tests {
                 mutations: (batch * 100..(batch + 1) * 100)
                     .map(|id| Mutation::Put {
                         id,
-                        vector: vec![id as f32; 128],
+                        vector: noisy(0., id),
                         metadata: BTreeMap::new(),
                     })
                     .collect(),
@@ -2309,7 +2939,7 @@ mod tests {
                     .iter()
                     .map(|&id| Mutation::Put {
                         id,
-                        vector: vec![1000. + id as f32; 128],
+                        vector: noisy(1000., id),
                         metadata: BTreeMap::new(),
                     })
                     .collect(),
@@ -2397,7 +3027,7 @@ mod tests {
                 mutations: (batch * 100..(batch + 1) * 100)
                     .map(|id| Mutation::Put {
                         id,
-                        vector: vec![id as f32; 128],
+                        vector: noisy(0., id),
                         metadata: BTreeMap::new(),
                     })
                     .collect(),
@@ -2486,16 +3116,21 @@ mod tests {
             drop(fallback);
             std::fs::remove_dir_all(&cache_path).unwrap();
         }
-        let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
-            .unwrap()
-            .with_block_cache(&cache_path, 0, MAX_BLOCK_BYTES + 4096)
+        let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        // The NVMe budget fits the largest block's charge but not two blocks.
+        let one_block = db.root.runs[0]
+            .blocks
+            .iter()
+            .map(|block| block.length.div_ceil(4096) * 4096 + 4096)
+            .max()
             .unwrap();
+        let db = db.with_block_cache(&cache_path, 0, one_block).unwrap();
         assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
         assert_eq!(db.get(399).unwrap().unwrap().vector[0], 399.);
         assert_eq!(db.get(0).unwrap().unwrap().vector[0], 0.);
         let stats = db.cache_stats().unwrap().unwrap();
         assert_eq!(stats.remote_fetches, 3);
-        assert!(stats.nvme_bytes <= MAX_BLOCK_BYTES + 4096);
+        assert!(stats.nvme_bytes <= one_block);
         assert_eq!(stats.ram_bytes, 0);
     }
 
@@ -2759,7 +3394,7 @@ mod tests {
                         let id = batch * 100 + offset;
                         Mutation::Put {
                             id,
-                            vector: vec![id as f32; 128],
+                            vector: noisy(0., id),
                             metadata: BTreeMap::new(),
                         }
                     })
@@ -2793,7 +3428,7 @@ mod tests {
                         .iter()
                         .map(|&id| Mutation::Put {
                             id,
-                            vector: vec![1000. + id as f32; 128],
+                            vector: noisy(1000., id),
                             metadata: BTreeMap::new(),
                         })
                         .collect(),
@@ -2898,7 +3533,7 @@ mod tests {
                     mutations: (batch * 100..(batch + 1) * 100)
                         .map(|id| Mutation::Put {
                             id,
-                            vector: vec![id as f32; 128],
+                            vector: noisy(0., id),
                             metadata: BTreeMap::new(),
                         })
                         .collect(),
@@ -2936,7 +3571,7 @@ mod tests {
                             .iter()
                             .map(|&id| Mutation::Put {
                                 id,
-                                vector: vec![1000. + id as f32; 128],
+                                vector: noisy(1000., id),
                                 metadata: BTreeMap::new(),
                             })
                             .collect(),

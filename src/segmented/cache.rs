@@ -4,7 +4,7 @@ use crate::{store::ObjectStore, Config, Error, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -28,19 +28,31 @@ pub struct CacheStats {
     pub nvme_entries: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Source {
+    Ram,
+    Nvme,
+    Remote,
+}
+
 pub(super) struct BlockCache {
     directory: PathBuf,
     nvme_available: bool,
     ram_limit: usize,
     nvme_limit: usize,
-    ram: BTreeMap<String, Vec<u8>>,
-    ram_order: VecDeque<String>,
+    // Entries are keyed by the 32-byte cache key; recency is a tick, so a
+    // touch or eviction is O(log n) and file names are derived on demand.
+    ram: BTreeMap<Key, (Vec<u8>, u64)>,
+    ram_order: BTreeMap<u64, Key>,
     ram_bytes: usize,
-    nvme: BTreeMap<String, usize>,
-    nvme_order: VecDeque<String>,
+    nvme: BTreeMap<Key, (usize, u64)>,
+    nvme_order: BTreeMap<u64, Key>,
     nvme_bytes: usize,
+    tick: u64,
     stats: CacheStats,
 }
+
+type Key = [u8; 32];
 
 impl BlockCache {
     pub(super) fn open(base: &Path, ram_limit: usize, nvme_limit: usize) -> Self {
@@ -51,11 +63,12 @@ impl BlockCache {
             ram_limit,
             nvme_limit,
             ram: BTreeMap::new(),
-            ram_order: VecDeque::new(),
+            ram_order: BTreeMap::new(),
             ram_bytes: 0,
             nvme: BTreeMap::new(),
-            nvme_order: VecDeque::new(),
+            nvme_order: BTreeMap::new(),
             nvme_bytes: 0,
+            tick: 0,
             stats: CacheStats::default(),
         };
         if cache.initialize_nvme().is_err() {
@@ -86,8 +99,9 @@ impl BlockCache {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let metadata = fs::symlink_metadata(entry.path())?;
+            let key = parse_filename(&name);
             if !metadata.file_type().is_file()
-                || !valid_filename(&name)
+                || key.is_none()
                 || metadata.len() > super::MAX_BLOCK_BYTES as u64
             {
                 if metadata.file_type().is_dir() {
@@ -99,9 +113,11 @@ impl BlockCache {
             }
             let length = usize::try_from(metadata.len())
                 .map_err(|_| Error::Invalid("cache file length exceeds usize".into()))?;
+            let key = key.expect("checked above");
             self.nvme_bytes += disk_charge(length);
-            self.nvme.insert(name.clone(), length);
-            self.nvme_order.push_back(name);
+            self.tick += 1;
+            self.nvme.insert(key, (length, self.tick));
+            self.nvme_order.insert(self.tick, key);
             self.trim_nvme(0)?;
         }
         Ok(())
@@ -124,44 +140,30 @@ impl BlockCache {
         config: Config,
         reference: &BlockRef,
     ) -> Result<Block> {
-        validate_block_ref(reference)?;
-        let name = filename(reference);
-        if let Some(bytes) = self.ram.get(&name).cloned() {
+        loop {
+            let (bytes, source) = self.fetch(store, reference)?;
             match decode_block_bytes(config, reference, &bytes) {
                 Ok(block) => {
-                    self.stats.ram_hits += 1;
-                    self.stats.ram_payload_bytes += bytes.len() as u64;
-                    touch(&mut self.ram_order, &name);
+                    self.accept(reference, source, &bytes);
                     return Ok(block);
                 }
-                Err(_) => {
-                    self.stats.corrupt_entries += 1;
-                    self.remove_ram(&name);
-                }
+                Err(error) if source == Source::Remote => return Err(error),
+                Err(_) => self.reject(reference, source),
             }
         }
-        if self.nvme.contains_key(&name) {
-            match fs::read(self.directory.join(&name)) {
-                Ok(bytes) => match decode_block_bytes(config, reference, &bytes) {
-                    Ok(block) => {
-                        self.stats.nvme_hits += 1;
-                        self.stats.nvme_payload_bytes += bytes.len() as u64;
-                        touch(&mut self.nvme_order, &name);
-                        self.put_ram(&name, &bytes);
-                        return Ok(block);
-                    }
-                    Err(_) => {
-                        self.stats.corrupt_entries += 1;
-                        self.remove_nvme(&name);
-                    }
-                },
-                Err(_) => {
-                    self.stats.cache_io_errors += 1;
-                    self.remove_nvme(&name);
-                }
-            }
+    }
+
+    /// Return candidate bytes from RAM, NVMe or object storage without
+    /// authenticating them. The caller must decode against the root reference,
+    /// then call `accept`, or `reject` for corrupt cached bytes and fetch again.
+    pub(super) fn fetch<S: ObjectStore>(
+        &mut self,
+        store: &S,
+        reference: &BlockRef,
+    ) -> Result<(Vec<u8>, Source)> {
+        if let Some(found) = self.lookup(reference)? {
+            return Ok(found);
         }
-        self.stats.remote_fetches += 1;
         let bytes = store
             .get_range(
                 &reference.object,
@@ -172,44 +174,109 @@ impl BlockCache {
             .ok_or_else(|| {
                 Error::Corrupt(format!("segmented pack missing: {}", reference.object))
             })?;
-        self.stats.remote_payload_bytes += bytes.len() as u64;
-        let block = decode_block_bytes(config, reference, &bytes)?;
-        self.put_ram(&name, &bytes);
-        self.put_nvme(&name, &bytes);
-        Ok(block)
+        self.count_remote(bytes.len());
+        Ok((bytes, Source::Remote))
     }
 
-    fn remove_ram(&mut self, name: &str) {
-        if let Some(bytes) = self.ram.remove(name) {
-            self.ram_bytes -= ram_charge(name, bytes.len());
+    /// Candidate bytes from RAM or NVMe, or `None` for a miss.
+    pub(super) fn lookup(&mut self, reference: &BlockRef) -> Result<Option<(Vec<u8>, Source)>> {
+        validate_block_ref(reference)?;
+        let key = cache_key(reference);
+        if let Some((bytes, _)) = self.ram.get(&key) {
+            return Ok(Some((bytes.clone(), Source::Ram)));
         }
-        self.ram_order.retain(|entry| entry != name);
+        if self.nvme.contains_key(&key) {
+            match fs::read(self.directory.join(filename(&key))) {
+                Ok(bytes) => return Ok(Some((bytes, Source::Nvme))),
+                Err(_) => {
+                    self.stats.cache_io_errors += 1;
+                    self.remove_nvme(&key);
+                }
+            }
+        }
+        Ok(None)
     }
 
-    fn put_ram(&mut self, name: &str, bytes: &[u8]) {
-        let charge = ram_charge(name, bytes.len());
+    pub(super) fn count_remote(&mut self, bytes: usize) {
+        self.stats.remote_fetches += 1;
+        self.stats.remote_payload_bytes += bytes as u64;
+    }
+
+    /// Record authenticated bytes: count the hit or admit fetched bytes.
+    pub(super) fn accept(&mut self, reference: &BlockRef, source: Source, bytes: &[u8]) {
+        let key = cache_key(reference);
+        match source {
+            Source::Ram => {
+                self.stats.ram_hits += 1;
+                self.stats.ram_payload_bytes += bytes.len() as u64;
+                self.tick += 1;
+                if let Some((_, tick)) = self.ram.get_mut(&key) {
+                    self.ram_order.remove(tick);
+                    *tick = self.tick;
+                    self.ram_order.insert(self.tick, key);
+                }
+            }
+            Source::Nvme => {
+                self.stats.nvme_hits += 1;
+                self.stats.nvme_payload_bytes += bytes.len() as u64;
+                self.tick += 1;
+                if let Some((_, tick)) = self.nvme.get_mut(&key) {
+                    self.nvme_order.remove(tick);
+                    *tick = self.tick;
+                    self.nvme_order.insert(self.tick, key);
+                }
+                self.put_ram(&key, bytes);
+            }
+            Source::Remote => {
+                self.put_ram(&key, bytes);
+                self.put_nvme(&key, bytes);
+            }
+        }
+    }
+
+    /// Discard cached bytes that failed authentication.
+    pub(super) fn reject(&mut self, reference: &BlockRef, source: Source) {
+        let key = cache_key(reference);
+        self.stats.corrupt_entries += 1;
+        match source {
+            Source::Ram => self.remove_ram(&key),
+            Source::Nvme => self.remove_nvme(&key),
+            Source::Remote => {}
+        }
+    }
+
+    fn remove_ram(&mut self, key: &Key) {
+        if let Some((bytes, tick)) = self.ram.remove(key) {
+            self.ram_bytes -= ram_charge(bytes.len());
+            self.ram_order.remove(&tick);
+        }
+    }
+
+    fn put_ram(&mut self, key: &Key, bytes: &[u8]) {
+        let charge = ram_charge(bytes.len());
         if charge > self.ram_limit {
             return;
         }
-        self.remove_ram(name);
+        self.remove_ram(key);
         while self.ram_bytes + charge > self.ram_limit {
-            let Some(oldest) = self.ram_order.pop_front() else {
+            let Some((_, oldest)) = self.ram_order.pop_first() else {
                 break;
             };
             self.remove_ram(&oldest);
         }
         self.ram_bytes += charge;
-        self.ram.insert(name.to_owned(), bytes.to_vec());
-        self.ram_order.push_back(name.to_owned());
+        self.tick += 1;
+        self.ram.insert(*key, (bytes.to_vec(), self.tick));
+        self.ram_order.insert(self.tick, *key);
     }
 
-    fn remove_nvme(&mut self, name: &str) {
+    fn remove_nvme(&mut self, key: &Key) {
         if !self.safe_directory() {
             self.nvme_available = false;
             self.stats.cache_io_errors += 1;
             return;
         }
-        let removed = match fs::remove_file(self.directory.join(name)) {
+        let removed = match fs::remove_file(self.directory.join(filename(key))) {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(_) => {
@@ -218,10 +285,10 @@ impl BlockCache {
             }
         };
         if removed {
-            if let Some(length) = self.nvme.remove(name) {
+            if let Some((length, tick)) = self.nvme.remove(key) {
                 self.nvme_bytes -= disk_charge(length);
+                self.nvme_order.remove(&tick);
             }
-            self.nvme_order.retain(|entry| entry != name);
         }
     }
 
@@ -230,20 +297,20 @@ impl BlockCache {
             return Err(Error::Invalid("cache directory unavailable".into()));
         }
         while self.nvme_bytes.saturating_add(additional) > self.nvme_limit {
-            let name = self
+            let (tick, key) = self
                 .nvme_order
-                .pop_front()
+                .pop_first()
                 .ok_or_else(|| Error::Invalid("cache eviction order missing".into()))?;
-            let length = self
+            let (length, _) = self
                 .nvme
-                .remove(&name)
+                .remove(&key)
                 .ok_or_else(|| Error::Invalid("cache eviction entry missing".into()))?;
-            match fs::remove_file(self.directory.join(&name)) {
+            match fs::remove_file(self.directory.join(filename(&key))) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    self.nvme.insert(name.clone(), length);
-                    self.nvme_order.push_front(name);
+                    self.nvme.insert(key, (length, tick));
+                    self.nvme_order.insert(tick, key);
                     return Err(error.into());
                 }
             }
@@ -252,9 +319,9 @@ impl BlockCache {
         Ok(())
     }
 
-    fn put_nvme(&mut self, name: &str, bytes: &[u8]) {
+    fn put_nvme(&mut self, key: &Key, bytes: &[u8]) {
         let charge = disk_charge(bytes.len());
-        if !self.nvme_available || self.nvme.contains_key(name) || charge > self.nvme_limit {
+        if !self.nvme_available || self.nvme.contains_key(key) || charge > self.nvme_limit {
             return;
         }
         if self.trim_nvme(charge).is_err() {
@@ -272,6 +339,7 @@ impl BlockCache {
             self.stats.cache_io_errors += 1;
             return;
         }
+        let name = filename(key);
         let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
         let temporary = self.directory.join(format!("{name}.{suffix}.tmp"));
         if fs::write(&temporary, bytes).is_err() {
@@ -279,13 +347,14 @@ impl BlockCache {
             let _ = fs::remove_file(&temporary);
             return;
         }
-        if fs::rename(&temporary, self.directory.join(name)).is_err() {
+        if fs::rename(&temporary, self.directory.join(&name)).is_err() {
             self.stats.cache_io_errors += 1;
             let _ = fs::remove_file(&temporary);
             return;
         }
-        self.nvme.insert(name.to_owned(), bytes.len());
-        self.nvme_order.push_back(name.to_owned());
+        self.tick += 1;
+        self.nvme.insert(*key, (bytes.len(), self.tick));
+        self.nvme_order.insert(self.tick, *key);
         self.nvme_bytes += charge;
     }
 
@@ -294,7 +363,7 @@ impl BlockCache {
     }
 }
 
-fn filename(reference: &BlockRef) -> String {
+fn cache_key(reference: &BlockRef) -> Key {
     let mut hash = Sha256::new();
     hash.update(b"glider-block-cache-v1\0");
     hash.update(reference.object.as_bytes());
@@ -303,26 +372,33 @@ fn filename(reference: &BlockRef) -> String {
     hash.update(reference.length.to_le_bytes());
     hash.update(reference.payload_len.to_le_bytes());
     hash.update(reference.sha256.as_bytes());
-    format!("{:x}.blk", hash.finalize())
+    hash.finalize().into()
 }
 
-fn valid_filename(name: &str) -> bool {
-    name.len() == 68
-        && name.ends_with(".blk")
-        && name[..64]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+fn filename(key: &Key) -> String {
+    let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{hex}.blk")
 }
 
-fn ram_charge(name: &str, length: usize) -> usize {
-    length.saturating_add(name.len()).saturating_add(128)
+fn parse_filename(name: &str) -> Option<Key> {
+    let hex = name.strip_suffix(".blk").filter(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })?;
+    let mut key = [0; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(key)
+}
+
+/// A RAM entry is charged its bytes plus a fixed index overhead.
+fn ram_charge(length: usize) -> usize {
+    length.saturating_add(160)
 }
 
 fn disk_charge(length: usize) -> usize {
     length.saturating_add(4095) / 4096 * 4096 + 4096
-}
-
-fn touch(order: &mut VecDeque<String>, name: &str) {
-    order.retain(|entry| entry != name);
-    order.push_back(name.to_owned());
 }

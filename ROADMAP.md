@@ -747,16 +747,15 @@ larger-than-RAM requirement.
 
 ## M22 — Bound segment publication and maintenance work
 
-Status: in progress; M21 selected addressable base blocks and bounded sorted
-delta runs with vector-partition summaries, jointly with M23's selective-read
-and cache requirements. The range-read contract and experimental segmented
-publication protocol are in [benchmarks/M22.md](benchmarks/M22.md). Production
-serving, broader index-size reclamation and acceptance remain pending. The
-experimental seal now groups puts into bounded vector-local blocks, while the
-run index remains ID-sorted; its targeted MinIO evidence is in
-[benchmarks/M24.md](benchmarks/M24.md). Staged
-mixed-pack reclamation and fully dead block pruning probes are recorded in
-`benchmarks/M22.md`.
+Status: accepted on local MinIO at `81a457b`. The final 300-second
+[M24 acceptance run](benchmarks/M24.md#acceptance-runs) met M21's write
+(p95 38.9 ms), request (5.96 PUT/s, 5.90 DELETE/s), byte (1.07 MiB/s) and
+recovery (0 lost writes, 368 ms reopen) gates under `SegmentedServing`, with
+bounded seal, consolidation, pruning and multi-pack reclamation units. Local
+crash and interrupted-publication tests and the MinIO segmented fault suite
+pass on that revision. Pruning covers run indexes up to 512 KiB, which bounded
+consolidation keeps all runs within. Reclamation rewrites live rows of mostly
+dead packs; at the offered overwrite rate total upload stays at 1.07 MiB/s.
 
 Steps:
 - Compare incrementally reusable segments with bounded sorted delta segments;
@@ -776,10 +775,12 @@ rewrites. Report unavoidable compaction amplification rather than claiming none.
 
 ## M23 — Serve through bounded NVMe and RAM caches
 
-Status: in progress. The opt-in experimental block cache and targeted
-250,000-row cold/warm/pressure evidence are in [benchmarks/M23.md](benchmarks/M23.md).
-Exact full-scan latency and GET counts fail the declared query gates; M24's
-selective retrieval and independent-load acceptance remain pending.
+Status: accepted on local MinIO at `81a457b`. Serving the 250,000-row corpus
+(128 MB of raw vectors) through a 256 MiB NVMe cache met the correctness,
+latency and resource gates in the final
+[M24 acceptance run](benchmarks/M24.md#acceptance-runs): 64.4 MB peak RSS
+within 64 MiB, at most 8 GET per cold query, and equal results after total
+cache loss, because block choice never depends on cache contents.
 
 Steps:
 - Open/read without loading every vector into RAM. Fetch addressable data on
@@ -799,18 +800,26 @@ losing either cache changes performance only. No multi-node work is required.
 
 ## M24 — Selective retrieval and single-machine cost acceptance
 
-Status: in progress. The [M24 evidence](benchmarks/M24.md) rejects the original
-ID-sorted physical blocks for the eight-GET quality target. The current
-vector-local seal and opt-in packed-sketch reader measure 0.9255 unfiltered
-mean recall and 31.5 ms NVMe-warm p95 on local MinIO. Rebuilding the derived
-index needs 7.34 s/2,970 GET after open, every root publication invalidates it,
-and the 1% filtered eight-block ceiling is only 0.841. Persisted derived-index
-recovery, incremental visibility, filtered selective reads, independent-load
-traffic and cost acceptance remain pending. A targeted [codebook granularity
-probe](benchmarks/M24.md) found 0.9295 mean eight-block routing recall with
-run-local five-bit books and only 24,576 codebook bytes, versus 3,041,280
-bytes for block-local books. Immutable seal-group components are the next
-derived-index direction; their serving behavior is unmeasured.
+Status: accepted on local MinIO at `81a457b`; remote latency acceptance is
+explicitly pending. Persisted per-pack sketches (no rebuild on open, no
+invalidation on root publication), an exact resident posting for the declared
+1% predicate and deterministic span-budgeted reads are in `SegmentedServing`.
+The final 300-second [acceptance run](benchmarks/M24.md#acceptance-runs) passed
+every M21 gate: 0.9455 static and 0.912 update-wave unfiltered recall, exact
+filtered results, 36.3 ms warm and 42.1 ms cold unfiltered p95, at most 8 GET
+and 421,508 bytes per cold query, 329 ms fresh open, 64.4 MB peak RSS and a
+reproducible request/byte cost model (about USD 94 per 30 days at the offered
+rate, almost all PUT). The [bounded AWS check](benchmarks/M24.md#bounded-aws-s3-check)
+confirmed correct publication, range reads and recovery on S3 Standard at
+25,200 rows and found and fixed a forced-seal defect. Its latencies were bound
+by the laptop's network, so an in-region full-scale run remains the open item.
+
+Next actual limit: margins are narrow for PUT/DELETE rate (5.96 of 6 per
+second, mostly one log PUT per write batch) and update-wave recall (0.912,
+bounded by layout locality within eight range requests). Lowering per-write
+object cost (for example group commit of independent writes) and a measured
+re-clustering policy for overwritten data are the candidate next steps; neither
+requires more machines.
 
 Steps:
 - Evaluate selective filtering/ANN on addressable segments when required by the

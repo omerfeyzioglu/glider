@@ -5,6 +5,74 @@ use crate::{
     store::ObjectStore,
     Config, Neighbor,
 };
+
+/// One serialized database owner driven by the admission worker. Reads,
+/// publication and maintenance never overlap because only the worker holds it.
+pub trait Engine: Send + 'static {
+    fn config(&self) -> Config;
+    fn sequence(&self) -> u64;
+    fn recovery_required(&self) -> bool;
+    /// Cumulative synchronous maintenance time charged inside commands.
+    fn maintenance_time(&self) -> Duration;
+    fn apply_request(&mut self, request: Request) -> crate::Result<Outcome>;
+    fn revision(&self, id: u64) -> Revision;
+    fn request_id(&self) -> crate::Result<RequestId>;
+    fn lookup_request(&self, id: RequestId) -> crate::Result<Lookup>;
+    fn query(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+    ) -> crate::Result<Vec<Neighbor>>;
+    /// Run at most one bounded maintenance unit while no command is queued.
+    /// Returns whether work was performed.
+    fn idle_step(&mut self) -> crate::Result<bool> {
+        Ok(false)
+    }
+    /// Cumulative remote block reads and payload bytes charged to queries.
+    fn remote_reads(&self) -> (u64, u64) {
+        (0, 0)
+    }
+    fn close(self) -> crate::Result<()>;
+}
+
+impl<S: ObjectStore + Send + 'static> Engine for SingleMachine<S> {
+    fn config(&self) -> Config {
+        SingleMachine::config(self)
+    }
+    fn sequence(&self) -> u64 {
+        self.status().maintenance.sequence
+    }
+    fn recovery_required(&self) -> bool {
+        self.status().recovery_required
+    }
+    fn maintenance_time(&self) -> Duration {
+        self.status().maintenance_time
+    }
+    fn apply_request(&mut self, request: Request) -> crate::Result<Outcome> {
+        SingleMachine::apply_request(self, request)
+    }
+    fn revision(&self, id: u64) -> Revision {
+        SingleMachine::revision(self, id)
+    }
+    fn request_id(&self) -> crate::Result<RequestId> {
+        SingleMachine::request_id(self)
+    }
+    fn lookup_request(&self, id: RequestId) -> crate::Result<Lookup> {
+        SingleMachine::lookup_request(self, id)
+    }
+    fn query(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+    ) -> crate::Result<Vec<Neighbor>> {
+        SingleMachine::query(self, query, k, filter, SearchMode::Exact)
+    }
+    fn close(self) -> crate::Result<()> {
+        SingleMachine::close(self)
+    }
+}
 use std::{
     collections::VecDeque,
     sync::{
@@ -36,12 +104,18 @@ pub struct Limits {
     pub commands: usize,
     /// Sum of encoded payload charges, including active work.
     pub bytes: usize,
+    /// When set, a queued query runs before queued writes, lookups and
+    /// observations unless the oldest of those has waited this long. Queued
+    /// commands are concurrent, so either order is linearizable; a query
+    /// submitted after an acknowledgement always observes that write.
+    pub read_priority: Option<Duration>,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
             commands: 8,
             bytes: 320 * 1024,
+            read_priority: None,
         }
     }
 }
@@ -51,6 +125,8 @@ pub struct Status {
     pub bytes: usize,
     pub closed: bool,
     pub failed: bool,
+    /// Idle maintenance units that failed without poisoning the engine.
+    pub maintenance_errors: u64,
 }
 #[derive(Debug)]
 pub struct Timed<T> {
@@ -69,6 +145,9 @@ pub struct Observation {
 pub struct QueryResult {
     pub sequence: u64,
     pub neighbors: Vec<Neighbor>,
+    /// Remote object reads and payload bytes this query caused.
+    pub remote_reads: u64,
+    pub remote_bytes: u64,
 }
 #[derive(Debug, Clone, Copy)]
 pub enum Shutdown {
@@ -105,26 +184,26 @@ impl<T> Drop for Ticket<T> {
 }
 
 type Delivery = Box<dyn FnOnce() + Send>;
-trait Execute<S: ObjectStore>: Send {
-    fn execute(self: Box<Self>, db: &mut SingleMachine<S>, queue_wait: Duration) -> Delivery;
+trait Execute<E: Engine>: Send {
+    fn execute(self: Box<Self>, db: &mut E, queue_wait: Duration) -> Delivery;
     fn reject(self: Box<Self>, error: Error) -> Delivery;
 }
 struct Task<T, F> {
     reply: mpsc::SyncSender<Result<Timed<T>>>,
     operation: F,
 }
-impl<S, T, F> Execute<S> for Task<T, F>
+impl<E, T, F> Execute<E> for Task<T, F>
 where
-    S: ObjectStore,
+    E: Engine,
     T: Send + 'static,
-    F: FnOnce(&mut SingleMachine<S>) -> crate::Result<T> + Send,
+    F: FnOnce(&mut E) -> crate::Result<T> + Send,
 {
-    fn execute(self: Box<Self>, db: &mut SingleMachine<S>, queue_wait: Duration) -> Delivery {
-        let before = db.status().maintenance_time;
+    fn execute(self: Box<Self>, db: &mut E, queue_wait: Duration) -> Delivery {
+        let before = db.maintenance_time();
         let start = Instant::now();
         let result = (self.operation)(db);
         let elapsed = start.elapsed();
-        let maintenance = db.status().maintenance_time - before;
+        let maintenance = db.maintenance_time() - before;
         let result = result
             .map(|value| Timed {
                 value,
@@ -145,26 +224,31 @@ where
         })
     }
 }
-struct Job<S: ObjectStore> {
-    task: Box<dyn Execute<S>>,
+struct Job<E: Engine> {
+    read: bool,
+    task: Box<dyn Execute<E>>,
     state: Arc<AtomicU8>,
     queued: Instant,
     bytes: usize,
 }
-struct Queue<S: ObjectStore> {
-    jobs: VecDeque<Job<S>>,
+struct Queue<E: Engine> {
+    jobs: VecDeque<Job<E>>,
     commands: usize,
     bytes: usize,
     closed: bool,
     failed: bool,
     cancel_queued: bool,
+    /// Durations of idle maintenance units in microseconds, capped.
+    idle_steps: Vec<u32>,
+    maintenance_errors: u64,
 }
-struct Shared<S: ObjectStore> {
-    queue: Mutex<Queue<S>>,
+const MAX_IDLE_SAMPLES: usize = 65_536;
+struct Shared<E: Engine> {
+    queue: Mutex<Queue<E>>,
     ready: Condvar,
     limits: Limits,
 }
-impl<S: ObjectStore> Shared<S> {
+impl<E: Engine> Shared<E> {
     fn close(&self, cancel: bool) {
         let mut queue = self.queue.lock().unwrap();
         queue.closed = true;
@@ -187,11 +271,11 @@ impl<S: ObjectStore> Shared<S> {
 }
 
 /// Clones share the same bounded queue, never another database owner.
-pub struct Client<S: ObjectStore> {
-    shared: Arc<Shared<S>>,
+pub struct Client<E: Engine> {
+    shared: Arc<Shared<E>>,
     config: Config,
 }
-impl<S: ObjectStore> Clone for Client<S> {
+impl<E: Engine> Clone for Client<E> {
     fn clone(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -199,12 +283,12 @@ impl<S: ObjectStore> Clone for Client<S> {
         }
     }
 }
-impl<S: ObjectStore + 'static> Client<S> {
-    fn submit<T, F, B>(&self, bytes: usize, build: B) -> Result<Ticket<T>>
+impl<E: Engine> Client<E> {
+    fn submit<T, F, B>(&self, read: bool, bytes: usize, build: B) -> Result<Ticket<T>>
     where
         T: Send + 'static,
         B: FnOnce() -> crate::Result<F>,
-        F: FnOnce(&mut SingleMachine<S>) -> crate::Result<T> + Send + 'static,
+        F: FnOnce(&mut E) -> crate::Result<T> + Send + 'static,
     {
         let (reply, receiver) = mpsc::sync_channel(1);
         let state = Arc::new(AtomicU8::new(QUEUED));
@@ -225,6 +309,7 @@ impl<S: ObjectStore + 'static> Client<S> {
         queue.commands += 1;
         queue.bytes += bytes;
         queue.jobs.push_back(Job {
+            read,
             task: Box::new(Task { reply, operation }),
             state: state.clone(),
             queued: Instant::now(),
@@ -233,6 +318,15 @@ impl<S: ObjectStore + 'static> Client<S> {
         self.shared.ready.notify_one();
         Ok(Ticket { receiver, state })
     }
+    /// Durations of completed idle maintenance units (at most 65,536).
+    pub fn idle_maintenance_samples(&self) -> Vec<Duration> {
+        let queue = self.shared.queue.lock().unwrap();
+        queue
+            .idle_steps
+            .iter()
+            .map(|&micros| Duration::from_micros(u64::from(micros)))
+            .collect()
+    }
     pub fn status(&self) -> Status {
         let queue = self.shared.queue.lock().unwrap();
         Status {
@@ -240,20 +334,21 @@ impl<S: ObjectStore + 'static> Client<S> {
             bytes: queue.bytes,
             closed: queue.closed,
             failed: queue.failed,
+            maintenance_errors: queue.maintenance_errors,
         }
     }
     pub fn write(&self, request: Request) -> Result<Ticket<Outcome>> {
         request.validate(self.config)?;
         let charge = crate::encoded_len(&request)?;
-        self.submit(charge, move || {
+        self.submit(false, charge, move || {
             let bytes = crate::encode(&request)?;
             let request: Request = crate::decode(&bytes)?;
-            Ok(move |db: &mut SingleMachine<S>| db.apply_request(request))
+            Ok(move |db: &mut E| db.apply_request(request))
         })
     }
     pub fn observe(&self, id: u64) -> Result<Ticket<Observation>> {
-        self.submit(16, move || {
-            Ok(move |db: &mut SingleMachine<S>| {
+        self.submit(false, 16, move || {
+            Ok(move |db: &mut E| {
                 Ok(Observation {
                     revision: db.revision(id),
                     request_id: db.request_id()?,
@@ -262,8 +357,8 @@ impl<S: ObjectStore + 'static> Client<S> {
         })
     }
     pub fn lookup(&self, id: RequestId) -> Result<Ticket<Lookup>> {
-        self.submit(24, move || {
-            Ok(move |db: &mut SingleMachine<S>| db.lookup_request(id))
+        self.submit(false, 24, move || {
+            Ok(move |db: &mut E| db.lookup_request(id))
         })
     }
     pub fn query(
@@ -280,18 +375,22 @@ impl<S: ObjectStore + 'static> Client<S> {
         if charge > crate::retry::MAX_REQUEST_BYTES {
             return Err(Error::Overloaded);
         }
-        self.submit(charge, move || {
+        self.submit(true, charge, move || {
             let bytes = crate::encode(&(&query, k, &filter))?;
             let (query, k, filter): (Vec<f32>, usize, Vec<(String, String)>) =
                 crate::decode(&bytes)?;
-            Ok(move |db: &mut SingleMachine<S>| {
+            Ok(move |db: &mut E| {
                 let borrowed: Vec<_> = filter
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.as_str()))
                     .collect();
-                let neighbors = db.query(&query, k, &borrowed, SearchMode::Exact)?;
+                let (reads, bytes) = db.remote_reads();
+                let neighbors = db.query(&query, k, &borrowed)?;
+                let (reads_after, bytes_after) = db.remote_reads();
                 Ok(QueryResult {
-                    sequence: db.status().maintenance.sequence,
+                    sequence: db.sequence(),
+                    remote_reads: reads_after - reads,
+                    remote_bytes: bytes_after - bytes,
                     neighbors,
                 })
             })
@@ -302,13 +401,13 @@ impl<S: ObjectStore + 'static> Client<S> {
 /// Owns the worker lifecycle. Use explicit shutdown to acknowledge graceful
 /// release. Drop closes admission and cancels queued work, but never claims that
 /// an active storage operation has stopped or that ownership was released.
-pub struct Service<S: ObjectStore> {
-    client: Client<S>,
+pub struct Service<E: Engine> {
+    client: Client<E>,
     worker: Option<JoinHandle<Result<()>>>,
 }
-impl<S: ObjectStore + Send + 'static> Service<S> {
-    pub fn start(db: SingleMachine<S>, limits: Limits) -> Result<Self> {
-        if db.status().recovery_required {
+impl<E: Engine> Service<E> {
+    pub fn start(db: E, limits: Limits) -> Result<Self> {
+        if db.recovery_required() {
             return Err(crate::Error::RecoveryRequired.into());
         }
         if limits.commands == 0 || limits.bytes == 0 {
@@ -324,6 +423,8 @@ impl<S: ObjectStore + Send + 'static> Service<S> {
                 closed: false,
                 failed: false,
                 cancel_queued: false,
+                idle_steps: Vec::new(),
+                maintenance_errors: 0,
             }),
             ready: Condvar::new(),
             limits,
@@ -353,7 +454,7 @@ impl<S: ObjectStore + Send + 'static> Service<S> {
             worker: Some(worker),
         })
     }
-    pub fn client(&self) -> Client<S> {
+    pub fn client(&self) -> Client<E> {
         self.client.clone()
     }
     /// Stop new admission synchronously; the worker finishes according to mode.
@@ -374,21 +475,60 @@ impl<S: ObjectStore + Send + 'static> Service<S> {
             .unwrap_or(Err(Error::WorkerFailed))
     }
 }
-impl<S: ObjectStore> Drop for Service<S> {
+impl<E: Engine> Drop for Service<E> {
     fn drop(&mut self) {
         if self.worker.is_some() {
             self.client.shared.close(true);
         }
     }
 }
-fn run<S: ObjectStore>(mut db: SingleMachine<S>, shared: &Shared<S>) -> Result<()> {
+fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
+    let mut idle_work = true;
     loop {
         let (job, cancel) = {
             let mut queue = shared.queue.lock().unwrap();
             while queue.jobs.is_empty() && !queue.closed {
+                if idle_work {
+                    // Queued commands take precedence; one bounded unit runs
+                    // only while the queue is empty and is never preempted.
+                    drop(queue);
+                    let start = Instant::now();
+                    let step = db.idle_step();
+                    let elapsed = start.elapsed();
+                    queue = shared.queue.lock().unwrap();
+                    idle_work = match step {
+                        Ok(worked) => worked,
+                        Err(error) if db.recovery_required() => {
+                            return Err(Error::Database(error));
+                        }
+                        // A failed read leaves authoritative state unchanged;
+                        // retry only after the next command, and report it.
+                        Err(_) => {
+                            queue.maintenance_errors += 1;
+                            false
+                        }
+                    };
+                    if idle_work && queue.idle_steps.len() < MAX_IDLE_SAMPLES {
+                        queue
+                            .idle_steps
+                            .push(u32::try_from(elapsed.as_micros()).unwrap_or(u32::MAX));
+                    }
+                    continue;
+                }
                 queue = shared.ready.wait(queue).unwrap();
             }
-            match queue.jobs.pop_front() {
+            let next = match shared.limits.read_priority {
+                Some(aging)
+                    if queue
+                        .jobs
+                        .front()
+                        .is_some_and(|job| !job.read && job.queued.elapsed() < aging) =>
+                {
+                    queue.jobs.iter().position(|job| job.read).unwrap_or(0)
+                }
+                _ => 0,
+            };
+            match queue.jobs.remove(next) {
                 Some(job) => (job, queue.cancel_queued),
                 None => {
                     drop(queue);
@@ -412,7 +552,8 @@ fn run<S: ObjectStore>(mut db: SingleMachine<S>, shared: &Shared<S>) -> Result<(
             queue.commands -= 1;
             queue.bytes -= job.bytes;
         }
-        let failed = db.status().recovery_required;
+        idle_work = true;
+        let failed = db.recovery_required();
         if failed {
             shared.fail();
         }
