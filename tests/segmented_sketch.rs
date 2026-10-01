@@ -142,6 +142,13 @@ fn check(db: &SegmentedDatabase<HookStore>, rng: &mut Rng, seed: u64, step: usiz
             .search_selective(&query, 10, 1, &[("tag", "hot")])
             .unwrap();
         assert_eq!(ids(resident), ids(filtered), "seed {seed} step {step}");
+        // A predicate other than the declared one is post-filtered over the
+        // routed blocks; reading every block makes it exact.
+        let general = [("tag", "hot"), ("tag", "hot")];
+        let post = db
+            .search_selective(&query, 10, db.block_count().max(1), &general)
+            .unwrap();
+        assert_eq!(ids(post), ids(filtered), "seed {seed} step {step}");
         let partial = db.search_selective(&query, 10, 2, &[]).unwrap();
         assert!(
             partial.len() <= 10 && partial.windows(2).all(|p| p[0].distance <= p[1].distance),
@@ -318,9 +325,11 @@ fn namespace_options_are_declared_once() {
     assert!(SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config()).is_err());
     let plain = temp.path().join("plain");
     let db = SegmentedDatabase::open(LocalStore::open(&plain).unwrap(), config()).unwrap();
+    // Without a declared resident predicate the filter is post-filtered.
     assert!(db
         .search_selective(&[0.; DIMENSIONS], 1, 1, &[("tag", "hot")])
-        .is_err());
+        .unwrap()
+        .is_empty());
     drop(db);
     assert!(SegmentedDatabase::open_with_options(
         LocalStore::open(&plain).unwrap(),

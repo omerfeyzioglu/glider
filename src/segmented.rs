@@ -3103,7 +3103,10 @@ mod tests {
         assert_eq!(selected_ids(&db), vec![2, 4, 6]);
         db.seal_delta().unwrap();
         assert_eq!(selected_ids(&db), vec![2, 4, 6]);
-        assert!(db.search_selective(&[0., 0.], 3, 1, &[("a", "b")]).is_err());
+        assert!(db
+            .search_selective(&[0., 0.], 3, 1, &[("a", "b")])
+            .unwrap()
+            .is_empty());
         drop(db);
         let db = SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
         assert_eq!(db.sketch_rebuilds(), 0);

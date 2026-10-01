@@ -270,7 +270,10 @@ that buffer. Blocks are authenticated, checked against the sketch's live rows
 and exactly reranked with the live tail on scoped threads. The result is
 approximate. With exactly the declared resident predicate the query scans the
 resident full-precision vectors and matching tail rows and is exact, with no
-block reads. Other filters return an explicit error; `search_exact` remains
+block reads. Any other equality conjunction is applied while reranking the
+same routed blocks and the live tail: it reads no extra bytes and is
+approximate, possibly returning fewer than k matches when matches are sparse
+in the routed blocks; it gives no recall guarantee. `search_exact` remains
 the oracle. Segmented metadata version 3 declares
 `SegmentedOptions { resident_filter }` once at namespace creation; version 2
 namespaces have no resident predicate, and opening with different options
