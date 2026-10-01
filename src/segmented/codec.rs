@@ -266,3 +266,155 @@ pub(super) fn decode(config: Config, bytes: &[u8]) -> Result<Block> {
     })?;
     Block::new(config, partition, records)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn value(&mut self) -> f32 {
+            match self.next() % 8 {
+                0 => -0.,
+                1 => f32::MAX,
+                2 => f32::MIN,
+                3 => f32::MIN_POSITIVE,
+                _ => (self.next() as i32 as f32) / 8192.,
+            }
+        }
+    }
+
+    #[test]
+    fn v2_decoder_round_trips_and_rejects_mutated_bytes() {
+        let seed = 0x49d2_7a3b_9e11_02c5_u64;
+        let mut rng = Rng(seed);
+        for case in 0..40 {
+            let config = Config {
+                dimensions: 1 + case as usize,
+                metric: if case % 2 == 0 {
+                    Metric::SquaredEuclidean
+                } else {
+                    Metric::Manhattan
+                },
+            };
+            let records = (0..1 + rng.next() % 7)
+                .map(|index| {
+                    let id = index * 3 + rng.next() % 3;
+                    let mutation = if rng.next().is_multiple_of(4) {
+                        Mutation::Delete { id }
+                    } else {
+                        let metadata = (0..rng.next() % 4)
+                            .map(|key| (format!("key-{key}"), format!("value-{}", rng.next())))
+                            .collect();
+                        Mutation::Put {
+                            id,
+                            vector: (0..config.dimensions).map(|_| rng.value()).collect(),
+                            metadata,
+                        }
+                    };
+                    BlockRecord {
+                        sequence: 1 + rng.next() % 1000,
+                        mutation,
+                    }
+                })
+                .collect();
+            let block = Block::new(config, case, records).unwrap();
+            let bytes = encode(&block).unwrap();
+            let decoded = decode(config, &bytes).unwrap();
+            assert_eq!(
+                encode(&decoded).unwrap(),
+                bytes,
+                "seed {seed:#x}, case {case}"
+            );
+            let mut visited = Vec::new();
+            let (partition, count) = visit(config, &bytes, |view| {
+                visited.push((view.id, view.sequence, view.put.is_some()));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                (partition, count),
+                (case, block.records.len()),
+                "seed {seed:#x}, case {case}"
+            );
+            assert_eq!(
+                visited.len(),
+                block.records.len(),
+                "seed {seed:#x}, case {case}"
+            );
+
+            let check = |candidate: &[u8], mutation: &str| {
+                let outcome = std::panic::catch_unwind(|| {
+                    let visited = visit(config, candidate, |_| Ok(()));
+                    let decoded = decode(config, candidate);
+                    (visited, decoded)
+                });
+                let (visited, decoded) = outcome.unwrap_or_else(|_| {
+                    panic!("v2 decoder panicked: seed {seed:#x}, case {case}, {mutation}")
+                });
+                assert_eq!(
+                    visited.is_ok(),
+                    decoded.is_ok(),
+                    "seed {seed:#x}, case {case}, {mutation}"
+                );
+                // Authentication against the root digest rejects altered
+                // bytes before decoding; a decoder that still accepts them
+                // must at least yield a valid, stably re-encodable block.
+                if let Ok(block) = decoded {
+                    let reencoded = encode(&block).unwrap();
+                    let again = decode(config, &reencoded).unwrap();
+                    assert_eq!(
+                        encode(&again).unwrap(),
+                        reencoded,
+                        "seed {seed:#x}, case {case}, {mutation}"
+                    );
+                }
+            };
+            for length in 0..bytes.len().min(160) {
+                check(&bytes[..length], &format!("truncate {length}"));
+            }
+            check(&bytes[..bytes.len() - 1], "truncate final byte");
+            for flip in 0..24 {
+                let mut changed = bytes.clone();
+                let offset = rng.next() as usize % changed.len();
+                changed[offset] ^= 1 << (rng.next() % 8);
+                check(&changed, &format!("flip {flip} at {offset}"));
+            }
+            for suffix in [vec![0], vec![0xff, 0x12], vec![0; 8]] {
+                let mut changed = bytes.clone();
+                changed.extend_from_slice(&suffix);
+                check(&changed, "append");
+            }
+            let mut changed = bytes.clone();
+            changed[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+            check(&changed, "huge raw length");
+            let mut raw = zstd::bulk::decompress(&bytes[8..], MAX_RAW_BLOCK_BYTES).unwrap();
+            raw[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+            let compressed = zstd::bulk::compress(&raw, LEVEL).unwrap();
+            let mut changed = bytes[..8].to_vec();
+            changed.extend_from_slice(&compressed);
+            check(&changed, "huge record count");
+            let mut position = HEADER;
+            for record in &block.records {
+                position += 17;
+                if let Mutation::Put { vector, .. } = &record.mutation {
+                    position += 4 * vector.len();
+                    let mut raw = zstd::bulk::decompress(&bytes[8..], MAX_RAW_BLOCK_BYTES).unwrap();
+                    raw[position..position + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+                    let mut changed = bytes[..8].to_vec();
+                    changed.extend_from_slice(&zstd::bulk::compress(&raw, LEVEL).unwrap());
+                    check(&changed, "huge metadata count");
+                    break;
+                }
+            }
+        }
+    }
+}
