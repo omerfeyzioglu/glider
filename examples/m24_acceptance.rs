@@ -30,7 +30,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Rows in the namespace: the M21 250,000 unless `GLIDER_M24_ROWS` selects
-/// a reduced-scale check (a multiple of 400).
+/// another scale (a multiple of 400), such as the M31 1,000,000.
 fn rows() -> u64 {
     env::var("GLIDER_M24_ROWS")
         .ok()
@@ -207,7 +207,7 @@ impl Rows {
     }
 }
 
-/// Overwrite generation g of an ID uses base row (id + 137g) mod 250,000.
+/// Overwrite generation g of an ID uses base row (id + 137g) mod rows.
 fn vector(base: &Rows, id: u64, generation: u64) -> Result<Vec<f32>> {
     base.row((id + 137 * generation) % rows())
 }
@@ -1046,13 +1046,79 @@ fn verify(args: &[String]) -> Result<Value> {
     )
 }
 
+/// Exact top-10 IDs of the first 200 queries over the unmodified corpus for
+/// the static-quality pass: an f64 scan with ties by ID, like `verify`.
+fn oracle(args: &[String]) -> Result<Value> {
+    let [queries, base] = args else {
+        return Err("usage: oracle QUERY BASE".into());
+    };
+    let (queries, base) = (Rows::open(queries)?, Rows::open(base)?);
+    let queries: Vec<Vec<f32>> = (0..200).map(|i| queries.row(i)).collect::<Result<_>>()?;
+    let started = Instant::now();
+    let threads = std::thread::available_parallelism()?.get();
+    type Heaps = Vec<[BinaryHeap<(u64, u64)>; 2]>;
+    let partial: Vec<Heaps> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|thread| {
+                let (base, queries) = (&base, &queries);
+                scope.spawn(move || -> Result<Heaps> {
+                    let mut heaps: Heaps = vec![Default::default(); queries.len()];
+                    for id in (thread as u64..rows()).step_by(threads) {
+                        let vector = base.row(id)?;
+                        for (query, heaps) in queries.iter().zip(&mut heaps) {
+                            let distance: f64 = query
+                                .iter()
+                                .zip(&vector)
+                                .map(|(a, b)| {
+                                    let d = f64::from(*a) - f64::from(*b);
+                                    d * d
+                                })
+                                .sum();
+                            let entry = (distance.to_bits(), id);
+                            let classes = 1 + usize::from(id.is_multiple_of(100));
+                            for heap in &mut heaps[..classes] {
+                                if heap.len() < 10 {
+                                    heap.push(entry);
+                                } else if entry < *heap.peek().unwrap() {
+                                    heap.pop();
+                                    heap.push(entry);
+                                }
+                            }
+                        }
+                    }
+                    Ok(heaps)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Result<_>>()
+    })?;
+    let ids = |class: usize| -> Vec<Vec<u64>> {
+        (0..queries.len())
+            .map(|query| {
+                let mut entries: Vec<_> = partial
+                    .iter()
+                    .flat_map(|heaps| heaps[query][class].iter().copied())
+                    .collect();
+                entries.sort_unstable();
+                entries.into_iter().take(10).map(|(_, id)| id).collect()
+            })
+            .collect()
+    };
+    Ok(json!({"rows":rows(),"oracle_ms":ms(started.elapsed()),
+        "unfiltered_exact_ids":ids(0),"filtered_exact_ids":ids(1)}))
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let result = match args.get(1).map(String::as_str) {
         Some("load") => load(&args[2..])?,
         Some("serve") => serve(&args[2..])?,
         Some("verify") => verify(&args[2..])?,
-        _ => return Err("usage: m24_acceptance load|serve|verify ...".into()),
+        Some("oracle") => oracle(&args[2..])?,
+        _ => return Err("usage: m24_acceptance load|serve|verify|oracle ...".into()),
     };
     println!("{}", serde_json::to_string(&result)?);
     Ok(())

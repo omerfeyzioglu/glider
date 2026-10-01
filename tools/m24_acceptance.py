@@ -19,11 +19,25 @@ import time
 from minio_harness import container_scope, ready, run
 from test_s3 import IMAGE
 
-DATA = {
-    "sift1m_base_250000.fvecs": "fab6b3f6c68d8bca09c72b0ee84a8126b80aebc635765fb52c0ab3efbda51960",
-    "sift1m_query.fvecs": "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc",
+QUERY_SHA256 = "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc"
+# Declared envelopes by row count: M21 (benchmarks/M21.md) and M31
+# (benchmarks/M31.md). Only RSS and open time scale with resident routing state.
+ENVELOPES = {
+    250000: {
+        "dataset": "SIFT1M-250000-prefix-rotate137-v1",
+        "data": {"sift1m_base_250000.fvecs": "fab6b3f6c68d8bca09c72b0ee84a8126b80aebc635765fb52c0ab3efbda51960",
+                 "sift1m_query.fvecs": QUERY_SHA256},
+        "oracle": "benchmarks/m24/layout-vector-local-seal/run.json",
+        "rss_mib": 64, "open_ms": 1000,
+    },
+    1000000: {
+        "dataset": "SIFT1M-1000000-rotate137-v1",
+        "data": {"sift_base.fvecs": "21f66e2975057b5728ba56de1c825bac4f4d89d596609ae985741c6242631816",
+                 "sift_query.fvecs": QUERY_SHA256},
+        "oracle": "benchmarks/m31/oracle-sift1m-1000000.json",
+        "rss_mib": 192, "open_ms": 2000,
+    },
 }
-ORACLE = "benchmarks/m24/layout-vector-local-seal/run.json"
 MIB = 1024 * 1024
 # US East (N. Virginia) S3 Standard list prices used for the physical-work
 # cost model; see benchmarks/M24.md for the retrieval date and source.
@@ -39,7 +53,7 @@ def digest(path):
     return hasher.hexdigest()
 
 
-def gates(load, serve, verify, visible_bytes):
+def gates(load, serve, verify, visible_bytes, envelope):
     seconds = serve["elapsed_seconds"]
     http = serve["http"]
     static = {entry["pass"]: entry for entry in serve["static_quality"]}
@@ -47,7 +61,7 @@ def gates(load, serve, verify, visible_bytes):
     quality = [first["unfiltered"], first["filtered"],
                verify["update_wave_quality"]["unfiltered"], verify["update_wave_quality"]["filtered"]]
     checks = {
-        "peak_engine_rss_le_64MiB": serve["peak_rss_bytes"] <= 64 * MIB,
+        f"peak_engine_rss_le_{envelope['rss_mib']}MiB": serve["peak_rss_bytes"] <= envelope["rss_mib"] * MIB,
         "cache_occupancy_le_256MiB": serve["cache"]["nvme_bytes"] <= 256 * MIB,
         "zero_lost_acknowledged_writes": verify["value_mismatches"] == 0
         and verify["live_documents"] == verify["expected_documents"],
@@ -58,7 +72,8 @@ def gates(load, serve, verify, visible_bytes):
         "warm_query_p95_le_50ms": serve["unfiltered_warm_query_ms"].get("p95", 0) <= 50
         and serve["filtered_query_ms"]["p95"] <= 50,
         "cold_query_p95_le_200ms": serve["unfiltered_cold_query_ms"].get("p95", 0) <= 200,
-        "fresh_open_le_1s": serve["open"]["ms"] <= 1000 and verify["reopen"]["ms"] <= 1000,
+        f"fresh_open_le_{envelope['open_ms']}ms": serve["open"]["ms"] <= envelope["open_ms"]
+        and verify["reopen"]["ms"] <= envelope["open_ms"],
         "mean_recall_ge_0_90": all(q["mean_recall_at_10"] >= 0.90 for q in quality),
         "fifth_percentile_recall_ge_0_80": all(q["fifth_percentile_recall_at_10"] >= 0.80 for q in quality),
         "short_results_lt_1_percent": all(q["short_results"] < 0.01 * q.get("queries", 200) for q in quality)
@@ -101,8 +116,10 @@ def main():
     parser.add_argument("output", type=Path, help="new directory for run.json")
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--rounds", type=int, default=300, help="seconds of offered load")
+    parser.add_argument("--rows", type=int, default=250000, choices=sorted(ENVELOPES))
     args = parser.parse_args()
-    for name, expected in DATA.items():
+    envelope = ENVELOPES[args.rows]
+    for name, expected in envelope["data"].items():
         if digest(args.data / name) != expected:
             raise ValueError(f"unexpected SIFT1M digest: {name}")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -113,8 +130,10 @@ def main():
         "src/admission.rs", "src/store.rs", "src/store/s3.rs")}
     revision = run("git", "rev-parse", "HEAD", capture=True).strip()
     dirty = bool(run("git", "status", "--porcelain", capture=True).strip())
-    base, query = str(args.data / "sift1m_base_250000.fvecs"), str(args.data / "sift1m_query.fvecs")
+    base, query = (str(args.data / name) for name in envelope["data"])
+    oracle = envelope["oracle"]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
+    env["GLIDER_M24_ROWS"] = str(args.rows)
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "build", "--locked", "--release", "--features", "s3",
         "--example", "m24_acceptance", env=env)
@@ -142,7 +161,7 @@ def main():
                    GLIDER_S3_ENDPOINT=endpoint, GLIDER_S3_BUCKET="glider-test")
         load = json.loads(run(binary, "load", base, namespace, env=env, capture=True, timeout=1800))
         with tempfile.TemporaryDirectory(prefix="glider-m24-cache-") as cache:
-            raw = run(binary, "serve", query, base, namespace, cache, ORACLE, str(args.rounds),
+            raw = run(binary, "serve", query, base, namespace, cache, oracle, str(args.rounds),
                       env=env, capture=True, timeout=args.rounds + 1800)
             serve = json.loads(raw)
             serve_path = Path(cache) / "serve.json"
@@ -154,12 +173,12 @@ def main():
     visible = usage["size"]
     batches = serve.pop("acknowledged_batches")
     serve["acknowledged_batch_count"] = len(batches)
-    checks = gates(load, serve, verify, visible)
+    checks = gates(load, serve, verify, visible, envelope)
     result = {
-        "version": 1, "dataset": "SIFT1M-250000-prefix-rotate137-v1", "rows": 250000, "dimensions": 128,
+        "version": 1, "dataset": envelope["dataset"], "rows": args.rows, "dimensions": 128,
         "metric": "squared_euclidean", "k": 10, "filter": "cohort=one-percent (id % 100 == 0)",
-        "backend": "loopback-minio", "minio_image": IMAGE, "dataset_sha256": DATA,
-        "oracle": ORACLE, "oracle_sha256": digest(Path(ORACLE)),
+        "backend": "loopback-minio", "minio_image": IMAGE, "dataset_sha256": envelope["data"],
+        "oracle": oracle, "oracle_sha256": digest(Path(oracle)),
         "source_sha256": sources, "git_revision": revision, "working_tree_dirty": dirty,
         "load": load, "serve": serve, "verify": verify,
         "visible_payload_bytes_after_serve": visible,
