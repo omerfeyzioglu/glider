@@ -9,6 +9,71 @@ fn config() -> Config {
         metric: Metric::SquaredEuclidean,
     }
 }
+/// Handles sharing a directory, as a lease keeper and a database or two
+/// processes during takeover do: each key is created exactly once, every
+/// published object stays intact, and concurrent reopens reclaim no
+/// in-progress publication.
+#[test]
+fn shared_directory_handles_create_each_key_exactly_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("shared");
+    LocalStore::open(&root).unwrap();
+    let writers = 4;
+    let keys = 40;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reopener = {
+        let (root, done) = (root.clone(), done.clone());
+        std::thread::spawn(move || {
+            let mut reopens = 0;
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                LocalStore::open(&root).unwrap();
+                reopens += 1;
+            }
+            reopens
+        })
+    };
+    let threads: Vec<_> = (0..writers)
+        .map(|writer| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let mut store = LocalStore::open(&root).unwrap();
+                let mut won = Vec::new();
+                for key in 0..keys {
+                    let payload = format!("writer {writer} key {key}").repeat(64);
+                    match store.create(&format!("key-{key}"), payload.as_bytes()) {
+                        Ok(()) => won.push(key),
+                        Err(glider::Error::Exists(_)) => {}
+                        Err(error) => panic!("writer {writer} key {key}: {error}"),
+                    }
+                }
+                (writer, won)
+            })
+        })
+        .collect();
+    let mut winners = std::collections::BTreeMap::new();
+    for thread in threads {
+        let (writer, won) = thread.join().unwrap();
+        for key in won {
+            assert!(
+                winners.insert(key, writer).is_none(),
+                "key {key} created twice"
+            );
+        }
+    }
+    done.store(true, std::sync::atomic::Ordering::Release);
+    assert!(reopener.join().unwrap() > 0);
+    assert_eq!(winners.len(), keys);
+    let store = LocalStore::open(&root).unwrap();
+    assert_eq!(store.list().unwrap().len(), keys);
+    for (key, writer) in winners {
+        let payload = format!("writer {writer} key {key}").repeat(64);
+        assert_eq!(
+            store.get(&format!("key-{key}")).unwrap().unwrap(),
+            payload.as_bytes()
+        );
+    }
+}
+
 #[test]
 fn local_object_publication_and_corruption() {
     let temp = tempfile::tempdir().unwrap();
