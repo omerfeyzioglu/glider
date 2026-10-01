@@ -289,15 +289,27 @@ no filter it scores live codes, visiting packs in order of a per-pack lower
 bound and abandoning a row once its prefix sum exceeds both its block's best
 and the current last kept candidate; sums of nonnegative terms never
 decrease, so the ranked blocks equal those of a full scan. It ranks
-`budget.blocks` candidates by minimum approximate row distance. In rank order
-each candidate widens its pack's span, one byte range from the first to the
-last chosen block of that pack, while all spans total at most `budget.bytes`
+`max(budget.blocks, budget.local_blocks)` candidates (only `budget.blocks`
+without a cache) by minimum approximate row distance. In rank order a
+candidate already in the RAM or NVMe cache is read locally while fewer than
+`budget.local_blocks` have been; any other candidate among the first
+`budget.blocks` widens its pack's span, one byte range from the first to the
+last such block of that pack, while all spans total at most `budget.bytes`
 and number at most `budget.requests`; every live block inside a span is
-reranked because its bytes are read anyway. The choice never depends on cache
-contents, so each query issues at most that many range GETs and bytes, and
-losing a cache changes latency only. Blocks are looked up in the cache; a span
-containing any miss is fetched whole in one batched read and its blocks share
-that buffer. Blocks are authenticated, checked against the sketch's live rows
+reranked because its bytes are read anyway. The remote limits are charged
+only for uncached blocks, so each query issues at most `budget.requests`
+range GETs and `budget.bytes` bytes. With an empty cache, or
+`local_blocks == 0`, the query reads exactly the spans its first
+`budget.blocks` candidates choose, independent of cache contents. With a
+positive local limit, warm quality depends on the cache: a block counts as
+local only if its entry is present when the query looks it up, so a warmer
+cache reranks more of the routed candidates and a lost or partial cache falls
+back toward the cold choice. Correctness never depends on the cache: results
+are always reranked from root-authenticated bytes, and cache loss changes
+latency and the approximate result's recall only. `local_blocks` bounds the
+local file reads and reranking CPU per query. Blocks inside a span are looked
+up in the cache; a span containing any miss is fetched whole in one batched
+read and its blocks share that buffer. Blocks are authenticated, checked against the sketch's live rows
 and exactly reranked with the live tail on scoped threads. The result is
 approximate. With exactly the declared resident predicate the query scans the
 resident full-precision vectors and matching tail rows and is exact, with no
@@ -361,14 +373,16 @@ log-object, tail and backup bookkeeping count objects, not sequences.
 it with a sketch byte budget and an optional block cache, and implements the
 `admission::Engine` trait, so `admission::Service` runs it on the single
 committer thread. Queries use `search_selective_within` with a fixed read
-budget (M21: 12 ranked candidates, 8 range requests, 1 MiB);
+budget (M21: 12 ranked candidates, 8 range requests, 1 MiB remote, and up to
+24 cached blocks read locally);
 unfiltered results are approximate under the M21 quality policy (mean
 recall@10 >=0.90, fifth percentile >=0.80, <1% short results), and the
 resident predicate is exact. Maintenance never runs concurrently with a
 command: while the queue is empty the worker executes one bounded unit (one
 seal/prune/reclaim step, an in-memory sketch compaction of one pack, a seal
-plan, one run consolidation, a prune/reclaim plan or a four-object cleanup
-batch) and then rechecks the queue. A seal starts
+plan, one run consolidation, a prune/reclaim plan, a four-object cleanup
+batch or, when none is due, one cache warm-up read) and then rechecks the
+queue. A seal starts
 at 32 unsealed log objects. If the tail reaches the hard bound of 64 before
 idle time allows the seal, the next write finishes any staged prune/reclaim
 and a full seal synchronously, reported as that command's maintenance time.
@@ -427,6 +441,27 @@ selective query fetches its blocks serially under it, then authenticates,
 decodes and scores them on scoped threads before settling hits or rejecting
 corrupt cached bytes. Maintenance never overlaps a command: the segmented
 serving engine runs bounded units only while the admission queue is empty.
+
+Warm-up keeps the selected root on local disk so warm queries need no remote
+reads, as object-storage-native systems keep a namespace on NVMe after first
+use. `warm_cache_step` is the lowest-priority idle unit: it walks the root's
+packs and issues one range GET of the next pack's uncached blocks (at most
+`warm_unit_bytes`, default 256 KiB, and at least one block), verifies each
+block's root digest and admits it to the NVMe tier only. Already cached packs
+are skipped without I/O, at most 64 per unit. If every root block fits the
+NVMe limit, admission may evict LRU entries, while blocks the pass has seen
+are touched, so only entries outside the root or not yet reached are evicted;
+otherwise the pass fills free space only and stops at the limit, leaving the
+query-driven LRU contents in place. A pass ends when every pack is visited,
+the limit is reached, or an admission fails (such as a full disk); a new root
+generation or an entry found missing or corrupt starts a new pass. Warm-up
+reads are counted separately from query reads. `cache_stats` reports the
+root's cache charge (`namespace_bytes`), the charge the current pass found or
+admitted (`warm_bytes`) and completion; the server reports them in status and
+metrics. A unit is not preemptible, so its read latency adds to the wait of a
+command arriving during it. The cache directory may be on instance-store NVMe,
+EBS or a container volume; its loss, corruption or absence only slows queries
+and lowers warm recall toward the cold choice.
 
 Read latency, write acknowledgement latency, index visibility and object-store
 cost are separate targets. One experiment should answer a specific decision,
@@ -963,7 +998,8 @@ documented recovery procedure. An optional static bearer token guards every
 endpoint except `/healthz` and `/metrics`. The latter serves Prometheus 0.0.4
 text: server atomics record per-endpoint response classes and latency buckets,
 while a read-only admission command samples sequence, segmented maintenance,
-cache and sketch values on the owning worker. Queue state is sampled separately;
+cache, warm-up and sketch values on the owning worker; `/v1/status` reports
+the same cache warm-up state. Queue state is sampled separately;
 metrics are observational and do not change publication or recovery semantics.
 
 ## Bounded concurrent admission (M16)

@@ -508,6 +508,17 @@ pub(crate) struct Slice {
     end: usize,
 }
 
+impl From<Vec<u8>> for Slice {
+    fn from(data: Vec<u8>) -> Self {
+        let end = data.len();
+        Self {
+            data: std::sync::Arc::new(data),
+            start: 0,
+            end,
+        }
+    }
+}
+
 impl std::ops::Deref for Slice {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
@@ -1016,6 +1027,19 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         )
     }
 
+    /// Copy part of the selected root's blocks into the NVMe cache tier: one
+    /// authenticated range read of at most `unit_bytes` (at least one block).
+    /// The pass fills only free space unless every block of the root fits
+    /// the NVMe limit, and restarts after a root change or a lost entry.
+    /// Returns false when there is nothing left to warm or no cache. Warm-up
+    /// reads are reported separately from query reads in `cache_stats`.
+    pub fn warm_cache_step(&self, unit_bytes: usize) -> Result<bool> {
+        match self.lock_cache()? {
+            Some(mut cache) => cache.warm_step(&self.store, &self.root, unit_bytes),
+            None => Ok(false),
+        }
+    }
+
     fn read_data_block(&self, reference: &BlockRef) -> Result<Block> {
         match &self.cache {
             Some(cache) => cache
@@ -1101,15 +1125,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .zip(hits)
             .map(|(reference, hit)| {
                 if let Some((bytes, source)) = hit {
-                    let end = bytes.len();
-                    return Ok((
-                        Slice {
-                            data: std::sync::Arc::new(bytes),
-                            start: 0,
-                            end,
-                        },
-                        source,
-                    ));
+                    return Ok((Slice::from(bytes), source));
                 }
                 let (range, payload) = needed
                     .iter()
