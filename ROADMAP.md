@@ -28,7 +28,8 @@ justify it.
   queue, compute and maintenance time. Separate physical work from any price model;
   MinIO timing is not AWS latency or billing evidence. Use AWS only for a named
   provider-dependent question through the [guarded pilot](docs/S3_PILOT.md), with
-  Free-plan verification and cleanup. Keep fault matrices on MinIO; unstable
+  Free-plan verification and cleanup; in-region compute (M32) needs explicit
+  approval per run and verified termination. Keep fault matrices on MinIO; unstable
   mobile-network observations cannot establish provider or engine regressions.
 
 ## M1 — Durable exact vector store
@@ -836,8 +837,150 @@ quality, latency, resource and storage-work acceptance plus failure/recovery
 evidence. Remote acceptance remains explicitly pending if that evidence is absent.
 Then identify the next actual limit before considering more machines.
 
-## Beyond the single-machine target
+## Next: a usable vector database
+
+Goal: an application can run Glider as a network service on one machine with
+S3 as the durable store, load and query up to 1,000,000 vectors, and operate it
+safely (status, backup, recovery) without reading the source. The M21–M24
+engine is the base; these milestones remove the gaps between an accepted
+experiment and a service. Each keeps the working method above: declared
+gates before measurement, failure tests with every durability change, and
+exact search as the quality oracle.
+
+## M25 — Make the segmented engine's guarantees continuously tested
+
+Status: next.
+
+Steps:
+- Extend the segmented MinIO fault test, which CI runs but which covers only
+  seal publication, to consolidation, pruning, reclamation and cleanup.
+- Add a seeded crash-point test: inject an uncertain or failed create/remove
+  at every publication step of seal, consolidation, pruning, reclamation and
+  cleanup, reopen, and compare against an in-memory model and exact search.
+- Fuzz or property-test every decoder that reads stored bytes (block v1/v2,
+  sketch frame and sketch, run index, root, log record): no panics, explicit
+  `Corrupt` errors, round-trip equality.
+- Split CI into a fast required job (format, Clippy, unit/integration tests)
+  and a MinIO job; keep runtime within the current ~6 minutes.
+
+Done when: CI runs the extended fault test, crash-point matrix and decoder
+tests on every PR, and each injected failure either recovers the acknowledged state
+exactly or fails closed.
+
+## M26 — One engine and a stable library API
+
+Status: planned.
+
+Steps:
+- Promote the segmented engine out of `experimental-segmented`; expose one
+  collection API (open/create with declared options, upsert/delete batches
+  with request IDs, get, exact and selective query, status, backup).
+- Decide the legacy resident `Database`/`SingleMachine` path explicitly: keep
+  it as a documented small-collection mode or migrate it; do not keep two
+  undocumented serving paths.
+- Add cosine and inner-product metrics with persisted, versioned identifiers
+  and exact-oracle tests; reject mixing metrics within a namespace.
+- Document compatibility: which persisted versions each release reads/writes.
+
+Done when: the README quickstart uses the single API, all metrics pass exact
+and selective tests, and older namespaces open or fail with a clear error.
+
+## M27 — Group commit to free write and request budget
+
+Status: planned. The accepted envelope uses 5.96 of 6 PUT/s, about 4 of them
+one log object per client batch.
+
+Steps:
+- Let the single committer publish several queued independent requests in one
+  conditional log object within a bounded delay, keeping per-request
+  outcomes, retry receipts and the existing acknowledgement rule (no client is
+  acknowledged before the shared object is durable).
+- Define crash, partial-batch and duplicate semantics with tests.
+- Re-run the M24 acceptance with the same offered load.
+
+Done when: the M21 envelope passes with at most 4 PUT/s and write p95 still
+<=150 ms, with group-commit crash tests in CI.
+
+## M28 — Network service
+
+Status: planned.
+
+Steps:
+- Add a `glider-server` binary: HTTP/JSON API for collections, batched
+  upsert/delete with request IDs, get, query (k, filter, exact or selective),
+  status and health; bounded request sizes mapped onto admission limits.
+- Configuration file and environment for S3/MinIO, cache directory and
+  budgets; graceful shutdown that releases ownership; bearer-token auth.
+- A container image and a quickstart (MinIO via Docker Compose and S3).
+- Decide from measurement whether concurrent read execution (deferred M17)
+  is needed for the service's query throughput target.
+
+Done when: end-to-end tests drive the server over HTTP against MinIO,
+including restart and ownership release, and the quickstart works from a
+clean checkout.
+
+## M29 — Operations
+
+Status: planned.
+
+Steps:
+- Prometheus metrics (latency classes, queue depth, maintenance backlog,
+  request counts/bytes, cache hit rates, memory) and structured logs.
+- `glider admin` commands for status, backup, restore and fresh-prefix
+  takeover after uncertainty, following `docs/RECOVERY.md`.
+- Scripted drills: process kill during writes and maintenance, cache loss,
+  restore from backup.
+
+Done when: the drills run in CI or a documented script and each ends with
+verified state; the runbook needs no source reading.
+
+## M30 — General metadata filtering
+
+Status: planned. Only one declared equality predicate is answered
+selectively today; other filters return an error unless the caller uses
+exact search.
+
+Steps:
+- Specify supported predicates (equality, IN, conjunctions) and a quality
+  policy for filtered approximate search.
+- Evaluate per-value postings or filtered routing within the read budget
+  against exact search; fall back to an explicit exact scan only within a
+  declared budget.
+
+Done when: a declared filter workload meets recall and latency gates against
+the exact oracle, with unsupported queries rejected explicitly.
+
+## M31 — One million vectors
+
+Status: planned.
+
+Steps:
+- Declare the 1,000,000-row envelope before measuring: corpus (SIFT1M or a
+  modern embedding set with cosine), RAM and NVMe budgets, offered load,
+  latency, recall and storage-work gates.
+- Measure the current design first. Resident sketch and directory grow about
+  110 B per row (~110 MB at 1M); compact or page them only if the gates
+  require it.
+- Re-cluster overwritten data if update-wave recall falls below the gate
+  (it is 0.912 against 0.90 at 250,000 rows).
+
+Done when: the declared 1M envelope passes on MinIO with failure tests.
+
+## M32 — In-region AWS acceptance
+
+Status: planned. The 25,200-row laptop check proved correctness on S3
+Standard but its latency was bound by the client network.
+
+Steps:
+- With explicit approval for each run, start a small EC2 instance in
+  `eu-central-1`, run the M31 (or M24) acceptance against S3 Standard, record
+  the instance type and prices, and terminate it with verified cleanup.
+
+Done when: the declared envelope's latency, request and cost gates are
+measured in-region, or the remaining provider gap is recorded.
+
+## Beyond a single service
 
 Distributed sharding, replication, consensus and GPU work need separate
 requirements and measurements. Quantization, additional index families and
-multi-writer execution are conditional options under M20, not prerequisites.
+multi-writer execution are conditional options, not prerequisites.
