@@ -354,8 +354,9 @@ log-object, tail and backup bookkeeping count objects, not sequences.
 
 `SegmentedServing` claims the namespace with the owned-store protocol, opens
 it with a sketch byte budget and an optional block cache, and implements the
-`admission::Engine` trait, so `admission::Service` runs it on the single
-committer thread. Queries use `search_selective_within` with a fixed read
+`admission::Engine` trait, so `admission::Service` runs its commands and
+maintenance on the single committer thread and its queries on published
+views (M34 below). Queries use `search_selective_within` with a fixed read
 budget (M21: 12 ranked candidates, 8 range requests, 1 MiB);
 unfiltered results are approximate under the M21 quality policy (mean
 recall@10 >=0.90, fifth percentile >=0.80, <1% short results), and the
@@ -417,11 +418,12 @@ checked against the selected root before decoding.
 Missing or corrupt cache bytes trigger an authoritative range fetch. Opening
 rejects a missing selected pack, and corrupt bytes fetched from object storage
 fail closed. Cache bytes never acknowledge mutations or participate in root
-recovery. The cache mutex covers lookup, remote fetch and admission; a
-selective query fetches its blocks serially under it, then authenticates,
-decodes and scores them on scoped threads before settling hits or rejecting
-corrupt cached bytes. Maintenance never overlaps a command: the segmented
-serving engine runs bounded units only while the admission queue is empty.
+recovery. The cache mutex covers lookup and admission but never a remote
+read, so concurrent queries fetch in parallel and may both fetch one missed
+block; a selective query authenticates, decodes and scores its blocks on
+scoped threads before settling hits or rejecting corrupt cached bytes.
+Maintenance never overlaps a command: the segmented serving engine runs
+bounded units only while the committer's queue is empty.
 
 Read latency, write acknowledgement latency, index visibility and object-store
 cost are separate targets. One experiment should answer a specific decision,
@@ -489,8 +491,11 @@ to get/list. Reads and listings must expose only durable complete objects; after
 an uncertain create, a backend must stabilize them or reject access until reopened.
 Complete keys cannot be replaced. Successful removal means durable absence;
 removing an absent key succeeds. Removal errors are uncertain and require the
-same stabilization or rejection. The engine never reuses reclaimed keys, so a
-delayed remote DELETE cannot remove newer authoritative data. Listings must be complete and
+same stabilization or rejection. Operations take `&self`; a backend shared
+between threads must serve reads of other keys while one mutation is in
+flight and reject access only after a mutation fails. The engine never reuses
+reclaimed keys, so a delayed remote DELETE cannot remove newer authoritative
+data. Listings must be complete and
 strongly consistent, though ordering is not required. The S3-compatible
 backend collects all listing pages and provides this object contract using native
 complete-object publication.
@@ -962,10 +967,11 @@ metrics are observational and do not change publication or recovery semantics.
 ## Bounded concurrent admission (M16)
 
 `admission::Service` moves one engine (`SingleMachine` or `SegmentedServing`,
-through the `admission::Engine` trait) to a single blocking worker.
+through the `admission::Engine` trait) to a single blocking committer thread.
 Cloneable clients share a FIFO of writes, exact queries, revision observations
-and result lookups. At most eight commands and 320 KiB of encoded payload are
-admitted by default, including active work. Count and byte exhaustion returns
+and result lookups; an engine that publishes views runs queries and document
+reads on reader threads instead (M34 below). At most eight commands and
+320 KiB of encoded payload are admitted by default, including active work. Count and byte exhaustion returns
 `Overloaded` before retaining a normalized payload; inputs are validated and
 caller-controlled spare capacities are discarded. The queue lock covers bounded
 normalization and bookkeeping, never storage or search. Encoded bytes are an
@@ -992,7 +998,7 @@ publication will not start. Once the worker takes a command, cancellation cannot
 undo it; dropping the response does not stop a PUT. Resolve uncertainty with
 its M15 ID after recovery. A dropped queued ticket is cancelled, but retains its
 charge until the worker removes it. Queries bind results and reported sequence
-to one committed state; there is no simultaneous reader touching the map.
+to one committed state; on `SingleMachine` no reader runs beside the committer.
 
 `begin_shutdown` closes admission synchronously and either drains accepted work
 or cancels queued work. Active execution finishes in both modes. `shutdown` joins
@@ -1005,6 +1011,53 @@ and conditional conflicts do not stop a healthy worker. Thread-spawn failure
 can leave the already acquired claim; inspect/recover it as a stopped owner.
 No successful write result is delivered before durable publication. Backup is
 performed after graceful shutdown using the serial serving API.
+
+### Concurrent queries on published views (M34)
+
+An engine may return an immutable `admission::Snapshot` of its acknowledged
+state; `SegmentedServing` does, `SingleMachine` does not. The service then
+starts `Limits::queries` reader threads (default 4) beside the committer.
+Queries and document reads enter a separate FIFO under the same count and
+byte admission limits; each runs on the latest published snapshot when a
+reader starts it, so at most `queries` reads execute at once, each with at
+most `query_threads` scoped scoring threads. Writes, lookups, observations,
+metrics and maintenance stay on the single committer. `read_priority`
+applies only to engines whose reads run on the committer.
+
+The committer publishes a new snapshot after every command or write group
+and every maintenance unit that did work, and before delivering any result
+of that work. Publication replaces one `Arc` under a mutex. Hence a read
+admitted after an acknowledgement observes that write, a client's
+successive reads never go back in sequence, and a read never observes a
+partially applied group, root switch or seal: the snapshot is exactly the
+state the committer's own queries would see between two units. A failed
+command or uncertain write publishes nothing; the service fails as before.
+A read that panics fails the service like a committer panic.
+
+A segmented snapshot (`View`) holds `Arc`s to the selected root, latest-ID
+directory, log tail and loaded sketches. The committer changes these
+copy-on-write: a write copies the tail map's nodes (bounded by 64 log
+objects; documents are shared) and the sketch liveness bits, a root switch
+also copies the directory, and sketch compaction copies one pack's sketch.
+Replaced roots are kept as weak references; cleanup skips packs that a root
+still held by a snapshot references, so a reader never loses blocks it may
+read, and removes them in a later unit after the snapshot is dropped. Each reader holds one snapshot and the service one
+more, so at most `queries + 1` states and their packs are retained; a slow
+reader delays reclamation, never publication. Logs, indexes and roots are
+never read through a snapshot. Durable formats, acknowledgement, group
+commit, retry and recovery are unchanged.
+
+Readers and the committer share one store handle: every `ObjectStore`
+operation takes `&self`, and a `Sync` backend serves reads while a create
+or remove is in flight. Snapshots read only packs of published roots, never
+an object being created or removed. Backends poison themselves when a
+mutation fails or panics, not while it runs, so concurrent reads are not
+rejected. A reader-writer lock around the whole engine was rejected: a query
+would wait for an entire command, including its log PUT, and for a
+non-preemptible maintenance unit (tens of milliseconds on S3), and a commit
+would wait for in-flight range GETs; a lock around only the store has the
+same defect for every query that misses the cache. Published views cost a
+copy of the changed state per publication instead of blocking either side.
 
 ## Local backend
 

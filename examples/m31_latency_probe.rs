@@ -27,7 +27,7 @@ impl ObjectStore for MemoryStore {
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.0.lock().unwrap().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         let mut objects = self.0.lock().unwrap();
         if objects.contains_key(key) {
             return Err(Error::Exists(key.into()));
@@ -38,7 +38,7 @@ impl ObjectStore for MemoryStore {
         }
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.0.lock().unwrap().remove(key);
         Ok(())
     }

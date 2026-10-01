@@ -22,7 +22,7 @@ impl ObjectStore for Memory {
     fn list(&self) -> glider::Result<Vec<String>> {
         Ok(self.objects.borrow().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         let f = self.fault.get();
         if f == 1 && key.starts_with("mutation-") {
             self.fault.set(0);
@@ -41,7 +41,7 @@ impl ObjectStore for Memory {
         }
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.objects.borrow_mut().remove(key);
         if self.fault.get() == 4 {
             self.fault.set(0);
@@ -184,7 +184,7 @@ fn interrupted_backup_is_unpromoted_and_source_stays_writable() {
 }
 #[test]
 fn legacy_v1_v2_migrate_through_chunked_backup_and_restore() {
-    let mut source = Memory::default();
+    let source = Memory::default();
     source
         .create(
             "metadata",

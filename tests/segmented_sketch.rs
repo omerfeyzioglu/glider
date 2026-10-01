@@ -81,7 +81,7 @@ impl ObjectStore for HookStore {
     fn list(&self) -> Result<Vec<String>> {
         self.inner.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         let fail = {
             let mut hooks = self.hooks.lock().unwrap();
             match &hooks.fail_create {
@@ -102,7 +102,7 @@ impl ObjectStore for HookStore {
             None => self.inner.create(key, value),
         }
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.inner.remove(key)
     }
 }

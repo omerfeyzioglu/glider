@@ -19,14 +19,14 @@ impl ObjectStore for Memory {
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.0.borrow().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         if self.0.borrow().contains_key(key) {
             return Err(Error::Exists(key.into()));
         }
         self.0.borrow_mut().insert(key.into(), value.to_vec());
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.0.borrow_mut().remove(key);
         Ok(())
     }
@@ -43,7 +43,7 @@ impl ObjectStore for Ambiguous {
     fn list(&self) -> Result<Vec<String>> {
         self.memory.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         self.memory.create(key, value)?;
         if self.lose_ack.replace(false) {
             Err(Error::RecoveryRequired)
@@ -51,7 +51,7 @@ impl ObjectStore for Ambiguous {
             Ok(())
         }
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.memory.remove(key)
     }
 }

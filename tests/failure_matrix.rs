@@ -48,13 +48,13 @@ impl<S: ObjectStore> ObjectStore for CrashStore<S> {
     fn list(&self) -> glider::Result<Vec<String>> {
         self.inner.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         self.check(Operation::Create, key, false);
         self.inner.create(key, value)?;
         self.check(Operation::Create, key, true);
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.check(Operation::Remove, key, false);
         self.inner.remove(key)?;
         self.check(Operation::Remove, key, true);

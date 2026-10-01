@@ -9,7 +9,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     path::Path,
-    sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 
 mod cache;
@@ -824,28 +824,6 @@ struct SealState {
     index_published: bool,
 }
 
-/// The namespace store, shared by the committer and its published views.
-/// Reads proceed in parallel; `create` and `remove` take `&mut` and hold the
-/// lock exclusively. The engine's poison flag, set before every mutation,
-/// already covers a panic inside one, so lock poisoning is ignored.
-struct SharedStore<S>(Arc<RwLock<S>>);
-
-impl<S> Clone for SharedStore<S> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<S> SharedStore<S> {
-    fn read(&self) -> RwLockReadGuard<'_, S> {
-        self.0.read().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn write(&self) -> RwLockWriteGuard<'_, S> {
-        self.0.write().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
 /// Acknowledged log-tail versions by ID. Documents are shared, so copying the
 /// tail for a new view copies only its nodes.
 type Tail = BTreeMap<u64, (u64, Option<Arc<Document>>)>;
@@ -858,7 +836,7 @@ type Tail = BTreeMap<u64, (u64, Option<Arc<Document>>)>;
 /// copy-on-write `Arc`s that `view` shares; a later mutation copies a part
 /// only while a view still holds it.
 pub struct SegmentedDatabase<S> {
-    store: SharedStore<S>,
+    store: Arc<S>,
     config: Config,
     root: Arc<Root>,
     sequence: u64,
@@ -890,7 +868,7 @@ pub struct SegmentedDatabase<S> {
 /// publishes a new one after each change, so a query never observes a
 /// partially applied write or root switch.
 pub(crate) struct View<S> {
-    store: SharedStore<S>,
+    store: Arc<S>,
     cache: Option<Arc<Mutex<BlockCache>>>,
     config: Config,
     options: Arc<SegmentedOptions>,
@@ -950,7 +928,6 @@ impl<S: ObjectStore> View<S> {
         validate_block_ref(reference)?;
         let bytes = self
             .store
-            .read()
             .get_range(
                 &reference.object,
                 reference.offset,
@@ -1010,7 +987,7 @@ impl<S: ObjectStore> View<S> {
         let payloads: Vec<_> = if needed.is_empty() {
             Vec::new()
         } else {
-            self.store.read().get_ranges(&needed)?
+            self.store.get_ranges(&needed)?
         }
         .into_iter()
         .map(|payload| payload.map(Arc::new))
@@ -1145,8 +1122,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 
     /// The store, once no view holds it any longer.
     pub(crate) fn into_store(self) -> Result<S> {
-        Arc::try_unwrap(self.store.0)
-            .map(|store| store.into_inner().unwrap_or_else(PoisonError::into_inner))
+        Arc::try_unwrap(self.store)
             .map_err(|_| Error::Invalid("a segmented read view is still open".into()))
     }
 
@@ -1232,11 +1208,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 
     /// Open or create a namespace whose metadata declares `options`. Opening
     /// with options different from the persisted declaration fails.
-    pub fn open_with_options(
-        mut store: S,
-        config: Config,
-        options: SegmentedOptions,
-    ) -> Result<Self> {
+    pub fn open_with_options(store: S, config: Config, options: SegmentedOptions) -> Result<Self> {
         config.validate()?;
         if options
             .resident_filter
@@ -1368,7 +1340,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Err(Error::Corrupt("segmented replay tail exceeds bound".into()));
         }
         let mut db = Self {
-            store: SharedStore(Arc::new(RwLock::new(store))),
+            store: Arc::new(store),
             config,
             sequence: root.sequence,
             retry: root.retry.clone(),
@@ -1393,7 +1365,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         };
         for chunk in tail_logs.chunks(8) {
             let keys: Vec<_> = chunk.iter().map(|&sequence| log_key(sequence)).collect();
-            let logs = db.store.read().get_many(&keys)?;
+            let logs = db.store.get_many(&keys)?;
             for (&log_sequence, bytes) in chunk.iter().zip(logs) {
                 if db.sequence.checked_add(1) != Some(log_sequence) {
                     return Err(Error::Corrupt("segmented mutation log gap".into()));
@@ -1444,13 +1416,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .collect();
             // A store-reported corrupt range fails the batch; read that chunk
             // serially so each pack is judged on its own bytes.
-            let batch = self.store.read().get_ranges(&requests);
+            let batch = self.store.get_ranges(&requests);
             let mut prefixes = match batch {
                 Ok(values) => values,
                 Err(Error::Corrupt(_)) => requests
                     .iter()
                     .map(|&(key, offset, length, payload)| {
-                        match self.store.read().get_range(key, offset, length, payload) {
+                        match self.store.get_range(key, offset, length, payload) {
                             Err(Error::Corrupt(_)) => Ok(None),
                             other => other,
                         }
@@ -1483,7 +1455,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         }
                         Framed::Need(length) => {
                             prefixes[index] =
-                                match self.store.read().get_range(pack, 0, length, payload_len) {
+                                match self.store.get_range(pack, 0, length, payload_len) {
                                     Err(Error::Corrupt(_)) => None,
                                     other => other?,
                                 };
@@ -1499,9 +1471,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         references.sort_by_key(|reference| reference.offset);
                         let blocks = references
                             .iter()
-                            .map(|reference| {
-                                read_block(&*self.store.read(), self.config, reference)
-                            })
+                            .map(|reference| read_block(&*self.store, self.config, reference))
                             .collect::<Result<Vec<_>>>()?;
                         let pairs: Vec<_> = references.iter().zip(&blocks).collect();
                         Arc::make_mut(&mut self.sketches).rebuilt += 1;
@@ -1556,13 +1526,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 
     fn create_staged(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
         if self.known_keys.contains(key) {
-            if self.store.read().get(key)?.as_deref() != Some(bytes) {
+            if self.store.get(key)?.as_deref() != Some(bytes) {
                 return Err(Error::Corrupt(format!(
                     "conflicting segmented object: {key}"
                 )));
             }
         } else {
-            self.store.write().create(key, bytes)?;
+            self.store.create(key, bytes)?;
             self.known_keys.insert(key.to_owned());
         }
         Ok(())
@@ -1743,7 +1713,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         };
         self.poisoned = true;
         let object = log_key(first);
-        let created = self.store.write().create(&object, &bytes);
+        let created = self.store.create(&object, &bytes);
         if let Err(error) = created {
             let message = error.to_string();
             for &index in &accepted {
@@ -2100,8 +2070,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         };
         let first = &self.root.runs[pair];
         let second = &self.root.runs[pair + 1];
-        let left = read_run_index(&*self.store.read(), first)?;
-        let right = read_run_index(&*self.store.read(), second)?;
+        let left = read_run_index(&*self.store, first)?;
+        let right = read_run_index(&*self.store, second)?;
         // Both indexes are ID-sorted and an ID is current in at most one run,
         // so a linear merge yields the surviving entries in ID order.
         let latest = &self.latest;
@@ -2505,7 +2475,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             let ordinal = state.blocks.len();
             let (run, block) = state.locations[ordinal];
             let reference = &self.root.runs[run].blocks[block];
-            let old = match read_block(&*self.store.read(), self.config, reference) {
+            let old = match read_block(&*self.store, self.config, reference) {
                 Ok(block) => block,
                 Err(error) => {
                     self.reclaim = Some(state);
@@ -2610,7 +2580,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Ok(0);
         }
         self.poisoned = true;
-        self.store.write().remove_many(&keys)?;
+        self.store.remove_many(&keys)?;
         for key in &keys {
             self.known_keys.remove(key);
         }
@@ -2888,7 +2858,7 @@ mod tests {
         .unwrap();
         let (payload, refs) = encode_pack("pack-1", config, &[block]).unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let mut store = LocalStore::open(temp.path().join("db")).unwrap();
+        let store = LocalStore::open(temp.path().join("db")).unwrap();
         store.create("pack-1", &payload).unwrap();
         let loaded = read_block(&store, config, &refs[0]).unwrap();
         assert_eq!(loaded.records[0].id(), 42);
@@ -3055,7 +3025,6 @@ mod tests {
         assert_eq!((db.sequence(), db.tail_objects), (2, 1));
         let logs = |db: &SegmentedDatabase<LocalStore>| {
             db.store
-                .read()
                 .list()
                 .unwrap()
                 .into_iter()
@@ -3116,7 +3085,7 @@ mod tests {
         corrupt[44] = 2;
         assert!(RunIndex::decode(&corrupt, 1, 1, 1).is_err());
         let temp = tempfile::tempdir().unwrap();
-        let mut store = LocalStore::open(temp.path().join("db")).unwrap();
+        let store = LocalStore::open(temp.path().join("db")).unwrap();
         store.create("index-1", &bytes).unwrap();
         let run = RunRef {
             first_sequence: 1,
@@ -3284,7 +3253,7 @@ mod tests {
         assert_eq!(db.current_block_of(0), db.current_block_of(2));
         assert_eq!(db.current_block_of(1), db.current_block_of(3));
         for reference in &db.root.runs[0].blocks {
-            let block = read_block(&*db.store.read(), config, reference).unwrap();
+            let block = read_block(&*db.store, config, reference).unwrap();
             assert_eq!(block.records.len(), 170);
             assert!(block
                 .records
@@ -3810,8 +3779,8 @@ mod tests {
         struct UncertainCreate<S> {
             inner: S,
             fail_prefix: &'static str,
-            fired: bool,
-            fail_remove_once: bool,
+            fired: std::cell::Cell<bool>,
+            fail_remove_once: std::cell::Cell<bool>,
         }
         impl<S: ObjectStore> ObjectStore for UncertainCreate<S> {
             fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
@@ -3830,20 +3799,19 @@ mod tests {
             fn list(&self) -> Result<Vec<String>> {
                 self.inner.list()
             }
-            fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+            fn create(&self, key: &str, value: &[u8]) -> Result<()> {
                 self.inner.create(key, value)?;
-                if !self.fired && key.starts_with(self.fail_prefix) {
-                    self.fired = true;
+                if !self.fired.get() && key.starts_with(self.fail_prefix) {
+                    self.fired.set(true);
                     return Err(Error::Io(std::io::Error::other(
                         "simulated response loss after durable create",
                     )));
                 }
                 Ok(())
             }
-            fn remove(&mut self, key: &str) -> Result<()> {
+            fn remove(&self, key: &str) -> Result<()> {
                 self.inner.remove(key)?;
-                if self.fail_remove_once {
-                    self.fail_remove_once = false;
+                if self.fail_remove_once.take() {
                     return Err(Error::Io(std::io::Error::other(
                         "simulated response loss after durable delete",
                     )));
@@ -3888,8 +3856,8 @@ mod tests {
             UncertainCreate {
                 inner: open_log_store(),
                 fail_prefix: "sglog-",
-                fired: false,
-                fail_remove_once: false,
+                fired: Default::default(),
+                fail_remove_once: false.into(),
             },
             config,
         )
@@ -3928,8 +3896,8 @@ mod tests {
                 UncertainCreate {
                     inner: store(),
                     fail_prefix: prefix,
-                    fired: false,
-                    fail_remove_once: false,
+                    fired: Default::default(),
+                    fail_remove_once: false.into(),
                 },
                 config,
             )
@@ -3957,8 +3925,8 @@ mod tests {
                 UncertainCreate {
                     inner: store(),
                     fail_prefix: "never-match",
-                    fired: false,
-                    fail_remove_once: true,
+                    fired: Default::default(),
+                    fail_remove_once: true.into(),
                 },
                 config,
             )
@@ -4002,8 +3970,8 @@ mod tests {
                     UncertainCreate {
                         inner: store(),
                         fail_prefix: "sgroot-00000000000000000003",
-                        fired: false,
-                        fail_remove_once: false,
+                        fired: Default::default(),
+                        fail_remove_once: false.into(),
                     },
                     config,
                 )
@@ -4021,7 +3989,7 @@ mod tests {
             }
             let required_pack = reopened.root.runs[0].blocks[0].object.clone();
             drop(reopened);
-            let mut damaged = store();
+            let damaged = store();
             damaged.remove(&required_pack).unwrap();
             drop(damaged);
             assert!(matches!(
@@ -4076,8 +4044,8 @@ mod tests {
             UncertainCreate {
                 inner: reclaim_store(),
                 fail_prefix: "sgroot-00000000000000000002",
-                fired: false,
-                fail_remove_once: false,
+                fired: Default::default(),
+                fail_remove_once: false.into(),
             },
             vector_config,
         )
@@ -4163,7 +4131,7 @@ mod tests {
         assert_eq!(lost.cache_stats().unwrap().unwrap().remote_fetches, 1);
         let selected_pack = lost.root.runs[0].blocks[0].object.clone();
         drop(lost);
-        let mut damaged = reclaim_store();
+        let damaged = reclaim_store();
         damaged.remove(&selected_pack).unwrap();
         drop(damaged);
         assert!(matches!(
@@ -4215,8 +4183,8 @@ mod tests {
                 UncertainCreate {
                     inner: prune_store(),
                     fail_prefix,
-                    fired: false,
-                    fail_remove_once: false,
+                    fired: Default::default(),
+                    fail_remove_once: false.into(),
                 },
                 vector_config,
             )

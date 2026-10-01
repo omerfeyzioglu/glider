@@ -122,15 +122,15 @@ impl ObjectStore for Counted {
     fn list(&self) -> glider::Result<Vec<String>> {
         self.inner.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         self.count(key, false);
         self.inner.create(key, value)
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.count(key, true);
         self.inner.remove(key)
     }
-    fn remove_many(&mut self, keys: &[String]) -> glider::Result<()> {
+    fn remove_many(&self, keys: &[String]) -> glider::Result<()> {
         for key in keys {
             self.count(key, true);
         }
@@ -1169,7 +1169,7 @@ mod tests {
         fn list(&self) -> glider::Result<Vec<String>> {
             Ok(self.0.lock().unwrap().keys().cloned().collect())
         }
-        fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+        fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
             let mut objects = self.0.lock().unwrap();
             if objects.contains_key(key) {
                 return Err(glider::Error::Exists(key.into()));
@@ -1177,7 +1177,7 @@ mod tests {
             objects.insert(key.into(), value.to_vec());
             Ok(())
         }
-        fn remove(&mut self, key: &str) -> glider::Result<()> {
+        fn remove(&self, key: &str) -> glider::Result<()> {
             self.0.lock().unwrap().remove(key);
             Ok(())
         }

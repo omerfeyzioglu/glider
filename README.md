@@ -379,7 +379,8 @@ and rerank them exactly. The one equality predicate declared at namespace
 creation is answered exactly from full-precision vectors kept in the sketches;
 declared routed keys restrict candidate rows before block ranking; all filters are checked during reranking (approximate, possibly fewer than k results), and `search_exact` remains the oracle. Run it
 behind `admission::Service`, which executes seal, consolidation, reclamation
-and cleanup in bounded units while no command is queued.
+and cleanup in bounded units while no command is queued, and runs up to
+`Limits::queries` queries in parallel on the latest acknowledged state.
 
 ```rust
 use glider::{admission::{Limits, Service, Shutdown}, Config, Metric};

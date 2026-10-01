@@ -13,7 +13,7 @@ fn config() -> Config {
 fn local_object_publication_and_corruption() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("db");
-    let mut store = LocalStore::open(&root).unwrap();
+    let store = LocalStore::open(&root).unwrap();
     store.create("object", b"a value VTSEALED").unwrap();
     assert!(store.create("object", b"replacement").is_err());
     assert_eq!(store.get("object").unwrap().unwrap(), b"a value VTSEALED");

@@ -23,7 +23,7 @@ impl ObjectStore for Memory {
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.objects.borrow().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         let attempt = self.creates.get() + 1;
         self.creates.set(attempt);
         let fail = self.fail_create.get() == Some((attempt, false));
@@ -41,7 +41,7 @@ impl ObjectStore for Memory {
         }
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         if self.fail_remove.get() == Some(false) {
             self.fail_remove.set(None);
             return Err(Error::RecoveryRequired);

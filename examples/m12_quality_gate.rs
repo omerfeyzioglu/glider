@@ -41,11 +41,11 @@ impl ObjectStore for Memory {
     fn list(&self) -> glider::Result<Vec<String>> {
         Ok(self.0.borrow().keys().cloned().collect())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.0.borrow_mut().remove(key);
         Ok(())
     }
-    fn create(&mut self, key: &str, bytes: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, bytes: &[u8]) -> glider::Result<()> {
         let mut map = self.0.borrow_mut();
         if map.contains_key(key) {
             return Err(Error::Exists(key.into()));
@@ -226,7 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Derived cache loss must leave authoritative exact results unchanged.
         let expected = db.search_filtered(&queries[0], 10, &[("selected", "true")])?;
         drop(db);
-        let mut clean = store.clone();
+        let clean = store.clone();
         clean.remove(&key)?;
         let mut reopened = Database::open(store, config)?;
         assert_eq!(

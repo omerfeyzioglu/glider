@@ -29,7 +29,7 @@ impl ObjectStore for Memory {
     fn list(&self) -> glider::Result<Vec<String>> {
         Ok(self.objects.borrow().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         let mut objects = self.objects.borrow_mut();
         if objects.contains_key(key) {
             return Err(Error::Exists(key.into()));
@@ -37,7 +37,7 @@ impl ObjectStore for Memory {
         objects.insert(key.into(), value.to_vec());
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.objects.borrow_mut().remove(key);
         Ok(())
     }
@@ -58,14 +58,14 @@ impl ObjectStore for TimedOutPut {
     fn list(&self) -> glider::Result<Vec<String>> {
         self.inner.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         if self.armed.get() && key.starts_with("mutation-") {
             *self.pending.borrow_mut() = Some((key.into(), value.to_vec()));
             return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "deferred PUT").into());
         }
         self.inner.create(key, value)
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.inner.remove(key)
     }
 }
@@ -122,7 +122,7 @@ fn late_old_put_cannot_change_a_staged_new_prefix() {
 
 struct FailAfterOne {
     inner: Memory,
-    writes: usize,
+    writes: std::cell::Cell<usize>,
 }
 
 impl ObjectStore for FailAfterOne {
@@ -132,14 +132,14 @@ impl ObjectStore for FailAfterOne {
     fn list(&self) -> glider::Result<Vec<String>> {
         self.inner.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
-        if self.writes == 1 {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
+        if self.writes.get() == 1 {
             return Err(std::io::Error::other("interrupted staging").into());
         }
-        self.writes += 1;
+        self.writes.set(1);
         self.inner.create(key, value)
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.inner.remove(key)
     }
 }
@@ -157,7 +157,7 @@ fn interrupted_copy_has_no_metadata_and_is_never_promoted() {
         &source,
         FailAfterOne {
             inner: failed.clone(),
-            writes: 0,
+            writes: Default::default(),
         },
         config()
     )

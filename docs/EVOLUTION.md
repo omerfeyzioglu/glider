@@ -255,3 +255,16 @@ independent arrivals 250 ms apart never queue together. The envelope passed
 at 5.30 PUT/s because maintenance published fewer packs and roots; the M27
 target of 4 PUT/s needs batching by clients or a different arrival pattern,
 not more committer work. [Evidence](../benchmarks/M27.md).
+
+## 2026-10-01 — Queries run beside the committer on published views
+
+Segmented queries and document reads moved off the single admission committer
+onto bounded reader threads. The committer publishes an immutable view (root,
+directory, tail, sketch liveness) after each command and maintenance unit and
+before any acknowledgement, so reads keep snapshot consistency and
+read-your-writes; packs of a replaced root stay until no view holds it.
+`ObjectStore` mutations now take `&self` so reads never wait for a PUT or
+DELETE, which a store lock would have forced. In the 1M in-memory probe the
+query queue p95 fell from about 43 to 4 ms, but four simultaneous queries now
+share the CPU and end-to-end p95 stayed near 53 ms: routing cost per query, not
+serialization, bounds this workload. [Evidence](../benchmarks/M31.md#concurrent-queries-m34).

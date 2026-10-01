@@ -1005,8 +1005,12 @@ tail hits, and default responses are unchanged.
 
 ## M34 — Concurrent queries
 
-Status: planned. One admission executor runs queries, writes and maintenance
-in turn; at 1M a query executes in ~11 ms but waits up to 43 ms (p95).
+Status: in progress. Queries and document reads run on bounded reader threads
+over immutable published views; read-your-writes, snapshot and pack-retention
+tests pass. In the in-memory 1M probe the query queue p95 fell from 39-47 ms
+to 2-7 ms, but four simultaneous queries share the CPU, so end-to-end p95
+stayed at 52-67 ms ([M31 probe](benchmarks/M31.md#concurrent-queries-m34)).
+Heavy maintenance still runs on the committer.
 
 Steps:
 - Execute queries in parallel against an immutable published view (root,

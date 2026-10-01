@@ -285,7 +285,6 @@ impl<S: ObjectStore> SegmentedServing<S> {
         let copy = |destination: &mut D, key: &str| -> Result<Vec<u8>> {
             let bytes = db
                 .store
-                .read()
                 .get(key)?
                 .ok_or_else(|| Error::Corrupt(format!("backup source missing: {key}")))?;
             destination.create(key, &bytes)?;
@@ -297,7 +296,6 @@ impl<S: ObjectStore> SegmentedServing<S> {
         for (pack, blocks) in &packs {
             let bytes = db
                 .store
-                .read()
                 .get(pack)?
                 .ok_or_else(|| Error::Corrupt(format!("backup source missing: {pack}")))?;
             for block in blocks {

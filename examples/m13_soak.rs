@@ -44,7 +44,7 @@ impl ObjectStore for Observed {
         self.counts.set(c);
         self.inner.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         self.inner.create(key, value)?;
         let mut c = self.counts.get();
         if key.starts_with("mutation-") {
@@ -56,7 +56,7 @@ impl ObjectStore for Observed {
         self.counts.set(c);
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.inner.remove(key)?;
         if self.fail_remove.replace(false) {
             return Err(std::io::Error::other("injected lost cleanup acknowledgement").into());

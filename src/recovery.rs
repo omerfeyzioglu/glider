@@ -16,7 +16,7 @@ use crate::{ownership::is_control_key, store::ObjectStore, Config, Database, Err
 /// acknowledged object in the source.
 pub fn stage_isolated_namespace<S: ObjectStore, D: ObjectStore>(
     source: &S,
-    mut destination: D,
+    destination: D,
     config: Config,
 ) -> Result<()> {
     config.validate()?;

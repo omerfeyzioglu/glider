@@ -78,13 +78,13 @@ impl ObjectStore for Store {
     fn list(&self) -> crate::Result<Vec<String>> {
         each_store!(self, store => store.list())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> crate::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> crate::Result<()> {
         each_store!(self, store => store.create(key, value))
     }
-    fn remove(&mut self, key: &str) -> crate::Result<()> {
+    fn remove(&self, key: &str) -> crate::Result<()> {
         each_store!(self, store => store.remove(key))
     }
-    fn remove_many(&mut self, keys: &[String]) -> crate::Result<()> {
+    fn remove_many(&self, keys: &[String]) -> crate::Result<()> {
         each_store!(self, store => store.remove_many(keys))
     }
 }
@@ -256,7 +256,7 @@ impl StoreConfig {
 /// prove the source writer has stopped before staging a crashed namespace.
 pub fn stage_segmented_namespace(
     source: &Store,
-    mut destination: Store,
+    destination: Store,
     config: Config,
     options: SegmentedOptions,
 ) -> crate::Result<(u64, usize, u64)> {

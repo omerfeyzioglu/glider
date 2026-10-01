@@ -33,6 +33,12 @@ with their results. `Timed` separates queue wait, execution and due maintenance.
 Measure client latency around submission and `wait()` to include normalization,
 response delivery and caller scheduling. There is no automatic group commit.
 
+An engine that publishes snapshots, such as `SegmentedServing`, runs queries
+and document reads on `Limits::queries` reader threads (default 4) beside the
+worker, each on the latest acknowledged state; they count toward the same
+admission limits. A read submitted after a write's acknowledgement observes
+that write. `read_priority` applies only to reads that run on the worker.
+
 `ticket.cancel()` returning true proves execution will not start. Once started,
 a write continues even if its ticket is dropped; resolve its result using the
 unchanged request ID. Dropping a queued ticket cancels it. A cancelled command
