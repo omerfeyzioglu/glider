@@ -20,7 +20,8 @@ pub struct SegmentedServingOptions {
     /// Start a seal when this many acknowledged log objects are unsealed.
     /// The engine rejects writes at 64, which forces synchronous maintenance.
     pub seal_tail_objects: usize,
-    /// Blocks an unfiltered selective query may read, and its remote budget.
+    /// Blocks a selective query may read: its remote budget, charged only
+    /// for uncached blocks, and its limit on cached blocks read locally.
     pub read_budget: ReadBudget,
     /// Obsolete objects removed by one cleanup unit.
     pub cleanup_objects: usize,
@@ -30,12 +31,18 @@ pub struct SegmentedServingOptions {
     pub cache: Option<(PathBuf, usize, usize)>,
     /// Scoped threads used to score sketches for one query.
     pub query_threads: usize,
+    /// Bytes one idle warm-up unit may read into the NVMe cache; 0 disables
+    /// warm-up.
+    pub warm_unit_bytes: usize,
 }
 
 impl SegmentedServingOptions {
     /// The M21 250,000-row envelope: 64 MiB engine RSS and a 256 MiB NVMe
     /// cache. The RAM block tier is disabled: NVMe (and the OS page cache)
-    /// hold the working set, leaving the RAM budget for engine state.
+    /// hold the working set, leaving the RAM budget for engine state. Idle
+    /// warm-up copies the namespace into NVMe 256 KiB at a time, and up to
+    /// 24 cached blocks (twice the routed candidates) are reranked locally
+    /// in addition to the remote budget.
     pub fn m21(cache_directory: PathBuf) -> Self {
         Self {
             seal_tail_objects: 32,
@@ -43,11 +50,13 @@ impl SegmentedServingOptions {
                 blocks: 12,
                 requests: 8,
                 bytes: 1024 * 1024,
+                local_blocks: 24,
             },
             cleanup_objects: 4,
             max_index_bytes: 24 * 1024 * 1024,
             cache: Some((cache_directory, 0, 256 * 1024 * 1024)),
             query_threads: 4,
+            warm_unit_bytes: 256 * 1024,
         }
     }
 
@@ -77,6 +86,7 @@ pub struct ServingCounters {
     /// Seals forced inside a write because the log tail reached its bound.
     pub forced_seals: u64,
     pub sketch_compactions: u64,
+    pub warm_steps: u64,
 }
 
 pub struct SegmentedServing<S: ObjectStore> {
@@ -149,7 +159,8 @@ impl<S: ObjectStore> SegmentedServing<S> {
     }
 
     /// One bounded unit: a staged step, a seal plan, a run consolidation, a
-    /// prune/reclaim plan or a cleanup batch. Returns false when idle.
+    /// prune/reclaim plan, a cleanup batch or, when nothing else is due, one
+    /// cache warm-up read. Returns false when idle.
     pub fn maintenance_step(&mut self) -> Result<bool> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
@@ -218,7 +229,17 @@ impl<S: ObjectStore> SegmentedServing<S> {
         self.last_unit = "cleanup";
         let removed = db.cleanup_step(self.options.cleanup_objects)?;
         counters.removed_objects += removed as u64;
-        Ok(removed > 0)
+        if removed > 0 {
+            return Ok(true);
+        }
+        // Lowest priority: keep the selected root on local NVMe so queries
+        // read it without remote requests.
+        self.last_unit = "warm";
+        if self.options.warm_unit_bytes > 0 && db.warm_cache_step(self.options.warm_unit_bytes)? {
+            counters.warm_steps += 1;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// At the hard log-tail bound, finish any staged maintenance and a seal
@@ -413,6 +434,7 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
                     "glider_segmented_sketch_compactions_total",
                     counters.sketch_compactions,
                 ),
+                ("glider_segmented_warm_steps_total", counters.warm_steps),
                 ("glider_cache_ram_hits_total", cache.ram_hits),
                 ("glider_cache_nvme_hits_total", cache.nvme_hits),
                 ("glider_cache_remote_fetches_total", cache.remote_fetches),
@@ -423,6 +445,15 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
                 ("glider_cache_corrupt_entries_total", cache.corrupt_entries),
                 ("glider_cache_nvme_bytes", cache.nvme_bytes as u64),
                 ("glider_cache_nvme_entries", cache.nvme_entries as u64),
+                ("glider_cache_nvme_limit_bytes", cache.nvme_limit as u64),
+                ("glider_cache_namespace_bytes", cache.namespace_bytes as u64),
+                ("glider_cache_warm_bytes", cache.warm_bytes as u64),
+                ("glider_cache_warm_complete", u64::from(cache.warm_complete)),
+                ("glider_cache_warm_fetches_total", cache.warm_fetches),
+                (
+                    "glider_cache_warm_payload_bytes_total",
+                    cache.warm_payload_bytes,
+                ),
                 (
                     "glider_sketch_index_bytes",
                     self.db.selective_index_bytes() as u64,
