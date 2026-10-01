@@ -4,7 +4,6 @@
 use super::{root_key, QueryHit, QueryOptions, ReadBudget, SegmentedDatabase, SegmentedOptions};
 use crate::{
     admission::{Engine, EngineMetrics},
-    ownership::OwnedStore,
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     store::ObjectStore,
     Config, Error, Neighbor, Result,
@@ -90,7 +89,7 @@ pub struct ServingCounters {
 }
 
 pub struct SegmentedServing<S: ObjectStore> {
-    db: SegmentedDatabase<OwnedStore<S>>,
+    db: SegmentedDatabase<S>,
     options: SegmentedServingOptions,
     maintenance_time: Duration,
     /// A root changed since prune/reclaim last found no candidate.
@@ -100,8 +99,9 @@ pub struct SegmentedServing<S: ObjectStore> {
 }
 
 impl<S: ObjectStore> SegmentedServing<S> {
-    /// Claim exclusive ownership, then open the segmented namespace. A failed
-    /// open can leave the claim; follow the stopped-owner procedure.
+    /// Take over the namespace (fencing every earlier writer), then open it.
+    /// Hold a [`crate::lease::Lease`] first so a live writer is not deposed;
+    /// see [`SegmentedDatabase::take_over_with_options`] for errors.
     pub fn open(
         store: S,
         config: Config,
@@ -118,10 +118,8 @@ impl<S: ObjectStore> SegmentedServing<S> {
                 "segmented serving bounds are invalid".into(),
             ));
         }
-        let mut db =
-            SegmentedDatabase::open_with_options(OwnedStore::claim(store)?, config, segmented)?;
+        let mut db = SegmentedDatabase::take_over_with_options(store, config, segmented)?;
         if db.selective_index_bytes() > options.max_index_bytes {
-            db.into_store().release()?;
             return Err(Error::Invalid(
                 "segmented sketches exceed the serving index budget".into(),
             ));
@@ -140,7 +138,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         })
     }
 
-    pub fn database(&self) -> &SegmentedDatabase<OwnedStore<S>> {
+    pub fn database(&self) -> &SegmentedDatabase<S> {
         &self.db
     }
 
@@ -148,9 +146,13 @@ impl<S: ObjectStore> SegmentedServing<S> {
         self.counters
     }
 
-    /// Release the namespace claim after serial administrative work.
+    /// Stop using the handle. An uncertain handle reports `RecoveryRequired`;
+    /// the next takeover fences its late requests either way.
     pub fn close(self) -> Result<()> {
-        self.db.into_store().release()
+        if self.db.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        Ok(())
     }
 
     /// Kind of the most recent maintenance unit, for diagnostics.
@@ -458,6 +460,7 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
                     "glider_cache_warm_payload_bytes_total",
                     cache.warm_payload_bytes,
                 ),
+                ("glider_writer_epoch", self.db.epoch()),
                 (
                     "glider_sketch_index_bytes",
                     self.db.selective_index_bytes() as u64,
@@ -465,11 +468,8 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
             ],
         })
     }
-    /// A clean handle releases its claim; an uncertain one keeps it.
+    /// A clean handle closes; an uncertain one reports `RecoveryRequired`.
     fn close(self) -> Result<()> {
-        if self.db.poisoned {
-            return Err(Error::RecoveryRequired);
-        }
-        self.db.into_store().release()
+        SegmentedServing::close(self)
     }
 }

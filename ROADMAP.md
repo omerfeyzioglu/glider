@@ -1039,8 +1039,13 @@ cold behavior keeps the remote budget, and cache-loss tests still pass.
 
 ## M36 — Restarts without an operator
 
-Status: planned. A killed writer leaves its ownership claim, so the next
-process refuses to open and recovery needs `glider-admin restore`.
+Status: implemented. Local drills and MinIO takeover tests pass; not yet run
+on AWS S3.
+`glider-server` holds a renewed lease and takes over with permanent fence
+objects at the deposed writer's next log and root keys (`DESIGN.md`,
+"Segmented writer takeover"); `tools/drills.py` restarts a killed server
+on the same directory and checks that a frozen server resumed after takeover
+cannot write.
 
 Steps:
 - Replace the permanent claim with a renewed lease plus a monotonically

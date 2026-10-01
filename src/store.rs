@@ -71,8 +71,11 @@ pub trait ObjectStore {
     }
 }
 
-/// Development backend; callers must ensure exclusive ownership of this path,
-/// including across processes. Requires a filesystem honoring file/directory sync.
+/// Development backend. Handles in one or several processes may share a path:
+/// an exclusive lock on the namespace directory serializes every create,
+/// removal and reopen reclamation, so create-if-absent is atomic and a reopen
+/// never reclaims another live handle's in-progress publication. Requires a
+/// local filesystem honoring file/directory sync and `flock`.
 /// After a publication error or panic, discard this handle and call `open` again;
 /// all object operations reject access until a fresh handle stabilizes recovery.
 pub struct LocalStore {
@@ -118,6 +121,9 @@ impl LocalStore {
         store.io("open-parent-sync", || File::open(parent)?.sync_all())?;
         // A previous process may have published a full seal but failed before
         // syncing it. Stabilize that recovered prefix before accepting new writes.
+        // Holding the lock, no other handle is publishing or removing, so every
+        // incomplete object is debris of an interrupted attempt.
+        let _lock = store.lock()?;
         for key in store.candidates()? {
             if store.get(&key)?.is_none() {
                 // Includes interrupted creates and seal-first deletes. Otherwise
@@ -165,6 +171,15 @@ impl LocalStore {
             File::open(&self.root)?.sync_all()
         })?;
         Ok(())
+    }
+    /// Exclusive advisory lock on the namespace directory, released when the
+    /// returned handle closes; the OS releases a dead process's lock.
+    /// Readers take none: a complete seal is written only after its synced
+    /// body, and removal deletes the seal first.
+    fn lock(&self) -> Result<File> {
+        let directory = File::open(&self.root)?;
+        directory.lock()?;
+        Ok(directory)
     }
     fn ready(&self) -> Result<()> {
         if self.poisoned {
@@ -218,7 +233,18 @@ impl ObjectStore for LocalStore {
         if marker != SEAL {
             return Err(Error::Corrupt(format!("invalid seal: {key}")));
         }
-        let bytes = fs::read(self.path(&format!("{key}-body"))?)?;
+        let bytes = match fs::read(self.path(&format!("{key}-body"))?) {
+            Ok(bytes) => bytes,
+            // Another handle removed the object (seal first) after the seal
+            // was read; a body missing under a remaining seal is corruption.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && !self.path(&format!("{key}-seal"))?.exists() =>
+            {
+                return Ok(None)
+            }
+            Err(e) => return Err(e.into()),
+        };
         decode_envelope(&bytes, key).map(Some)
     }
     fn list(&self) -> Result<Vec<String>> {
@@ -235,12 +261,16 @@ impl ObjectStore for LocalStore {
     fn remove(&mut self, key: &str) -> Result<()> {
         self.ready()?;
         self.path(key)?;
+        let _lock = self.lock()?;
         self.poisoned = true;
         self.remove_files(key)?;
         self.poisoned = false;
         Ok(())
     }
     fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.ready()?;
+        self.path(key)?;
+        let _lock = self.lock()?;
         if self.get(key)?.is_some() {
             return Err(Error::Exists(key.into()));
         }

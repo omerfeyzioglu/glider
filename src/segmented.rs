@@ -1,7 +1,7 @@
-//! Experimental versioned segmented layout. This is not yet a serving engine.
+//! Versioned segmented layout: immutable logs, packs, run indexes and roots.
 use crate::{
-    decode, encode, matches_filter, retry, store::ObjectStore, streaming::OwnedDocument, Config,
-    Document, Error, Mutation, Neighbor, Result,
+    decode, encode, lease::is_lease_key, matches_filter, ownership, retry, store::ObjectStore,
+    streaming::OwnedDocument, Config, Document, Error, Mutation, Neighbor, Result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -332,6 +332,25 @@ pub(crate) struct RunRef {
     pub(crate) blocks: Vec<BlockRef>,
 }
 
+/// Keys of every takeover's fence objects: takeover records (log
+/// sequences) and fence markers (root generations). A deposed writer may
+/// resume at any time and its next log and root keys are exactly these, so
+/// they are never reclaimed.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Fences {
+    logs: BTreeSet<u64>,
+    roots: BTreeSet<u64>,
+}
+
+impl Fences {
+    fn is_empty(&self) -> bool {
+        self.logs.is_empty() && self.roots.is_empty()
+    }
+}
+
+/// Root version 1 has no fences; version 2 is identical plus a nonempty
+/// fence set, so namespaces without a fenced takeover keep version 1.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Root {
@@ -341,6 +360,65 @@ pub(crate) struct Root {
     config: Config,
     retry: retry::State,
     pub(crate) runs: Vec<RunRef>,
+    #[serde(default, skip_serializing_if = "Fences::is_empty")]
+    fences: Fences,
+}
+
+/// A fence marker: occupies one root generation so that a deposed writer's
+/// next root publication conflicts. It holds no state; root selection skips
+/// it. Version 3 shares the root keys' version field.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootFence {
+    version: u32,
+    generation: u64,
+}
+
+enum RootObject {
+    Root(Box<Root>),
+    Fence,
+}
+
+/// Decode an object at `root_key(generation)`.
+fn decode_root(bytes: &[u8], config: Config, generation: u64) -> Result<RootObject> {
+    let object = if decode::<MetadataVersion>(bytes)?.version == 3 {
+        let fence: RootFence = decode(bytes)?;
+        if fence.generation != generation {
+            return Err(Error::Corrupt("segmented fence generation mismatch".into()));
+        }
+        RootObject::Fence
+    } else {
+        let root: Root = decode(bytes)?;
+        root.validate(config)?;
+        if root.generation != generation {
+            return Err(Error::Corrupt("segmented root generation mismatch".into()));
+        }
+        RootObject::Root(Box::new(root))
+    };
+    Ok(object)
+}
+
+/// The newest root at or below the listed generations, skipping fence
+/// markers above it, which it returns. `Error::Exists` means a listed object
+/// vanished: only a newer root supersedes one, so the caller retries.
+fn select_root<S: ObjectStore>(
+    store: &S,
+    config: Config,
+    generations: &BTreeSet<u64>,
+) -> Result<(Root, Vec<u64>)> {
+    let mut markers = Vec::new();
+    for &generation in generations.iter().rev() {
+        let key = root_key(generation);
+        match decode_root(
+            &store.get(&key)?.ok_or(Error::Exists(key))?,
+            config,
+            generation,
+        )? {
+            RootObject::Root(root) => return Ok((*root, markers)),
+            RootObject::Fence => markers.push(generation),
+        }
+    }
+    Err(Error::Corrupt("no segmented root below the fences".into()))
 }
 
 impl Root {
@@ -352,11 +430,25 @@ impl Root {
             config,
             retry: retry::State::default(),
             runs: Vec::new(),
+            fences: Fences::default(),
         }
     }
 
     pub(crate) fn validate(&self, config: Config) -> Result<()> {
-        if self.version != 1 || self.config != config || self.runs.len() > 64 {
+        let fences_valid = match self.version {
+            1 => self.fences.is_empty(),
+            2 => {
+                !self.fences.is_empty()
+                    && !self.fences.logs.contains(&0)
+                    && self
+                        .fences
+                        .roots
+                        .iter()
+                        .all(|&generation| generation > 0 && generation < self.generation)
+            }
+            _ => false,
+        };
+        if !fences_valid || self.config != config || self.runs.len() > 64 {
             return Err(Error::Corrupt("invalid segmented root identity".into()));
         }
         self.retry.validate(self.sequence)?;
@@ -696,29 +788,188 @@ struct LogEntry {
     outcome: retry::Outcome,
 }
 
-/// Decode a log object of either version into its entries in order.
-fn decode_log(bytes: &[u8], first_sequence: u64) -> Result<Vec<LogRecordV1>> {
+/// Log version 3: a writer takeover record. It carries no request and
+/// changes no document; its sequence is the new writer's epoch. Occupying
+/// that key fences every earlier writer, whose next log key it is.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TakeoverRecord {
+    version: u32,
+    sequence: u64,
+}
+
+enum LogObject {
+    Requests(Vec<LogRecordV1>),
+    Takeover,
+}
+
+impl LogObject {
+    fn last_sequence(&self, first_sequence: u64) -> u64 {
+        match self {
+            LogObject::Requests(records) => first_sequence + records.len() as u64 - 1,
+            LogObject::Takeover => first_sequence,
+        }
+    }
+}
+
+/// Decode a log object of any version; request entries are in order.
+fn decode_log(bytes: &[u8], first_sequence: u64) -> Result<LogObject> {
     match decode::<MetadataVersion>(bytes)?.version {
-        1 => Ok(vec![decode(bytes)?]),
+        1 => Ok(LogObject::Requests(vec![decode(bytes)?])),
         2 => {
             let record: LogRecordV2 = decode(bytes)?;
             if record.first_sequence != first_sequence || record.entries.len() < 2 {
                 return Err(Error::Corrupt("invalid segmented log group".into()));
             }
-            Ok(record
-                .entries
-                .into_iter()
-                .enumerate()
-                .map(|(offset, entry)| LogRecordV1 {
-                    version: 1,
-                    sequence: first_sequence + offset as u64,
-                    request: entry.request,
-                    outcome: entry.outcome,
-                })
-                .collect())
+            Ok(LogObject::Requests(
+                record
+                    .entries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(offset, entry)| LogRecordV1 {
+                        version: 1,
+                        sequence: first_sequence + offset as u64,
+                        request: entry.request,
+                        outcome: entry.outcome,
+                    })
+                    .collect(),
+            ))
+        }
+        3 => {
+            let record: TakeoverRecord = decode(bytes)?;
+            if record.sequence != first_sequence {
+                return Err(Error::Corrupt("invalid segmented takeover record".into()));
+            }
+            Ok(LogObject::Takeover)
         }
         _ => Err(Error::Corrupt("unsupported segmented log version".into())),
     }
+}
+
+/// Keys that are not database state: lease objects and the claim objects of
+/// the earlier ownership protocol, which takeover fencing supersedes.
+fn is_control_key(key: &str) -> bool {
+    is_lease_key(key) || ownership::is_control_key(key)
+}
+
+/// Fence every earlier writer of an initialized namespace whose state keys
+/// are `keys`: publish a takeover record at the next log sequence, then a
+/// fence marker at the next root generation. A writer publishes logs and
+/// roots only at the key after its newest one, with a conditional create,
+/// so a deposed writer's next publication on either chain conflicts; both
+/// objects are permanent, so it conflicts however late it resumes.
+///
+/// `Error::Exists` means another writer published or superseded an object
+/// after the listing; retry with a fresh listing.
+fn fence<S: ObjectStore>(store: &mut S, config: Config, keys: &[String]) -> Result<()> {
+    let mut generations = BTreeSet::new();
+    let mut last_log = 0;
+    for key in keys {
+        if key.starts_with("sgroot-") {
+            generations.insert(numbered_key(key, "sgroot-")?);
+        } else if key.starts_with("sglog-") {
+            last_log = last_log.max(numbered_key(key, "sglog-")?);
+        }
+    }
+    let (root, _) = select_root(store, config, &generations)?;
+    let mut sequence = root.sequence;
+    if last_log > root.sequence {
+        // Like a root, a listed log vanishes only under a newer root.
+        let object = log_key(last_log);
+        let bytes = store.get(&object)?.ok_or(Error::Exists(object))?;
+        sequence = decode_log(&bytes, last_log)?.last_sequence(last_log);
+    }
+    let epoch = sequence
+        .checked_add(1)
+        .ok_or_else(|| Error::Invalid("sequence exhausted".into()))?;
+    store.create(
+        &log_key(epoch),
+        &encode(&TakeoverRecord {
+            version: 3,
+            sequence: epoch,
+        })?,
+    )?;
+    let generation = generations
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+    store.create(
+        &root_key(generation),
+        &encode(&RootFence {
+            version: 3,
+            generation,
+        })?,
+    )
+}
+
+/// Reject options a namespace cannot declare.
+fn validate_options(options: &SegmentedOptions) -> Result<()> {
+    if options
+        .resident_filter
+        .as_ref()
+        .is_some_and(|(key, _)| key.is_empty())
+    {
+        return Err(Error::Invalid(
+            "resident filter key must be nonempty".into(),
+        ));
+    }
+    if options.routed_keys.len() > 4
+        || options.routed_keys.iter().any(String::is_empty)
+        || options
+            .routed_keys
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(Error::Invalid(
+            "routed keys must be sorted, unique, nonempty and at most four".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// List the namespace's state keys, sorted, after creating metadata and
+/// root zero on a fresh (or interrupted first) open, and check the stored
+/// metadata against `config` and `options`.
+fn initialize<S: ObjectStore>(
+    store: &mut S,
+    config: Config,
+    options: &SegmentedOptions,
+) -> Result<Vec<String>> {
+    let mut keys: Vec<_> = store
+        .list()?
+        .into_iter()
+        .filter(|key| !is_control_key(key))
+        .collect();
+    keys.sort();
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::Corrupt("duplicate segmented object key".into()));
+    }
+    if keys.is_empty() {
+        store.create("metadata", &metadata_bytes(config, options)?)?;
+        store.create(&root_key(0), &encode(&Root::empty(config))?)?;
+        return Ok(vec!["metadata".into(), root_key(0)]);
+    }
+    if keys.iter().filter(|key| key.as_str() == "metadata").count() != 1 {
+        return Err(Error::Corrupt("segmented metadata missing".into()));
+    }
+    check_metadata(
+        &store
+            .get("metadata")?
+            .ok_or_else(|| Error::Corrupt("listed segmented metadata missing".into()))?,
+        config,
+        options,
+    )?;
+    if keys == ["metadata"] {
+        // An interrupted first open may have published metadata only.
+        store.create(&root_key(0), &encode(&Root::empty(config))?)?;
+        keys.push(root_key(0));
+    }
+    if !keys.contains(&root_key(0)) {
+        return Err(Error::Corrupt("segmented root zero missing".into()));
+    }
+    Ok(keys)
 }
 
 fn log_key(sequence: u64) -> String {
@@ -885,14 +1136,17 @@ struct SealState {
     index_published: bool,
 }
 
-/// Experimental segmented namespace. Vectors in committed runs are fetched by
-/// block. The caller must enforce one exclusive object-store owner and use a
-/// fresh namespace; the current serving API does not use this engine yet.
+/// Segmented namespace. Vectors in committed runs are fetched by block.
+/// [`SegmentedDatabase::take_over`] fences earlier writers before opening;
+/// a plain [`SegmentedDatabase::open`] leaves exclusivity to the caller.
 pub struct SegmentedDatabase<S> {
     store: S,
     config: Config,
     root: Root,
     sequence: u64,
+    /// Every known fence: the selected root's, markers above it and
+    /// takeover records in the tail. Carried into each published root.
+    fences: Fences,
     retry: retry::State,
     latest: Directory,
     tail: BTreeMap<u64, (u64, Option<Document>)>,
@@ -917,6 +1171,27 @@ pub struct SegmentedDatabase<S> {
 impl<S: ObjectStore> SegmentedDatabase<S> {
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// The writer epoch: the sequence of the namespace's newest takeover
+    /// record, or 0 if it was never taken over. Every takeover increases it.
+    pub fn epoch(&self) -> u64 {
+        self.fences.logs.last().copied().unwrap_or(0)
+    }
+
+    /// A copy of the selected root at the next free generation (above every
+    /// fence marker) carrying the namespace's fences.
+    fn next_root(&self) -> Result<Root> {
+        let mut root = self.root.clone();
+        root.generation = self
+            .root
+            .generation
+            .max(self.fences.roots.last().copied().unwrap_or(0))
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        root.fences = self.fences.clone();
+        root.version = if root.fences.is_empty() { 1 } else { 2 };
+        Ok(root)
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -950,10 +1225,6 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Err(Error::RecoveryRequired);
         }
         Ok(self.retry.lookup(id, self.sequence))
-    }
-
-    pub(crate) fn into_store(self) -> S {
-        self.store
     }
 
     /// Reclaim a mostly dead pack only if it frees at least this many
@@ -1153,75 +1424,58 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Self::open_with_options(store, config, SegmentedOptions::default())
     }
 
+    /// [`SegmentedDatabase::take_over_with_options`] with default options.
+    pub fn take_over(store: S, config: Config) -> Result<Self> {
+        Self::take_over_with_options(store, config, SegmentedOptions::default())
+    }
+
+    /// Become the namespace's only writer, creating it if absent, then open
+    /// it. Takeover publishes a takeover record at the next log sequence and
+    /// a fence marker at the next root generation, both permanent, so every
+    /// earlier writer (dead, paused or partitioned) fails its next log or
+    /// root publication at the object store, however late, and acknowledges
+    /// nothing more. The open lists after both fences, so it includes every
+    /// write an earlier writer acknowledged. Correctness needs no clocks; a
+    /// [`crate::lease::Lease`] only keeps processes from deposing a live
+    /// writer.
+    ///
+    /// Each takeover consumes one sequence and one root generation and
+    /// raises [`SegmentedDatabase::epoch`]. An error may leave either fence
+    /// published; both are valid state and the next takeover adds its own.
+    /// `Error::Exists` means another writer published concurrently; retry
+    /// with a fresh store handle.
+    pub fn take_over_with_options(
+        mut store: S,
+        config: Config,
+        options: SegmentedOptions,
+    ) -> Result<Self> {
+        config.validate()?;
+        validate_options(&options)?;
+        let keys = initialize(&mut store, config, &options)?;
+        fence(&mut store, config, &keys)?;
+        Self::open_with_options(store, config, options)
+    }
+
     /// Open or create a namespace whose metadata declares `options`. Opening
-    /// with options different from the persisted declaration fails.
+    /// with options different from the persisted declaration fails. This
+    /// fences nothing: the caller must ensure no other writer is active.
     pub fn open_with_options(
         mut store: S,
         config: Config,
         options: SegmentedOptions,
     ) -> Result<Self> {
         config.validate()?;
-        if options
-            .resident_filter
-            .as_ref()
-            .is_some_and(|(key, _)| key.is_empty())
-        {
-            return Err(Error::Invalid(
-                "resident filter key must be nonempty".into(),
-            ));
-        }
-        if options.routed_keys.len() > 4
-            || options.routed_keys.iter().any(String::is_empty)
-            || options
-                .routed_keys
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
-        {
-            return Err(Error::Invalid(
-                "routed keys must be sorted, unique, nonempty and at most four".into(),
-            ));
-        }
-        let mut keys = store.list()?;
-        keys.sort();
-        if keys.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(Error::Corrupt("duplicate segmented object key".into()));
-        }
-        if keys.is_empty() {
-            store.create("metadata", &metadata_bytes(config, &options)?)?;
-            store.create(&root_key(0), &encode(&Root::empty(config))?)?;
-            keys = vec!["metadata".into(), root_key(0)];
-        } else if keys == ["metadata"] {
-            // An interrupted first open may have published metadata only.
-            let bytes = store
-                .get("metadata")?
-                .ok_or_else(|| Error::Corrupt("listed metadata missing".into()))?;
-            check_metadata(&bytes, config, &options)?;
-            store.create(&root_key(0), &encode(&Root::empty(config))?)?;
-            keys.push(root_key(0));
-        }
-        if keys.iter().filter(|key| key.as_str() == "metadata").count() != 1
-            || !keys.contains(&root_key(0))
-        {
-            return Err(Error::Corrupt(
-                "segmented metadata or root zero missing".into(),
-            ));
-        }
-        check_metadata(
-            &store
-                .get("metadata")?
-                .ok_or_else(|| Error::Corrupt("listed segmented metadata missing".into()))?,
-            config,
-            &options,
-        )?;
+        validate_options(&options)?;
+        let keys = initialize(&mut store, config, &options)?;
         let listed: BTreeSet<_> = keys.iter().cloned().collect();
-        let mut latest_generation = 0;
+        let mut generations = BTreeSet::new();
         let mut logs = Vec::new();
         for key in &keys {
             if key == "metadata" {
                 continue;
             }
             if key.starts_with("sgroot-") {
-                latest_generation = latest_generation.max(numbered_key(key, "sgroot-")?);
+                generations.insert(numbered_key(key, "sgroot-")?);
             } else if key.starts_with("sglog-") {
                 let sequence = numbered_key(key, "sglog-")?;
                 if sequence == 0 {
@@ -1234,15 +1488,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 return Err(Error::Corrupt(format!("unexpected segmented key: {key}")));
             }
         }
-        let root: Root = decode(
-            &store
-                .get(&root_key(latest_generation))?
-                .ok_or_else(|| Error::Corrupt("selected segmented root missing".into()))?,
-        )?;
-        root.validate(config)?;
-        if root.generation != latest_generation {
-            return Err(Error::Corrupt("segmented root generation mismatch".into()));
-        }
+        let (root, markers) =
+            select_root(&store, config, &generations).map_err(|error| match error {
+                Error::Exists(_) => Error::Corrupt("selected segmented root missing".into()),
+                error => error,
+            })?;
+        let mut fences = root.fences.clone();
+        fences.roots.extend(markers);
         let mut latest = Directory::default();
         // Size the directory once from the index entry counts, so merging
         // runs does not reallocate it repeatedly.
@@ -1287,13 +1539,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .into_iter()
             .filter(|&sequence| sequence > root.sequence)
             .collect();
-        if tail_logs.len() > MAX_TAIL_OBJECTS {
-            return Err(Error::Corrupt("segmented replay tail exceeds bound".into()));
-        }
         let mut db = Self {
             store,
             config,
             sequence: root.sequence,
+            fences,
             retry: root.retry.clone(),
             root,
             latest,
@@ -1314,19 +1564,37 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             prune: None,
             poisoned: false,
         };
+        // Takeover records hold no request, so only request objects count
+        // toward the replay bound; repeated takeovers cannot block opening.
+        let mut request_objects = 0;
         for chunk in tail_logs.chunks(8) {
             let keys: Vec<_> = chunk.iter().map(|&sequence| log_key(sequence)).collect();
             for (&log_sequence, bytes) in chunk.iter().zip(db.store.get_many(&keys)?) {
                 if db.sequence.checked_add(1) != Some(log_sequence) {
                     return Err(Error::Corrupt("segmented mutation log gap".into()));
                 }
-                let records = decode_log(
+                let log = decode_log(
                     &bytes.ok_or_else(|| Error::Corrupt("listed segmented log missing".into()))?,
                     log_sequence,
                 )?;
-                for record in records {
-                    let expected = db.sequence + 1;
-                    db.replay(record, expected)?;
+                match log {
+                    LogObject::Requests(records) => {
+                        request_objects += 1;
+                        if request_objects > MAX_TAIL_OBJECTS {
+                            return Err(Error::Corrupt(
+                                "segmented replay tail exceeds bound".into(),
+                            ));
+                        }
+                        for record in records {
+                            let expected = db.sequence + 1;
+                            db.replay(record, expected)?;
+                        }
+                    }
+                    LogObject::Takeover => {
+                        db.retry.advance(log_sequence, &[]);
+                        db.sequence = log_sequence;
+                        db.fences.logs.insert(log_sequence);
+                    }
                 }
                 db.tail_logs.push_back(log_sequence);
                 db.tail_objects += 1;
@@ -1460,9 +1728,15 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 retained.insert(block.object.clone());
             }
         }
-        for &sequence in &self.tail_logs {
+        for &sequence in self.tail_logs.iter().chain(&self.fences.logs) {
             retained.insert(log_key(sequence));
         }
+        retained.extend(
+            self.fences
+                .roots
+                .iter()
+                .map(|&generation| root_key(generation)),
+        );
         self.obsolete = self.known_keys.difference(&retained).cloned().collect();
     }
 
@@ -1655,9 +1929,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = true;
         let object = log_key(first);
         if let Err(error) = self.store.create(&object, &bytes) {
+            // A conditional-create conflict proves these bytes were not
+            // written: a later writer took over and fenced this handle.
+            let fenced = matches!(error, Error::Exists(_));
             let message = error.to_string();
             for &index in &accepted {
-                results[index] = Some(Err(Error::Io(std::io::Error::other(message.clone()))));
+                results[index] = Some(Err(if fenced {
+                    Error::Busy(format!(
+                        "this writer was fenced by a takeover at {object}; not committed"
+                    ))
+                } else {
+                    Error::Io(std::io::Error::other(message.clone()))
+                }));
             }
             return results.into_iter().map(Option::unwrap).collect();
         }
@@ -1975,12 +2258,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.seal = Some(seal);
             return Ok(true);
         }
-        let mut root = self.root.clone();
-        root.generation = self
-            .root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         root.sequence = seal.boundary;
         root.retry = seal.retry;
         if !seal.entries.is_empty() {
@@ -2101,11 +2379,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             entries.push(entry);
         }
         drop((left, right));
-        let mut root = self.root.clone();
-        root.generation = root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         let attempt = attempt_id()?;
         let replacement = if entries.is_empty() {
             None
@@ -2237,11 +2511,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 entries.push(entry);
             }
         }
-        let mut root = self.root.clone();
-        root.generation = root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         let index = if entries.is_empty() {
             root.runs.remove(run);
             None
@@ -2509,11 +2779,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.reclaim = Some(state);
             return Ok(true);
         }
-        let mut root = self.root.clone();
-        root.generation = root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         for (index, &(run, block)) in state.locations.iter().enumerate() {
             root.runs[run].blocks[block] = state.references.as_ref().unwrap()[index].clone();
         }

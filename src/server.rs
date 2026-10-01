@@ -1,12 +1,16 @@
 //! HTTP/JSON service for one segmented collection.
 //!
 //! One process owns one namespace through `SegmentedServing` behind the
-//! bounded admission queue. Writes are acknowledged only after durable
-//! publication; every write carries a request ID (supplied by the client for
-//! safe retries, otherwise issued by the server and returned).
+//! bounded admission queue. Startup acquires the namespace's renewed lease
+//! (waiting out a dead writer's lease) and takes over with fencing, so a
+//! restart after a crash needs no operator step. Writes are acknowledged
+//! only after durable publication; every write carries a request ID
+//! (supplied by the client for safe retries, otherwise issued by the server
+//! and returned).
 use crate::segmented::QueryOptions;
 use crate::{
     admission::{self, Client, Limits, Service, Shutdown},
+    lease::{is_lease_key, Keeper, Lease},
     ownership::is_control_key,
     retry::{Conflict, Lookup, Outcome, Request, RequestId},
     segmented::{SegmentedDatabase, SegmentedOptions, SegmentedServing, SegmentedServingOptions},
@@ -35,8 +39,9 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
+use tokio::sync::Notify;
 
 /// The namespace's backing store: a local directory for development, or an
 /// S3-compatible bucket.
@@ -100,8 +105,12 @@ pub struct ServerConfig {
     pub limits: Limits,
     /// Required `Authorization: Bearer` token, if set.
     pub token: Option<String>,
+    /// Writer lease duration: a restart after a crash waits at most this
+    /// long before taking over. It never affects correctness.
+    pub lease: Duration,
 }
 
+#[derive(Clone)]
 pub enum StoreConfig {
     Local(PathBuf),
     S3 {
@@ -136,6 +145,7 @@ impl ServerConfig {
     ///   namespace), `GLIDER_LOCAL_BLOCKS` (cached blocks a query may rerank
     ///   locally beyond its remote budget, default 24; 0 makes results
     ///   independent of cache contents)
+    /// - `GLIDER_LEASE_SECONDS` (default 10): writer lease duration
     pub fn from_env() -> crate::Result<Self> {
         let invalid = |name: &str| Error::Invalid(format!("invalid {name}"));
         let dimensions = required("GLIDER_DIMENSIONS")?
@@ -204,6 +214,14 @@ impl ServerConfig {
                 ..Limits::default()
             },
             token: env("GLIDER_API_TOKEN"),
+            lease: match env("GLIDER_LEASE_SECONDS") {
+                Some(seconds) => seconds
+                    .parse()
+                    .ok()
+                    .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+                    .ok_or_else(|| invalid("GLIDER_LEASE_SECONDS"))?,
+                None => Duration::from_secs(10),
+            },
         })
     }
 
@@ -212,22 +230,112 @@ impl ServerConfig {
         self.store.open()
     }
 
-    /// Claim and open the collection for serial administrative work.
-    pub fn open_engine(&self) -> crate::Result<SegmentedServing<Store>> {
-        SegmentedServing::open(
-            self.open_store()?,
-            self.collection,
-            self.options.clone(),
-            self.serving.clone(),
-        )
+    /// Acquire the writer lease, take over the collection, run serial
+    /// administrative work, then release the lease. Blocking; waits out a
+    /// lease left by a dead writer and fails busy while one is renewed.
+    pub fn with_engine<T>(
+        &self,
+        work: impl FnOnce(&mut SegmentedServing<Store>) -> crate::Result<T>,
+    ) -> crate::Result<T> {
+        let keeper = self.acquire_lease(|| {})?;
+        let result = self.take_over().and_then(|mut engine| {
+            let value = work(&mut engine)?;
+            engine.close()?;
+            Ok(value)
+        });
+        let released = keeper.release();
+        let value = result?;
+        released?;
+        Ok(value)
     }
 
-    /// Claim the namespace and start the admission worker. Blocking.
-    pub fn start(&self) -> crate::Result<Service<SegmentedServing<Store>>> {
-        Service::start(self.open_engine()?, self.limits).map_err(|error| match error {
-            admission::Error::Database(error) => error,
-            other => Error::Invalid(other.to_string()),
-        })
+    /// Acquire the writer lease, take over the collection and start the
+    /// admission worker with background lease renewal. Blocking.
+    pub fn start(&self) -> crate::Result<Running> {
+        let deposed = Arc::new(Notify::new());
+        let keeper = self.acquire_lease({
+            let deposed = deposed.clone();
+            move || deposed.notify_one()
+        })?;
+        let service = self
+            .take_over()
+            .and_then(|engine| Service::start(engine, self.limits).map_err(database_error));
+        match service {
+            Ok(service) => Ok(Running {
+                service,
+                keeper,
+                deposed,
+            }),
+            Err(error) => {
+                // The lease only paces takeovers; if this release fails too,
+                // it expires after its duration.
+                let _ = keeper.release();
+                Err(error)
+            }
+        }
+    }
+
+    fn acquire_lease(
+        &self,
+        on_deposed: impl FnOnce() + Send + 'static,
+    ) -> crate::Result<Keeper<Store>> {
+        let store = self.store.clone();
+        Lease::acquire(move || store.open(), self.lease)?.keep(on_deposed)
+    }
+
+    /// Take over with fencing. A conflict means an earlier writer published
+    /// during the takeover; each attempt re-lists through a fresh handle.
+    fn take_over(&self) -> crate::Result<SegmentedServing<Store>> {
+        const ATTEMPTS: usize = 4;
+        let mut attempt = 1;
+        loop {
+            match SegmentedServing::open(
+                self.open_store()?,
+                self.collection,
+                self.options.clone(),
+                self.serving.clone(),
+            ) {
+                Err(Error::Exists(_)) if attempt < ATTEMPTS => attempt += 1,
+                other => return other,
+            }
+        }
+    }
+}
+
+fn database_error(error: admission::Error) -> Error {
+    match error {
+        admission::Error::Database(error) => error,
+        other => Error::Invalid(other.to_string()),
+    }
+}
+
+/// A started server: the admission worker over a taken-over engine, and the
+/// background renewal of its writer lease.
+pub struct Running {
+    service: Service<Engine0>,
+    keeper: Keeper<Store>,
+    deposed: Arc<Notify>,
+}
+
+impl Running {
+    pub fn client(&self) -> Client<Engine0> {
+        self.service.client()
+    }
+
+    /// Notified once if lease renewal finds that another process took over;
+    /// this server's writes are then fenced and it should stop.
+    pub fn deposed(&self) -> Arc<Notify> {
+        self.deposed.clone()
+    }
+
+    /// Stop the worker according to `mode`, then release the lease so the
+    /// next process takes over without waiting. The lease is released even
+    /// after a worker failure: the next takeover fences any late request.
+    pub fn shutdown(self, mode: Shutdown) -> crate::Result<()> {
+        let stopped = self.service.shutdown(mode).map_err(database_error);
+        let released = self.keeper.release();
+        stopped?;
+        released
     }
 }
 
@@ -283,7 +391,7 @@ pub fn stage_segmented_namespace(
     let mut copied = 0;
     let mut bytes = 0;
     for key in keys.iter().filter(|key| *key != "metadata") {
-        if is_control_key(key) {
+        if is_control_key(key) || is_lease_key(key) {
             continue;
         }
         let payload = source
@@ -832,14 +940,15 @@ pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
 }
 
 /// Serve until SIGINT or SIGTERM, then drain queued work and release the
-/// namespace's ownership claim. A worker failure keeps the claim; follow
-/// `docs/RECOVERY.md` before reopening.
+/// writer lease. Stops early, with an error, if another process takes over
+/// (only possible after this process failed to renew for a full lease).
 pub async fn run(config: ServerConfig) -> crate::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    let service = tokio::task::block_in_place(|| config.start())?;
-    let app = router(service.client(), config.token.clone());
+    let running = tokio::task::block_in_place(|| config.start())?;
+    let app = router(running.client(), config.token.clone());
+    let deposed = running.deposed();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let interrupt = tokio::signal::ctrl_c();
             #[cfg(unix)]
             {
@@ -849,14 +958,15 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
                 tokio::select! {
                     _ = interrupt => {},
                     _ = terminate.recv() => {},
+                    _ = deposed.notified() => {},
                 }
             }
             #[cfg(not(unix))]
-            let _ = interrupt.await;
+            tokio::select! {
+                _ = interrupt => {},
+                _ = deposed.notified() => {},
+            }
         })
         .await?;
-    tokio::task::block_in_place(|| service.shutdown(Shutdown::Drain)).map_err(|error| match error {
-        admission::Error::Database(error) => error,
-        other => Error::Invalid(other.to_string()),
-    })
+    tokio::task::block_in_place(|| running.shutdown(Shutdown::Drain))
 }

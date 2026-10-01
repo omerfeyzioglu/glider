@@ -216,7 +216,9 @@ fn service_interleaves_maintenance_and_backup_restores_the_committed_view() {
     )
     .unwrap();
     assert!(db.database().run_count() > 0);
-    assert_eq!(db.database().sequence(), sequence);
+    // The reopen took over: its takeover record is the next sequence.
+    assert_eq!(db.database().sequence(), sequence + 1);
+    assert_eq!(db.database().epoch(), sequence + 1);
     assert_eq!(db.database().sketch_rebuilds(), 0);
     while db.maintenance_step().unwrap() {}
     let queries: Vec<_> = (0..20).map(|n| vector(n * 31, 3)).collect();
@@ -246,7 +248,7 @@ fn service_interleaves_maintenance_and_backup_restores_the_committed_view() {
         options(),
     )
     .unwrap();
-    assert_eq!(restored.sequence(), sequence);
+    assert_eq!(restored.sequence(), sequence + 1);
     assert_eq!(restored.sketch_rebuilds(), 0);
     for query in &queries {
         assert_eq!(
