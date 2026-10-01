@@ -254,7 +254,7 @@ pub(super) fn metadata_matches(entries: u32, mut bytes: &[u8], filter: &[(&str, 
     matched == distinct.len()
 }
 
-fn metadata(entries: u32, mut bytes: &[u8]) -> BTreeMap<String, String> {
+pub(super) fn metadata(entries: u32, mut bytes: &[u8]) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for _ in 0..entries {
         let mut text = || {

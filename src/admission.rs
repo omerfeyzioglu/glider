@@ -1,4 +1,5 @@
 //! Bounded FIFO admission; one worker owns all reads, publication and maintenance.
+use crate::segmented::{QueryHit, QueryOptions};
 use crate::{
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     serving::{SearchMode, SingleMachine},
@@ -26,6 +27,34 @@ pub trait Engine: Send + 'static {
         k: usize,
         filter: &[(&str, &str)],
     ) -> crate::Result<Vec<Neighbor>>;
+    fn query_with_options(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> crate::Result<Vec<QueryHit>> {
+        self.query(query, k, filter)?
+            .into_iter()
+            .map(|neighbor| {
+                let document = if options.include_metadata || options.include_vector {
+                    Some(self.get(neighbor.id)?.ok_or_else(|| {
+                        crate::Error::Corrupt("query hit missing from current documents".into())
+                    })?)
+                } else {
+                    None
+                };
+                Ok(QueryHit {
+                    id: neighbor.id,
+                    distance: neighbor.distance,
+                    metadata: document
+                        .as_ref()
+                        .and_then(|d| options.include_metadata.then(|| d.metadata.clone())),
+                    vector: document.and_then(|d| options.include_vector.then_some(d.vector)),
+                })
+            })
+            .collect()
+    }
     /// Run at most one bounded maintenance unit while no command is queued.
     /// Returns whether work was performed.
     fn idle_step(&mut self) -> crate::Result<bool> {
@@ -180,6 +209,7 @@ pub struct Observation {
 pub struct QueryResult {
     pub sequence: u64,
     pub neighbors: Vec<Neighbor>,
+    pub hits: Vec<QueryHit>,
     /// Remote object reads and payload bytes this query caused.
     pub remote_reads: u64,
     pub remote_bytes: u64,
@@ -436,6 +466,16 @@ impl<E: Engine> Client<E> {
         k: usize,
         filter: Vec<(String, String)>,
     ) -> Result<Ticket<QueryResult>> {
+        self.query_with_options(query, k, filter, QueryOptions::default())
+    }
+
+    pub fn query_with_options(
+        &self,
+        query: Vec<f32>,
+        k: usize,
+        filter: Vec<(String, String)>,
+        options: QueryOptions,
+    ) -> Result<Ticket<QueryResult>> {
         self.config.vector(&query)?;
         if filter.len() > 100 {
             return Err(crate::Error::Invalid("at most 100 equality predicates".into()).into());
@@ -454,13 +494,15 @@ impl<E: Engine> Client<E> {
                     .map(|(k, v)| (k.as_str(), v.as_str()))
                     .collect();
                 let (reads, bytes) = db.remote_reads();
-                let neighbors = db.query(&query, k, &borrowed)?;
+                let hits = db.query_with_options(&query, k, &borrowed, options)?;
+                let neighbors = hits.iter().map(QueryHit::neighbor).collect();
                 let (reads_after, bytes_after) = db.remote_reads();
                 Ok(QueryResult {
                     sequence: db.sequence(),
                     remote_reads: reads_after - reads,
                     remote_bytes: bytes_after - bytes,
                     neighbors,
+                    hits,
                 })
             })
         })

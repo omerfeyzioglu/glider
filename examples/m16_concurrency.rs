@@ -131,6 +131,7 @@ impl Target {
                     value: QueryResult {
                         sequence: db.status().maintenance.sequence,
                         neighbors,
+                        hits: Vec::new(),
                         remote_reads: 0,
                         remote_bytes: 0,
                     },

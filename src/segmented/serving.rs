@@ -1,7 +1,7 @@
 //! Single-owner segmented serving. Queries use the persisted sketches; seal,
 //! consolidation, pruning, reclamation and cleanup advance in bounded units
 //! that the admission worker runs only while no command is queued.
-use super::{root_key, ReadBudget, SegmentedDatabase, SegmentedOptions};
+use super::{root_key, QueryHit, QueryOptions, ReadBudget, SegmentedDatabase, SegmentedOptions};
 use crate::{
     admission::{Engine, EngineMetrics},
     ownership::OwnedStore,
@@ -391,17 +391,21 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
         self.db
             .search_selective_within(query, k, self.options.read_budget, filter)
     }
+    fn query_with_options(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
+        self.db
+            .search_selective_within_options(query, k, self.options.read_budget, filter, options)
+    }
     fn idle_step(&mut self) -> Result<bool> {
         self.maintenance_step()
     }
     fn remote_reads(&self) -> (u64, u64) {
-        self.db
-            .cache_stats()
-            .ok()
-            .flatten()
-            .map_or((0, 0), |stats| {
-                (stats.remote_fetches, stats.remote_payload_bytes)
-            })
+        self.db.query_remote_reads()
     }
     fn metrics(&self) -> Result<EngineMetrics> {
         let cache = self.db.cache_stats()?.unwrap_or_default();

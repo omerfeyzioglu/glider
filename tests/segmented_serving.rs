@@ -1,7 +1,10 @@
 use glider::{
     admission::{Limits, Service, Shutdown},
     retry::{Request, RequestId},
-    segmented::{SegmentedDatabase, SegmentedOptions, SegmentedServing, SegmentedServingOptions},
+    segmented::{
+        QueryOptions, SegmentedDatabase, SegmentedOptions, SegmentedServing,
+        SegmentedServingOptions,
+    },
     store::LocalStore,
     Config, Metric, Mutation,
 };
@@ -40,6 +43,104 @@ fn vector(id: u64, generation: u64) -> Vec<f32> {
 
 fn ids(results: &[glider::Neighbor]) -> Vec<u64> {
     results.iter().map(|neighbor| neighbor.id).collect()
+}
+
+#[test]
+fn resident_fields_charge_only_final_hit_block_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("db");
+    let mut db =
+        SegmentedDatabase::open_with_options(LocalStore::open(&path).unwrap(), config(), options())
+            .unwrap();
+    db.apply_request(Request {
+        id: RequestId {
+            boundary: 0,
+            nonce: [1; 16],
+        },
+        conditions: Vec::new(),
+        mutations: (0..5)
+            .map(|id| Mutation::Put {
+                id,
+                vector: vector(id, 0),
+                metadata: BTreeMap::from([("cohort".into(), "one-percent".into())]),
+            })
+            .collect(),
+    })
+    .unwrap();
+    db.seal_delta().unwrap();
+    drop(db);
+    let service = Service::start(
+        SegmentedServing::open(
+            LocalStore::open(&path).unwrap(),
+            config(),
+            options(),
+            serving(&temp.path().join("cache")),
+        )
+        .unwrap(),
+        Limits::default(),
+    )
+    .unwrap();
+    let client = service.client();
+    let filter = vec![("cohort".into(), "one-percent".into())];
+    let plain = client
+        .query(vector(0, 0), 1, filter.clone())
+        .unwrap()
+        .wait()
+        .unwrap()
+        .value;
+    assert_eq!(plain.remote_reads, 0);
+    let with_fields = client
+        .query_with_options(
+            vector(0, 0),
+            1,
+            filter,
+            QueryOptions {
+                include_metadata: true,
+                include_vector: true,
+            },
+        )
+        .unwrap()
+        .wait()
+        .unwrap()
+        .value;
+    assert_eq!(with_fields.remote_reads, 1);
+    assert_eq!(with_fields.hits.len(), 1);
+    assert_eq!(
+        with_fields.hits[0].metadata.as_ref().unwrap()["cohort"],
+        "one-percent"
+    );
+    service.shutdown(Shutdown::Drain).unwrap();
+
+    let mut no_cache = serving(&temp.path().join("unused-cache"));
+    no_cache.cache = None;
+    let service = Service::start(
+        SegmentedServing::open(
+            LocalStore::open(&path).unwrap(),
+            config(),
+            options(),
+            no_cache,
+        )
+        .unwrap(),
+        Limits::default(),
+    )
+    .unwrap();
+    let result = service
+        .client()
+        .query_with_options(
+            vector(0, 0),
+            1,
+            vec![("cohort".into(), "one-percent".into())],
+            QueryOptions {
+                include_metadata: true,
+                include_vector: false,
+            },
+        )
+        .unwrap()
+        .wait()
+        .unwrap()
+        .value;
+    assert_eq!(result.remote_reads, 1);
+    service.shutdown(Shutdown::Drain).unwrap();
 }
 
 #[test]

@@ -313,7 +313,12 @@ read and its blocks share that buffer. Blocks are authenticated, checked against
 and exactly reranked with the live tail on scoped threads. The result is
 approximate. With exactly the declared resident predicate the query scans the
 resident full-precision vectors and matching tail rows and is exact, with no
-block reads. For other conjunctions, routing considers only live rows whose
+block reads by default. Requested metadata/vector travel with the same version
+scored during block reranking or from the in-memory tail. Only resident-filter
+queries with requested fields fetch documents for their final k hits through
+the block cache (and charge any remote reads); the fetched vector is checked
+against the scored distance before returning its metadata. For other
+conjunctions, routing considers only live rows whose
 codes match every predicate on a declared routed key or have overflow code
 255; a block with no candidate row is omitted. Unrouted predicates do not
 affect routing. Reranking still applies the full filter to authenticated
@@ -979,6 +984,8 @@ are in `docs/SERVING.md` and `docs/RECOVERY.md`.
 `glider-server` (feature `server`) exposes one segmented collection over
 HTTP/JSON through an axum router in front of `admission::Service`; blocking
 ticket waits run on Tokio's blocking pool. Every write carries a request ID:
+`/v1/query` optionally includes metadata and/or vector on each hit; omitted
+flags preserve the ID-and-distance response.
 a client-supplied ID makes the request safely retryable, otherwise the server
 issues one at the current sequence and returns it, so an uncertain response
 can be resolved through the request lookup. HTTP adds no durability step:
