@@ -15,6 +15,9 @@ use std::{
 mod cache;
 use cache::BlockCache;
 mod codec;
+// M37 stage 1 defines the formats before the clustered serving path uses them.
+#[allow(dead_code)]
+mod clustered;
 mod directory;
 use directory::Directory;
 mod serving;
@@ -346,8 +349,8 @@ impl Fences {
     }
 }
 
-/// Root version 1 has no fences; version 2 is identical plus a nonempty
-/// fence set, so namespaces without a fenced takeover keep version 1.
+/// Root v1 has no fences, v2 adds takeover fences, and v4 adds a clustered
+/// view. Version 3 is reserved for fence markers.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Root {
@@ -359,6 +362,12 @@ pub(crate) struct Root {
     pub(crate) runs: Vec<RunRef>,
     #[serde(default, skip_serializing_if = "Fences::is_empty")]
     fences: Fences,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "clustered::deserialize_view_ref"
+    )]
+    clustered: Option<clustered::ViewRef>,
 }
 
 /// A fence marker: occupies one root generation so that a deposed writer's
@@ -428,14 +437,29 @@ impl Root {
             retry: retry::State::default(),
             runs: Vec::new(),
             fences: Fences::default(),
+            clustered: None,
         }
     }
 
     pub(crate) fn validate(&self, config: Config) -> Result<()> {
         let fences_valid = match self.version {
-            1 => self.fences.is_empty(),
+            1 => self.fences.is_empty() && self.clustered.is_none(),
             2 => {
-                !self.fences.is_empty()
+                self.clustered.is_none()
+                    && !self.fences.is_empty()
+                    && !self.fences.logs.contains(&0)
+                    && self
+                        .fences
+                        .roots
+                        .iter()
+                        .all(|&generation| generation > 0 && generation < self.generation)
+            }
+            4 => {
+                self.generation > 0
+                    && self
+                        .clustered
+                        .as_ref()
+                        .is_some_and(|view| view.validate().is_ok())
                     && !self.fences.logs.contains(&0)
                     && self
                         .fences
@@ -1615,7 +1639,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     return Err(Error::Corrupt("segmented log sequence zero".into()));
                 }
                 logs.push(sequence);
-            } else if key.starts_with("sgpack-") || key.starts_with("sgindex-") {
+            } else if key.starts_with("sgpack-")
+                || key.starts_with("sgindex-")
+                || key.starts_with("sgcentroid-")
+                || key.starts_with("sgcluster-")
+            {
                 // Unreferenced objects from an incomplete root are not state.
             } else {
                 return Err(Error::Corrupt(format!("unexpected segmented key: {key}")));
@@ -1626,6 +1654,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 Error::Exists(_) => Error::Corrupt("selected segmented root missing".into()),
                 error => error,
             })?;
+        if root.clustered.is_some() {
+            return Err(Error::Corrupt(
+                "clustered root v4 requires clustered serving support".into(),
+            ));
+        }
         let mut fences = root.fences.clone();
         fences.roots.extend(markers);
         let mut latest = Directory::default();
@@ -3472,6 +3505,145 @@ mod tests {
         let mut wrong = run;
         wrong.index_sha256 = "0".repeat(64);
         assert!(read_run_index(&store, &wrong).is_err());
+    }
+
+    #[test]
+    fn clustered_root_v4_is_strict_and_old_reader_rejects_it() {
+        #[allow(dead_code)]
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct OldRoot {
+            version: u32,
+            generation: u64,
+            sequence: u64,
+            config: Config,
+            retry: retry::State,
+            runs: Vec<RunRef>,
+            fences: Fences,
+        }
+
+        let config = Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        };
+        let mut root = Root::empty(config);
+        root.generation = 1;
+        let legacy = encode(&root).unwrap();
+        assert!(matches!(
+            decode_root(&legacy, config, 1),
+            Ok(RootObject::Root(_))
+        ));
+        root.version = 4;
+        root.sequence = 1;
+        assert!(matches!(root.validate(config), Err(Error::Corrupt(_))));
+        root.clustered = Some(clustered::ViewRef {
+            epoch: 1,
+            centroid: clustered::ObjectRef {
+                key: "sgcentroid-attempt".into(),
+                length: 100,
+                sha256: "a".repeat(64),
+            },
+            catalog: clustered::ObjectRef {
+                key: "sgcluster-attempt".into(),
+                length: 100,
+                sha256: "b".repeat(64),
+            },
+        });
+        let bytes = encode(&root).unwrap();
+        assert!(matches!(
+            decode_root(&bytes, config, 1),
+            Ok(RootObject::Root(_))
+        ));
+        assert!(serde_json::from_slice::<OldRoot>(&bytes).is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(temp.path()).unwrap();
+        store
+            .create(
+                "metadata",
+                &metadata_bytes(config, &SegmentedOptions::default()).unwrap(),
+            )
+            .unwrap();
+        store
+            .create(&root_key(0), &encode(&Root::empty(config)).unwrap())
+            .unwrap();
+        store.create(&root_key(1), &bytes).unwrap();
+        assert!(matches!(
+            SegmentedDatabase::open(store, config),
+            Err(Error::Corrupt(_))
+        ));
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("v1");
+        drop(SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap());
+        let store = LocalStore::open(&path).unwrap();
+        store.create("sgcentroid-orphan", b"incomplete").unwrap();
+        store.create("sgcluster-orphan", b"incomplete").unwrap();
+        let db = SegmentedDatabase::open(store, config).unwrap();
+        assert!(db.search_exact(&[0., 0.], 1, &[]).unwrap().is_empty());
+        for candidate in [
+            &bytes[..bytes.len() - 1],
+            &bytes[..bytes.len() / 2],
+            b"{\"version\":4}".as_slice(),
+        ] {
+            assert!(matches!(
+                decode_root(candidate, config, 1),
+                Err(Error::Corrupt(_))
+            ));
+        }
+        let mut bad: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        bad["clustered"]["centroid"]["sha256"] = "bad".into();
+        assert!(matches!(
+            decode_root(&encode(&bad).unwrap(), config, 1),
+            Err(Error::Corrupt(_))
+        ));
+        let mut bad: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        bad["clustered"]["epoch"] = 0.into();
+        assert!(matches!(
+            decode_root(&encode(&bad).unwrap(), config, 1),
+            Err(Error::Corrupt(_))
+        ));
+        let mut bad: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        bad["clustered"] =
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["clustered"].clone();
+        assert!(matches!(
+            decode_root(&encode(&bad).unwrap(), config, 1),
+            Err(Error::Corrupt(_))
+        ));
+        bad["clustered"] = serde_json::Value::Null;
+        assert!(matches!(
+            decode_root(&encode(&bad).unwrap(), config, 1),
+            Err(Error::Corrupt(_))
+        ));
+        let mut old_v2 = root.clone();
+        old_v2.version = 2;
+        old_v2.fences.logs.insert(1);
+        old_v2.fences.roots.insert(1);
+        old_v2.generation = 2;
+        assert!(matches!(old_v2.validate(config), Err(Error::Corrupt(_))));
+        old_v2.clustered = None;
+        assert!(matches!(
+            decode_root(&encode(&old_v2).unwrap(), config, 2),
+            Ok(RootObject::Root(_))
+        ));
+        let seed = 0x3704_5f30_995a_11c2_u64;
+        let mut rng = PropertyRng(seed);
+        for length in 0..bytes.len() {
+            let outcome = std::panic::catch_unwind(|| decode_root(&bytes[..length], config, 1));
+            assert!(
+                outcome.is_ok(),
+                "root truncation panicked: seed {seed:#x}, {length}"
+            );
+            assert!(matches!(outcome.unwrap(), Err(Error::Corrupt(_))));
+        }
+        for flip in 0..128 {
+            let mut changed = bytes.clone();
+            let offset = rng.next() as usize % changed.len();
+            changed[offset] ^= 1 << (rng.next() % 8);
+            let outcome = std::panic::catch_unwind(|| decode_root(&changed, config, 1));
+            assert!(
+                outcome.is_ok(),
+                "root mutation panicked: seed {seed:#x}, flip {flip}"
+            );
+        }
     }
 
     #[test]
