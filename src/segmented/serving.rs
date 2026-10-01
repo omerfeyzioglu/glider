@@ -205,6 +205,37 @@ impl<S: ObjectStore> SegmentedServing<S> {
         Ok(removed > 0)
     }
 
+    /// At the hard log-tail bound, finish any staged maintenance and a seal
+    /// synchronously before publishing; that time is command maintenance.
+    fn make_room(&mut self) -> Result<()> {
+        if self.db.tail_objects < super::MAX_TAIL_OBJECTS || self.db.poisoned {
+            return Ok(());
+        }
+        let started = Instant::now();
+        self.counters.forced_seals += 1;
+        let result = (|| -> Result<()> {
+            while self.db.prune.is_some() {
+                self.db.prune_step()?;
+            }
+            while self.db.reclaim.is_some() {
+                self.db.reclaim_step()?;
+            }
+            // Finish a seal started while idle; it may already free the
+            // tail. Only then start another.
+            while self.db.seal.is_some() {
+                self.db.seal_step()?;
+            }
+            if self.db.tail_objects >= super::MAX_TAIL_OBJECTS {
+                self.db.seal_delta()?;
+            }
+            Ok(())
+        })();
+        self.maintenance_time += started.elapsed();
+        result?;
+        self.scan_pending = true;
+        Ok(())
+    }
+
     /// Stage the current committed root, its referenced objects (packs carry
     /// their sketches) and the acknowledged log tail into an empty,
     /// nonoverlapping destination.
@@ -229,7 +260,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
                 packs.entry(block.object.as_str()).or_default().push(block);
             }
         }
-        for sequence in db.root.sequence + 1..=db.sequence {
+        for &sequence in &db.tail_logs {
             keys.push(super::log_key(sequence));
         }
         let copy = |destination: &mut D, key: &str| -> Result<Vec<u8>> {
@@ -290,34 +321,19 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
     fn maintenance_time(&self) -> Duration {
         self.maintenance_time
     }
-    /// At the hard log-tail bound, finish a seal synchronously before
-    /// publishing; that time is reported as command maintenance.
     fn apply_request(&mut self, request: Request) -> Result<Outcome> {
-        if self.db.tail_objects >= super::MAX_TAIL_OBJECTS && !self.db.poisoned {
-            let started = Instant::now();
-            self.counters.forced_seals += 1;
-            let result = (|| -> Result<()> {
-                while self.db.prune.is_some() {
-                    self.db.prune_step()?;
-                }
-                while self.db.reclaim.is_some() {
-                    self.db.reclaim_step()?;
-                }
-                // Finish a seal started while idle; it may already free the
-                // tail. Only then start another.
-                while self.db.seal.is_some() {
-                    self.db.seal_step()?;
-                }
-                if self.db.tail_objects >= super::MAX_TAIL_OBJECTS {
-                    self.db.seal_delta()?;
-                }
-                Ok(())
-            })();
-            self.maintenance_time += started.elapsed();
-            result?;
-            self.scan_pending = true;
-        }
+        self.make_room()?;
         self.db.apply_request(request)
+    }
+    fn apply_requests(&mut self, requests: Vec<Request>) -> Vec<Result<Outcome>> {
+        if let Err(error) = self.make_room() {
+            let message = error.to_string();
+            return requests
+                .iter()
+                .map(|_| Err(Error::Io(std::io::Error::other(message.clone()))))
+                .collect();
+        }
+        self.db.apply_requests(requests)
     }
     fn revision(&self, id: u64) -> Revision {
         self.db.revision(id)

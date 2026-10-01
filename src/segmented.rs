@@ -624,6 +624,50 @@ fn root_key(generation: u64) -> String {
     format!("sgroot-{generation:020}")
 }
 
+/// Log version 2: several independent requests published by one
+/// conditional create, with consecutive sequences starting at
+/// `first_sequence`. Its key is the first sequence; a single request still
+/// uses version 1.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogRecordV2 {
+    version: u32,
+    first_sequence: u64,
+    entries: Vec<LogEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogEntry {
+    request: retry::Request,
+    outcome: retry::Outcome,
+}
+
+/// Decode a log object of either version into its entries in order.
+fn decode_log(bytes: &[u8], first_sequence: u64) -> Result<Vec<LogRecordV1>> {
+    match decode::<MetadataVersion>(bytes)?.version {
+        1 => Ok(vec![decode(bytes)?]),
+        2 => {
+            let record: LogRecordV2 = decode(bytes)?;
+            if record.first_sequence != first_sequence || record.entries.len() < 2 {
+                return Err(Error::Corrupt("invalid segmented log group".into()));
+            }
+            Ok(record
+                .entries
+                .into_iter()
+                .enumerate()
+                .map(|(offset, entry)| LogRecordV1 {
+                    version: 1,
+                    sequence: first_sequence + offset as u64,
+                    request: entry.request,
+                    outcome: entry.outcome,
+                })
+                .collect())
+        }
+        _ => Err(Error::Corrupt("unsupported segmented log version".into())),
+    }
+}
+
 fn log_key(sequence: u64) -> String {
     format!("sglog-{sequence:020}")
 }
@@ -750,6 +794,8 @@ pub struct SegmentedDatabase<S> {
     latest: Directory,
     tail: BTreeMap<u64, (u64, Option<Document>)>,
     tail_objects: usize,
+    /// First sequence of each unsealed log object, in order.
+    tail_logs: VecDeque<u64>,
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
     cache: Option<Mutex<BlockCache>>,
@@ -1107,6 +1153,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             latest,
             tail: BTreeMap::new(),
             tail_objects: 0,
+            tail_logs: VecDeque::new(),
             known_keys: listed,
             obsolete: VecDeque::new(),
             cache: None,
@@ -1126,10 +1173,15 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 if db.sequence.checked_add(1) != Some(log_sequence) {
                     return Err(Error::Corrupt("segmented mutation log gap".into()));
                 }
-                let record: LogRecordV1 = decode(
+                let records = decode_log(
                     &bytes.ok_or_else(|| Error::Corrupt("listed segmented log missing".into()))?,
+                    log_sequence,
                 )?;
-                db.replay(record, log_sequence)?;
+                for record in records {
+                    let expected = db.sequence + 1;
+                    db.replay(record, expected)?;
+                }
+                db.tail_logs.push_back(log_sequence);
                 db.tail_objects += 1;
             }
         }
@@ -1252,7 +1304,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 retained.insert(block.object.clone());
             }
         }
-        for sequence in self.root.sequence.saturating_add(1)..=self.sequence {
+        for &sequence in &self.tail_logs {
             retained.insert(log_key(sequence));
         }
         self.obsolete = self.known_keys.difference(&retained).cloned().collect();
@@ -1346,50 +1398,137 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     }
 
     pub fn apply_request(&mut self, request: retry::Request) -> Result<retry::Outcome> {
+        self.apply_requests(vec![request])
+            .pop()
+            .expect("one result per request")
+    }
+
+    /// Publish independent requests in one conditional log create (group
+    /// commit). Each accepted request gets its own consecutive sequence and
+    /// retry receipt, decided in order against the state left by earlier
+    /// requests in the group; duplicates and invalid requests are resolved
+    /// individually without publication. No request is acknowledged or
+    /// visible before the shared create succeeds; if it fails, every
+    /// accepted request's outcome is uncertain and the handle is poisoned.
+    pub fn apply_requests(&mut self, requests: Vec<retry::Request>) -> Vec<Result<retry::Outcome>> {
         if self.poisoned {
-            return Err(Error::RecoveryRequired);
+            return requests
+                .iter()
+                .map(|_| Err(Error::RecoveryRequired))
+                .collect();
         }
-        request.validate(self.config)?;
-        if let Some(outcome) = self.retry.duplicate(&request, self.sequence)? {
-            return Ok(outcome);
+        let mut results: Vec<Option<Result<retry::Outcome>>> =
+            requests.iter().map(|_| None).collect();
+        let mut retry = self.retry.clone();
+        let mut sequence = self.sequence;
+        let mut accepted = Vec::new();
+        for (index, request) in requests.iter().enumerate() {
+            let decided = (|| {
+                request.validate(self.config)?;
+                if let Some(outcome) = retry.duplicate(request, sequence)? {
+                    return Ok((outcome, false));
+                }
+                let next = sequence
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Invalid("sequence exhausted".into()))?;
+                let outcome = retry.decide(request, next);
+                let applied: &[Mutation] = if outcome.conflict.is_none() {
+                    &request.mutations
+                } else {
+                    &[]
+                };
+                retry.advance(next, applied);
+                retry.retain(request, outcome)?;
+                sequence = next;
+                Ok((outcome, true))
+            })();
+            results[index] = Some(match decided {
+                Ok((outcome, publish)) => {
+                    if publish {
+                        accepted.push(index);
+                    }
+                    Ok(outcome)
+                }
+                Err(error) => Err(error),
+            });
+        }
+        if accepted.is_empty() {
+            return results.into_iter().map(Option::unwrap).collect();
         }
         if self.tail_objects >= MAX_TAIL_OBJECTS {
-            return Err(Error::MaintenanceRequired);
+            for &index in &accepted {
+                results[index] = Some(Err(Error::MaintenanceRequired));
+            }
+            return results.into_iter().map(Option::unwrap).collect();
         }
-        let next = self
-            .sequence
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("sequence exhausted".into()))?;
-        let outcome = self.retry.decide(&request, next);
-        let bytes = encode(&LogRecordV1 {
-            version: 1,
-            sequence: next,
-            request: request.clone(),
-            outcome,
-        })?;
-        self.poisoned = true;
-        let object = log_key(next);
-        self.store.create(&object, &bytes)?;
-        self.known_keys.insert(object);
-        let applied = if outcome.conflict.is_none() {
-            request.mutations.as_slice()
-        } else {
-            &[]
+        let first = self.sequence + 1;
+        let outcome = |index: usize| match &results[index] {
+            Some(Ok(outcome)) => *outcome,
+            _ => unreachable!("accepted requests have outcomes"),
         };
-        self.retry.advance(next, applied);
-        self.retry.retain(&request, outcome)?;
-        self.apply_tail(next, applied);
-        for mutation in applied {
-            let (Mutation::Put { id, .. } | Mutation::Delete { id }) = mutation;
-            if let Some(location) = self.latest.get(id) {
-                self.sketches
-                    .mark(location.run, location.entry.block as usize, *id, false);
+        let bytes = if accepted.len() == 1 {
+            encode(&LogRecordV1 {
+                version: 1,
+                sequence: first,
+                request: requests[accepted[0]].clone(),
+                outcome: outcome(accepted[0]),
+            })
+        } else {
+            encode(&LogRecordV2 {
+                version: 2,
+                first_sequence: first,
+                entries: accepted
+                    .iter()
+                    .map(|&index| LogEntry {
+                        request: requests[index].clone(),
+                        outcome: outcome(index),
+                    })
+                    .collect(),
+            })
+        };
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let message = error.to_string();
+                for &index in &accepted {
+                    results[index] = Some(Err(Error::Invalid(message.clone())));
+                }
+                return results.into_iter().map(Option::unwrap).collect();
+            }
+        };
+        self.poisoned = true;
+        let object = log_key(first);
+        if let Err(error) = self.store.create(&object, &bytes) {
+            let message = error.to_string();
+            for &index in &accepted {
+                results[index] = Some(Err(Error::Io(std::io::Error::other(message.clone()))));
+            }
+            return results.into_iter().map(Option::unwrap).collect();
+        }
+        self.known_keys.insert(object);
+        self.retry = retry;
+        for &index in &accepted {
+            let request = &requests[index];
+            let outcome = outcome(index);
+            let applied: &[Mutation] = if outcome.conflict.is_none() {
+                &request.mutations
+            } else {
+                &[]
+            };
+            self.apply_tail(outcome.sequence, applied);
+            for mutation in applied {
+                let (Mutation::Put { id, .. } | Mutation::Delete { id }) = mutation;
+                if let Some(location) = self.latest.get(id) {
+                    self.sketches
+                        .mark(location.run, location.entry.block as usize, *id, false);
+                }
             }
         }
-        self.sequence = next;
+        self.sequence = sequence;
+        self.tail_logs.push_back(first);
         self.tail_objects += 1;
         self.poisoned = false;
-        Ok(outcome)
+        results.into_iter().map(Option::unwrap).collect()
     }
 
     pub fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
@@ -1696,7 +1835,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         self.tail
             .retain(|_, (sequence, _)| *sequence > seal.boundary);
-        self.tail_objects -= (seal.boundary - self.root.sequence) as usize;
+        self.tail_logs.retain(|&first| first > seal.boundary);
+        self.tail_objects = self.tail_logs.len();
         self.root = root;
         let packs: BTreeSet<_> = seal.sketches.iter().map(|s| s.pack().to_owned()).collect();
         for sketch in seal.sketches {
@@ -2414,6 +2554,61 @@ mod tests {
         let db = SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
         assert_eq!(db.sketch_rebuilds(), 0);
         assert_eq!(db.search_exact(&[1_350.; 128], 5, &[]).unwrap(), exact);
+    }
+
+    #[test]
+    fn group_commit_publishes_independent_requests_in_one_log_object() {
+        let config = Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        let put = |nonce: u8, id: u64, value: f32, conditions| retry::Request {
+            id: retry::RequestId {
+                boundary: 0,
+                nonce: [nonce; 16],
+            },
+            conditions,
+            mutations: vec![Mutation::Put {
+                id,
+                vector: vec![value, 0.],
+                metadata: BTreeMap::new(),
+            }],
+        };
+        let first = put(1, 7, 1., Vec::new());
+        // Observed id 7 before the group; the first request changes it.
+        let stale = put(2, 8, 2., vec![retry::Revision { id: 7, boundary: 0 }]);
+        let results = db.apply_requests(vec![first.clone(), stale, first.clone()]);
+        let outcomes: Vec<_> = results.into_iter().map(Result::unwrap).collect();
+        assert_eq!(outcomes[0].sequence, 1);
+        assert_eq!(outcomes[1].sequence, 2);
+        assert_eq!(outcomes[1].conflict, Some(retry::Conflict::StaleRevision));
+        assert_eq!(outcomes[2], outcomes[0]);
+        assert_eq!((db.sequence(), db.tail_objects), (2, 1));
+        let logs = |db: &SegmentedDatabase<LocalStore>| {
+            db.store
+                .list()
+                .unwrap()
+                .into_iter()
+                .filter(|key| key.starts_with("sglog-"))
+                .count()
+        };
+        assert_eq!(logs(&db), 1);
+        db.apply_request(put(3, 9, 3., Vec::new())).unwrap();
+        drop(db);
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        assert_eq!((db.sequence(), db.tail_objects, logs(&db)), (3, 2, 2));
+        assert_eq!(db.get(7).unwrap().unwrap().vector, vec![1., 0.]);
+        assert!(db.get(8).unwrap().is_none());
+        assert_eq!(db.apply_request(first).unwrap(), outcomes[0]);
+        db.seal_delta().unwrap();
+        assert_eq!(db.tail_objects, 0);
+        while db.cleanup_step(16).unwrap() > 0 {}
+        assert_eq!(logs(&db), 0);
+        assert_eq!(db.get(9).unwrap().unwrap().vector, vec![3., 0.]);
     }
 
     #[test]
