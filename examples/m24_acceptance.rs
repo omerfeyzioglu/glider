@@ -381,11 +381,14 @@ fn oracle_ids(oracle: &Value, key: &str, index: usize) -> Result<Vec<u64>> {
         .collect()
 }
 
+/// Per command or unit kind: count, slowest milliseconds, peak bytes raised.
+type Profile = Arc<Mutex<BTreeMap<&'static str, (u64, f64, u64)>>>;
+
 /// Delegating engine that attributes peak-footprint increases and time to
 /// commands and maintenance-unit kinds.
 struct Profiled {
     inner: SegmentedServing<Counted>,
-    profile: Arc<Mutex<BTreeMap<&'static str, (u64, f64, u64)>>>,
+    profile: Profile,
 }
 
 impl Engine for Profiled {
