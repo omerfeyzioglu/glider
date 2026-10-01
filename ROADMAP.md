@@ -946,9 +946,10 @@ verified state; the runbook needs no source reading.
 ## M30 — General metadata filtering
 
 Status: in progress. The declared resident predicate is exact; any other
-equality conjunction is post-filtered over the routed blocks (no extra reads,
-approximate, possibly fewer than k). The quality policy and its measurement
-remain.
+equality conjunction is post-filtered over the routed blocks. Measured at the
+serving budget (`benchmarks/M30.md`), post-filtering misses the quality gates
+even for a 50% predicate (mean recall@10 0.65), so it carries no quality
+guarantee; filter-aware routing for declared keys is the remaining step.
 
 Steps:
 - Specify supported predicates (equality, IN, conjunctions) and a quality

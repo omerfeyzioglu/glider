@@ -61,6 +61,9 @@ name = "m24_layout_probe"
 name = "m24_acceptance"
 required-features = ["s3"]
 
+[[example]]
+name = "m30_filter_probe"
+
 [[bin]]
 name = "glider-server"
 required-features = ["server"]
