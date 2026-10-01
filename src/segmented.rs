@@ -488,6 +488,8 @@ fn encode_pack_with_sketch(
     }
     let mut bytes = frame(&encoded);
     let shift = bytes.len();
+    let mut sketch = sketch;
+    sketch.frame_len = Some(shift);
     bytes.extend_from_slice(&payload);
     for reference in &mut references {
         reference.offset += shift;
@@ -657,8 +659,8 @@ struct Location {
 
 struct PackStats {
     payload_len: usize,
-    /// Smallest referenced block offset: the pack's data region starts no
-    /// earlier, after the embedded sketch frame.
+    /// Where the pack's block data starts: after its sketch frame when that
+    /// length is known, else at the smallest referenced block offset.
     data_start: usize,
     estimated_live_bytes: usize,
     live_rows: usize,
@@ -1194,7 +1196,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         Framed::Sketch(sketch) => {
                             decoded =
                                 PackSketch::decode(sketch, self.config, &self.options_digest, pack)
-                                    .ok();
+                                    .ok()
+                                    .map(|mut decoded| {
+                                        decoded.frame_len =
+                                            Some(sketch::FRAME_HEADER + sketch.len());
+                                        decoded
+                                    });
                             break;
                         }
                         Framed::Need(length) => {
@@ -2046,7 +2053,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 entry.estimated_live_bytes +=
                     ((reference.length as u128 * live as u128) / reference.rows as u128) as usize;
                 entry.live_rows += live;
-                entry.data_start = entry.data_start.min(reference.offset);
+                entry.data_start = match self.sketches.frame_len(&reference.object) {
+                    Some(frame) => frame,
+                    None => entry.data_start.min(reference.offset),
+                };
                 entry.locations.push((run, block));
                 entry.has_empty_block |= live == 0;
             }
@@ -2587,8 +2597,9 @@ mod tests {
             metric: Metric::SquaredEuclidean,
         };
         let temp = tempfile::tempdir().unwrap();
-        let mut db =
-            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        let mut db = SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config)
+            .unwrap()
+            .with_reclaim_min_garbage(1);
         let mut nonce = 0_u8;
         let mut write =
             |db: &mut SegmentedDatabase<LocalStore>, ids: std::ops::Range<u64>, value: f32| {
@@ -3136,7 +3147,9 @@ mod tests {
         };
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("db");
-        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config).unwrap();
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_reclaim_min_garbage(1);
         for batch in 0..4_u64 {
             db.apply_request(retry::Request {
                 id: retry::RequestId {

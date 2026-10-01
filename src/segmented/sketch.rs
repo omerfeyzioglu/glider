@@ -294,6 +294,9 @@ struct SketchBlock {
 
 pub(super) struct PackSketch {
     pack: String,
+    /// Bytes of the pack's leading sketch frame, when known; block data
+    /// follows it. Not persisted.
+    pub(super) frame_len: Option<usize>,
     blocks: Vec<SketchBlock>,
     minima: Vec<f32>,
     scales: Vec<f32>,
@@ -383,6 +386,7 @@ impl PackSketch {
         let width = code_bytes(dimensions);
         let mut sketch = Self {
             pack: pack.to_owned(),
+            frame_len: None,
             blocks: Vec::with_capacity(blocks.len()),
             minima,
             scales,
@@ -579,6 +583,7 @@ impl PackSketch {
         }
         Ok(Self {
             pack: pack.to_owned(),
+            frame_len: None,
             blocks: sketch_blocks,
             minima,
             scales,
@@ -725,6 +730,14 @@ impl SketchSet {
         };
         sketch.compact();
         true
+    }
+
+    /// Length of a loaded pack's sketch frame, if known.
+    pub(super) fn frame_len(&self, pack: &str) -> Option<usize> {
+        self.packs
+            .iter()
+            .find(|sketch| sketch.pack == pack)
+            .and_then(|sketch| sketch.frame_len)
     }
 
     pub(super) fn install(&mut self, sketch: PackSketch) {
