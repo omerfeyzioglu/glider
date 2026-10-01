@@ -6,8 +6,9 @@
 //! safe retries, otherwise issued by the server and returned).
 use crate::{
     admission::{self, Client, Limits, Service, Shutdown},
+    ownership::is_control_key,
     retry::{Conflict, Lookup, Outcome, Request, RequestId},
-    segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOptions},
+    segmented::{SegmentedDatabase, SegmentedOptions, SegmentedServing, SegmentedServingOptions},
     store::{
         s3::{AmazonS3Builder, S3Store},
         LocalStore, ObjectStore,
@@ -188,8 +189,34 @@ impl ServerConfig {
         })
     }
 
-    fn open_store(&self) -> crate::Result<Store> {
-        Ok(match &self.store {
+    /// Open the configured object-store namespace without claiming it.
+    pub fn open_store(&self) -> crate::Result<Store> {
+        self.store.open()
+    }
+
+    /// Claim and open the collection for serial administrative work.
+    pub fn open_engine(&self) -> crate::Result<SegmentedServing<Store>> {
+        SegmentedServing::open(
+            self.open_store()?,
+            self.collection,
+            self.options.clone(),
+            self.serving.clone(),
+        )
+    }
+
+    /// Claim the namespace and start the admission worker. Blocking.
+    pub fn start(&self) -> crate::Result<Service<SegmentedServing<Store>>> {
+        Service::start(self.open_engine()?, self.limits).map_err(|error| match error {
+            admission::Error::Database(error) => error,
+            other => Error::Invalid(other.to_string()),
+        })
+    }
+}
+
+impl StoreConfig {
+    /// Open a local directory or S3 prefix without claiming it.
+    pub fn open(&self) -> crate::Result<Store> {
+        Ok(match self {
             StoreConfig::Local(directory) => {
                 std::fs::create_dir_all(directory)?;
                 Store::Local(LocalStore::open(directory)?)
@@ -212,20 +239,50 @@ impl ServerConfig {
             }
         })
     }
+}
 
-    /// Claim the namespace and start the admission worker. Blocking.
-    pub fn start(&self) -> crate::Result<Service<SegmentedServing<Store>>> {
-        let engine = SegmentedServing::open(
-            self.open_store()?,
-            self.collection,
-            self.options.clone(),
-            self.serving.clone(),
-        )?;
-        Service::start(engine, self.limits).map_err(|error| match error {
-            admission::Error::Database(error) => error,
-            other => Error::Invalid(other.to_string()),
-        })
+/// Copy a stopped segmented namespace or backup into a fresh prefix. Metadata
+/// publishes last; a failed destination must be discarded. The caller must
+/// prove the source writer has stopped before staging a crashed namespace.
+pub fn stage_segmented_namespace(
+    source: &Store,
+    mut destination: Store,
+    config: Config,
+    options: SegmentedOptions,
+) -> crate::Result<(u64, usize, u64)> {
+    if !destination.list()?.is_empty() {
+        return Err(Error::Invalid("restore destination must be empty".into()));
     }
+    let mut keys = source.list()?;
+    keys.sort();
+    if keys.windows(2).any(|pair| pair[0] == pair[1])
+        || keys.iter().filter(|key| *key == "metadata").count() != 1
+    {
+        return Err(Error::Corrupt(
+            "source listing has duplicate keys or no metadata".into(),
+        ));
+    }
+    let mut copied = 0;
+    let mut bytes = 0;
+    for key in keys.iter().filter(|key| *key != "metadata") {
+        if is_control_key(key) {
+            continue;
+        }
+        let payload = source
+            .get(key)?
+            .ok_or_else(|| Error::Corrupt(format!("listed source object missing: {key}")))?;
+        destination.create(key, &payload)?;
+        copied += 1;
+        bytes += payload.len() as u64;
+    }
+    let metadata = source
+        .get("metadata")?
+        .ok_or_else(|| Error::Corrupt("listed source metadata missing".into()))?;
+    destination.create("metadata", &metadata)?;
+    copied += 1;
+    bytes += metadata.len() as u64;
+    let restored = SegmentedDatabase::open_with_options(destination, config, options)?;
+    Ok((restored.sequence(), copied, bytes))
 }
 
 type Engine0 = SegmentedServing<Store>;
