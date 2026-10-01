@@ -116,6 +116,33 @@ fn http_service_writes_queries_and_survives_restart() {
         "secret",
     );
     assert!(body.contains("retained"), "{body}");
+    let (status, body) = call(address, "GET", "/metrics", "", "wrong");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("glider_committed_sequence 2\n"), "{body}");
+    assert!(
+        body.contains(
+            "glider_http_requests_total{endpoint=\"/v1/write\",status_class=\"2xx\"} 3\n"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "glider_http_requests_total{endpoint=\"/v1/query\",status_class=\"4xx\"} 1\n"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "glider_http_request_duration_seconds_bucket{endpoint=\"/v1/query\",le=\"+Inf\"}"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains("glider_segmented_seal_starts_total "),
+        "{body}"
+    );
+    assert!(body.contains("glider_cache_nvme_entries "), "{body}");
+    assert!(body.contains("glider_sketch_index_bytes "), "{body}");
     drop(runtime);
     service
         .shutdown(glider::admission::Shutdown::Drain)

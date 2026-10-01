@@ -887,7 +887,11 @@ publication. Overload maps to 429, invalid input to 400, request-ID misuse to
 SIGINT/SIGTERM stops accepting connections, drains queued commands and
 releases the ownership claim; a failed worker keeps the claim for the
 documented recovery procedure. An optional static bearer token guards every
-endpoint except `/healthz`.
+endpoint except `/healthz` and `/metrics`. The latter serves Prometheus 0.0.4
+text: server atomics record per-endpoint response classes and latency buckets,
+while a read-only admission command samples sequence, segmented maintenance,
+cache and sketch values on the owning worker. Queue state is sampled separately;
+metrics are observational and do not change publication or recovery semantics.
 
 ## Bounded concurrent admission (M16)
 
