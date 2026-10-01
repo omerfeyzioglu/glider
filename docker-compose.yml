@@ -1,0 +1,48 @@
+# Local quickstart: MinIO as S3 plus one glider-server collection.
+# docker compose up --build, then use http://localhost:8080 (see README).
+services:
+  minio:
+    # Pinned MinIO (with mc), as used by tools/test_s3.py.
+    image: ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: glider
+      MINIO_ROOT_PASSWORD: glider-local-password
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      retries: 30
+
+  create-bucket:
+    image: ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "mc alias set local http://minio:9000 glider glider-local-password
+      && mc mb --ignore-existing local/glider"
+
+  glider:
+    build: .
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
+    environment:
+      GLIDER_S3_BUCKET: glider
+      GLIDER_S3_NAMESPACE: demo
+      GLIDER_S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: glider
+      AWS_SECRET_ACCESS_KEY: glider-local-password
+      GLIDER_DIMENSIONS: "3"
+      GLIDER_RESIDENT_FILTER: color=red
+    ports:
+      - "8080:8080"
+    volumes:
+      - glider-cache:/var/lib/glider/cache
+    stop_grace_period: 30s
+
+volumes:
+  minio-data:
+  glider-cache:

@@ -1,0 +1,7 @@
+target
+.git
+benchmarks
+docs
+tools
+*.md
+!README.md

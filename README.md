@@ -32,6 +32,18 @@ curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
 curl localhost:8080/v1/points/1
 ```
 
+Or run the server with a local MinIO in containers:
+
+```sh
+docker compose up --build
+```
+
+This starts MinIO, creates the `glider` bucket and serves collection `demo`
+(3 dimensions, resident filter `color=red`) on `localhost:8080`; the curl
+commands above work unchanged. `docker compose down -v` removes the data.
+The image (`Dockerfile`) runs `glider-server` as a non-root user and reads
+the same environment variables.
+
 For S3 or MinIO, replace `GLIDER_DATA_DIR` with `GLIDER_S3_BUCKET`,
 `GLIDER_S3_NAMESPACE`, optional `GLIDER_S3_REGION`/`GLIDER_S3_ENDPOINT` and the
 `AWS_*` credentials. Other settings: `GLIDER_LISTEN` (default
