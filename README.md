@@ -69,7 +69,7 @@ API (JSON except `/metrics`):
 | Endpoint | Purpose |
 |---|---|
 | `POST /v1/write` | Atomic batch `{"upsert":[…],"delete":[ids],"request_id":{…}?}`; returns `sequence` and the `request_id` to retry with |
-| `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?}`; unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, keys in `GLIDER_ROUTED_KEYS` restrict sketch routing, and all other equality predicates are checked during reranking (approximate, may return fewer than k) |
+| `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?,"include_metadata":false,"include_vector":false}`; either optional flag adds that field to each hit. Unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, keys in `GLIDER_ROUTED_KEYS` restrict sketch routing, and other equality predicates are checked during reranking (approximate, may return fewer than k) |
 | `GET /v1/points/{id}` | Current vector and metadata, or 404 |
 | `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
 | `GET /v1/status`, `GET /healthz` | Sequence, queue state and cache warm-up (`cache.state`: `disabled`, `cold`, `warming`, `warm` or `partial`, with cached and namespace bytes); liveness |

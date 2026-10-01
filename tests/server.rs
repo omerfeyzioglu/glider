@@ -3,6 +3,12 @@
 //! same directory after graceful shutdown released the writer lease.
 
 use glider::server::{router, ServerConfig, StoreConfig};
+use glider::{
+    retry::{Request, RequestId},
+    segmented::{ReadBudget, SegmentedDatabase},
+    store::LocalStore,
+    Mutation,
+};
 use std::io::{Read, Write};
 
 fn config(directory: &std::path::Path) -> ServerConfig {
@@ -213,6 +219,118 @@ fn killed_server_restarts_on_the_same_directory_without_an_operator() {
     assert!(call(address, "GET", "/metrics", "", "secret")
         .1
         .contains("glider_writer_epoch 3\n"));
+    drop(runtime);
+    service
+        .shutdown(glider::admission::Shutdown::Drain)
+        .unwrap();
+}
+
+#[test]
+fn query_can_include_fields_for_reranked_routed_and_resident_hits() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path());
+    config.options.routed_keys = vec!["route".into()];
+    config.serving.read_budget = ReadBudget::uniform(32);
+    let path = match &config.store {
+        StoreConfig::Local(path) => path,
+        _ => unreachable!(),
+    };
+    let mut db = SegmentedDatabase::open_with_options(
+        LocalStore::open(path).unwrap(),
+        config.collection,
+        config.options.clone(),
+    )
+    .unwrap();
+    db.apply_request(Request {
+        id: RequestId {
+            boundary: 0,
+            nonce: [1; 16],
+        },
+        conditions: Vec::new(),
+        mutations: vec![
+            Mutation::Put {
+                id: 1,
+                vector: vec![0., 0., 0.],
+                metadata: [
+                    ("color".into(), "red".into()),
+                    ("route".into(), "yes".into()),
+                ]
+                .into(),
+            },
+            Mutation::Put {
+                id: 2,
+                vector: vec![2., 0., 0.],
+                metadata: [
+                    ("color".into(), "blue".into()),
+                    ("route".into(), "yes".into()),
+                ]
+                .into(),
+            },
+            Mutation::Put {
+                id: 3,
+                vector: vec![4., 0., 0.],
+                metadata: [
+                    ("color".into(), "red".into()),
+                    ("route".into(), "no".into()),
+                ]
+                .into(),
+            },
+        ],
+    })
+    .unwrap();
+    db.seal_delta().unwrap();
+    drop(db);
+    let (service, address, runtime) = serve(&config);
+    let query = |body: &str| {
+        let (status, response) = call(address, "POST", "/v1/query", body, "secret");
+        assert_eq!(status, 200, "{response}");
+        response
+    };
+    let plain = query(r#"{"vector":[0,0,0],"k":1}"#);
+    // The sequence includes the server's takeover record.
+    assert!(
+        plain.starts_with(r#"{"results":[{"distance":0.0,"id":1}],"sequence":"#),
+        "{plain}"
+    );
+    assert_eq!(
+        plain,
+        query(r#"{"vector":[0,0,0],"k":1,"include_metadata":false,"include_vector":false}"#)
+    );
+    let check = |body: &str, id: u64, color: &str, expected: Vec<f32>| {
+        let response: serde_json::Value = serde_json::from_str(&query(body)).unwrap();
+        let hit = &response["results"][0];
+        assert_eq!(hit["id"], id);
+        assert_eq!(hit["metadata"]["color"], color);
+        assert_eq!(hit["vector"], serde_json::json!(expected));
+    };
+    check(
+        r#"{"vector":[0,0,0],"k":1,"include_metadata":true,"include_vector":true}"#,
+        1,
+        "red",
+        vec![0., 0., 0.],
+    );
+    check(
+        r#"{"vector":[2,0,0],"k":1,"filter":{"route":"yes","color":"blue"},"include_metadata":true,"include_vector":true}"#,
+        2,
+        "blue",
+        vec![2., 0., 0.],
+    );
+    check(
+        r#"{"vector":[4,0,0],"k":1,"filter":{"color":"red"},"include_metadata":true,"include_vector":true}"#,
+        3,
+        "red",
+        vec![4., 0., 0.],
+    );
+    let metadata_only: serde_json::Value = serde_json::from_str(&query(
+        r#"{"vector":[0,0,0],"k":1,"include_metadata":true}"#,
+    ))
+    .unwrap();
+    assert!(metadata_only["results"][0].get("vector").is_none());
+    let vector_only: serde_json::Value = serde_json::from_str(&query(
+        r#"{"vector":[0,0,0],"k":1,"filter":{"color":"red"},"include_vector":true}"#,
+    ))
+    .unwrap();
+    assert!(vector_only["results"][0].get("metadata").is_none());
     drop(runtime);
     service
         .shutdown(glider::admission::Shutdown::Drain)

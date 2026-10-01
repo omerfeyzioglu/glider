@@ -25,6 +25,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 [dev-dependencies]
 libc = "0.2"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "baseline"

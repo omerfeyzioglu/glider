@@ -9,7 +9,10 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     path::Path,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Mutex,
+    },
 };
 
 mod cache;
@@ -1028,7 +1031,32 @@ struct PruneState {
     index_published: bool,
 }
 
-struct Ranked(Neighbor);
+/// Fields requested for each query hit. Both default to false.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueryOptions {
+    pub include_metadata: bool,
+    pub include_vector: bool,
+}
+
+/// A neighbor and optional fields from the version used to score it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryHit {
+    pub id: u64,
+    pub distance: f64,
+    pub metadata: Option<BTreeMap<String, String>>,
+    pub vector: Option<Vec<f32>>,
+}
+
+impl QueryHit {
+    pub fn neighbor(&self) -> Neighbor {
+        Neighbor {
+            id: self.id,
+            distance: self.distance,
+        }
+    }
+}
+
+struct Ranked(QueryHit);
 impl PartialEq for Ranked {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
@@ -1057,15 +1085,37 @@ fn consider(
     id: u64,
     vector: &[f32],
 ) {
-    let candidate = Ranked(Neighbor {
-        id,
-        distance: config.metric.score(query, vector),
-    });
-    if heap.len() < k {
-        heap.push(candidate);
-    } else if heap.peek().is_some_and(|worst| candidate < *worst) {
-        heap.pop();
-        heap.push(candidate);
+    consider_with(heap, k, config, query, id, vector, || (None, None));
+}
+
+fn consider_with(
+    heap: &mut BinaryHeap<Ranked>,
+    k: usize,
+    config: Config,
+    query: &[f32],
+    id: u64,
+    vector: &[f32],
+    fields: impl FnOnce() -> (Option<BTreeMap<String, String>>, Option<Vec<f32>>),
+) {
+    let distance = config.metric.score(query, vector);
+    if heap.len() < k
+        || heap.peek().is_some_and(|worst| {
+            distance
+                .total_cmp(&worst.0.distance)
+                .then(id.cmp(&worst.0.id))
+                .is_lt()
+        })
+    {
+        let (metadata, vector) = fields();
+        if heap.len() == k {
+            heap.pop();
+        }
+        heap.push(Ranked(QueryHit {
+            id,
+            distance,
+            metadata,
+            vector,
+        }));
     }
 }
 
@@ -1106,6 +1156,7 @@ pub struct SegmentedDatabase<S> {
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
     cache: Option<Mutex<BlockCache>>,
+    uncached_reads: (AtomicU64, AtomicU64),
     options: SegmentedOptions,
     options_digest: [u8; 32],
     sketches: SketchSet,
@@ -1235,6 +1286,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .transpose()
     }
 
+    fn query_remote_reads(&self) -> (u64, u64) {
+        self.cache_stats().ok().flatten().map_or_else(
+            || {
+                (
+                    self.uncached_reads.0.load(AtomicOrdering::Relaxed),
+                    self.uncached_reads.1.load(AtomicOrdering::Relaxed),
+                )
+            },
+            |stats| (stats.remote_fetches, stats.remote_payload_bytes),
+        )
+    }
+
     /// Copy part of the selected root's blocks into the NVMe cache tier: one
     /// authenticated range read of at most `unit_bytes` (at least one block).
     /// The pass fills only free space unless every block of the root fits
@@ -1254,7 +1317,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .lock()
                 .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))?
                 .read_block(&self.store, self.config, reference),
-            None => read_block(&self.store, self.config, reference),
+            None => {
+                let block = read_block(&self.store, self.config, reference)?;
+                self.uncached_reads.0.fetch_add(1, AtomicOrdering::Relaxed);
+                self.uncached_reads
+                    .1
+                    .fetch_add(reference.length as u64, AtomicOrdering::Relaxed);
+                Ok(block)
+            }
         }
     }
 
@@ -1312,6 +1382,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if let Some(cache) = cache.as_mut() {
             for payload in payloads.iter().flatten() {
                 cache.count_remote(payload.len());
+            }
+        } else {
+            for payload in payloads.iter().flatten() {
+                self.uncached_reads.0.fetch_add(1, AtomicOrdering::Relaxed);
+                self.uncached_reads
+                    .1
+                    .fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
             }
         }
         references
@@ -1476,6 +1553,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             known_keys: listed,
             obsolete: VecDeque::new(),
             cache: None,
+            uncached_reads: (AtomicU64::new(0), AtomicU64::new(0)),
             options_digest: Sha256::digest(encode(&options)?).into(),
             options,
             sketches: SketchSet::default(),
@@ -1940,6 +2018,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         k: usize,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
+        Ok(self
+            .search_exact_with_options(query, k, filter, QueryOptions::default())?
+            .iter()
+            .map(QueryHit::neighbor)
+            .collect())
+    }
+
+    /// Exact search with optional fields from each scored document.
+    pub fn search_exact_with_options(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
         let query = self.config.query(query)?;
         if k == 0 {
             return Ok(Vec::new());
@@ -1947,7 +2040,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let mut heap = BinaryHeap::new();
         self.scan_live(|id, vector, metadata| {
             if matches_filter(metadata, filter) {
-                consider(&mut heap, k, self.config, &query, id, vector);
+                consider_with(&mut heap, k, self.config, &query, id, vector, || {
+                    (
+                        options.include_metadata.then(|| metadata.clone()),
+                        options.include_vector.then(|| vector.to_vec()),
+                    )
+                });
             }
             Ok(())
         })?;
