@@ -1,7 +1,8 @@
 //! Reproducible, object-store-local admission workload for M31 latency investigation.
-//! Usage: cargo run --offline --release --example m31_latency_probe -- ROWS SECONDS
+//! Usage: cargo run --offline --release --example m31_latency_probe --
+//! ROWS SECONDS [THREADS [grouped|legacy [QUERIES]]]
 use glider::{
-    admission::{Engine, Limits, Service, Shutdown},
+    admission::{Engine, Limits, Service, Shutdown, Snapshot},
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOptions},
     store::ObjectStore,
@@ -94,6 +95,9 @@ impl Engine for Wrapped {
     fn idle_step(&mut self) -> Result<bool> {
         self.inner.idle_step()
     }
+    fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {
+        self.inner.snapshot()
+    }
     fn close(self) -> Result<()> {
         self.inner.close()
     }
@@ -159,6 +163,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(8);
     let mode = args.next().unwrap_or_else(|| "grouped".into());
     assert!(mode == "grouped" || mode == "legacy");
+    let queries: usize = args
+        .next()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(Limits::default().queries);
     assert!(rows >= 100 && rows.is_multiple_of(100) && seconds > 0);
     let config = Config {
         dimensions: 128,
@@ -201,6 +210,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         },
         Limits {
             read_priority: Some(Duration::from_millis(50)),
+            queries,
             ..Limits::default()
         },
     )?;

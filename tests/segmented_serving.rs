@@ -1,11 +1,19 @@
 use glider::{
-    admission::{Limits, Service, Shutdown},
+    admission::{Limits, QueryResult, Service, Shutdown},
     retry::{Request, RequestId},
     segmented::{SegmentedDatabase, SegmentedOptions, SegmentedServing, SegmentedServingOptions},
-    store::LocalStore,
+    store::{LocalStore, ObjectStore},
     Config, Metric, Mutation,
 };
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    time::Duration,
+};
 
 fn config() -> Config {
     Config {
@@ -235,4 +243,322 @@ fn write_at_tail_bound_finishes_an_idle_seal_in_progress() {
     let exact = db.database().search_exact(&vector(40, 1), 3, &[]).unwrap();
     assert_eq!(ids(&exact)[0], 40);
     db.close().unwrap();
+}
+
+const ROWS: u64 = 100;
+const ORIGIN: [f32; 4] = [0.; 4];
+
+/// Write `[id, generation, 0, 0]` for each ID. A row's squared distance from
+/// the origin is `id² + generation²`, so a full origin query reveals the
+/// generation of every row it returned.
+fn generation_request(boundary: u64, generation: u64, ids: impl Iterator<Item = u64>) -> Request {
+    Request {
+        id: RequestId {
+            boundary,
+            nonce: u128::from(generation).to_le_bytes(),
+        },
+        conditions: Vec::new(),
+        mutations: ids
+            .map(|id| Mutation::Put {
+                id,
+                vector: vec![id as f32, generation as f32, 0., 0.],
+                metadata: BTreeMap::new(),
+            })
+            .collect(),
+    }
+}
+
+/// The generation of each row, by ID, from a full origin query.
+fn generations(result: &QueryResult) -> Vec<u64> {
+    let sequence = result.sequence;
+    let mut rows: Vec<_> = result
+        .neighbors
+        .iter()
+        .map(|neighbor| {
+            let square = neighbor.distance - (neighbor.id * neighbor.id) as f64;
+            let generation = square.sqrt().round() as u64;
+            assert_eq!(
+                (generation * generation) as f64,
+                square,
+                "sequence {sequence}"
+            );
+            (neighbor.id, generation)
+        })
+        .collect();
+    rows.sort_unstable();
+    assert!(
+        rows.iter().map(|&(id, _)| id).eq(0..ROWS),
+        "sequence {sequence}"
+    );
+    rows.into_iter().map(|(_, generation)| generation).collect()
+}
+
+fn query_all<E: glider::admission::Engine>(client: &glider::admission::Client<E>) -> QueryResult {
+    client
+        .query(ORIGIN.to_vec(), ROWS as usize, Vec::new())
+        .unwrap()
+        .wait()
+        .unwrap()
+        .value
+}
+
+/// Generation 0 writes every row and acknowledges at sequence 1; generation
+/// g >= 1 overwrites the IDs congruent to g modulo 4 at sequence g + 1.
+fn rotating_ids(generation: u64) -> impl Iterator<Item = u64> {
+    (0..ROWS).filter(move |id| generation == 0 || id % 4 == generation % 4)
+}
+
+/// The generation of each row at an acknowledged sequence.
+fn rotating_state(sequence: u64) -> Vec<u64> {
+    (0..ROWS)
+        .map(|id| {
+            (1..sequence)
+                .rev()
+                .find(|generation| id % 4 == generation % 4)
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Queries run on reader threads while one writer overwrites a quarter of
+/// the rows per request and idle maintenance seals, compacts and switches
+/// roots. Every result must equal the acknowledged state at its reported
+/// sequence, sequences never decrease per reader, and a read submitted
+/// after an acknowledgement observes that write.
+#[test]
+fn concurrent_queries_see_one_acknowledged_state_and_every_prior_write() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut options = serving(&temp.path().join("cache"));
+    options.seal_tail_objects = 4;
+    let db = SegmentedServing::open(
+        LocalStore::open(temp.path().join("db")).unwrap(),
+        config(),
+        SegmentedOptions::default(),
+        options,
+    )
+    .unwrap();
+    let service = Service::start(db, Limits::default()).unwrap();
+    let client = service.client();
+    let checked = |client: &glider::admission::Client<_>| {
+        let result = query_all(client);
+        assert_eq!(
+            generations(&result),
+            rotating_state(result.sequence),
+            "sequence {}",
+            result.sequence
+        );
+        result.sequence
+    };
+    let mut sequence = 0;
+    for generation in 0..=2 {
+        sequence = client
+            .write(generation_request(
+                sequence,
+                generation,
+                rotating_ids(generation),
+            ))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .value
+            .sequence;
+    }
+    let done = Arc::new(AtomicBool::new(false));
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let (client, done) = (client.clone(), done.clone());
+            std::thread::spawn(move || {
+                let (mut last, mut count) = (0, 0);
+                while !done.load(Ordering::Acquire) {
+                    let observed = checked(&client);
+                    assert!(observed >= last, "sequence {observed} after {last}");
+                    (last, count) = (observed, count + 1);
+                }
+                count
+            })
+        })
+        .collect();
+    for generation in 3..=60 {
+        sequence = client
+            .write(generation_request(
+                sequence,
+                generation,
+                rotating_ids(generation),
+            ))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .value
+            .sequence;
+        assert_eq!(sequence, generation + 1);
+        assert!(checked(&client) >= sequence, "generation {generation}");
+        let id = generation % 4;
+        let document = client.get(id).unwrap().wait().unwrap().value.unwrap();
+        assert!(
+            document.vector[1] >= generation as f32,
+            "generation {generation}"
+        );
+    }
+    done.store(true, Ordering::Release);
+    for reader in readers {
+        assert!(reader.join().unwrap() > 0);
+    }
+    let metrics = client.metrics().unwrap().wait().unwrap().value;
+    let sample = |name| {
+        metrics
+            .samples
+            .iter()
+            .find(|(sample, _)| *sample == name)
+            .unwrap()
+            .1
+    };
+    assert!(sample("glider_segmented_seal_starts_total") > 0);
+    assert!(sample("glider_cache_remote_fetches_total") > 0);
+    assert_eq!(client.status().maintenance_errors, 0);
+    service.shutdown(Shutdown::Drain).unwrap();
+}
+
+/// A snapshot answers from the state it was taken at after later writes and
+/// maintenance; packs its root references survive cleanup until it is dropped.
+#[test]
+fn snapshot_keeps_its_state_and_packs_across_later_commits() {
+    use glider::admission::Engine;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("db");
+    let mut options = serving(&temp.path().join("cache"));
+    options.seal_tail_objects = 1;
+    // Without a block cache every block read reaches the store.
+    options.cache = None;
+    let mut db = SegmentedServing::open(
+        LocalStore::open(&path).unwrap(),
+        config(),
+        SegmentedOptions::default(),
+        options,
+    )
+    .unwrap();
+    let packs = || {
+        std::fs::read_dir(&path)
+            .unwrap()
+            .filter(|entry| {
+                let name = entry.as_ref().unwrap().file_name();
+                let name = name.to_str().unwrap();
+                name.starts_with("sgpack-") && name.ends_with("-seal")
+            })
+            .count()
+    };
+    let first = db
+        .apply_request(generation_request(0, 0, 0..ROWS))
+        .unwrap()
+        .sequence;
+    while db.maintenance_step().unwrap() {}
+    let old = db.snapshot().unwrap();
+    let before = old.query(&ORIGIN, ROWS as usize, &[]).unwrap();
+    assert_eq!(before.sequence, first);
+    assert_eq!(generations(&before), [0; ROWS as usize]);
+    assert!(before.remote_reads > 0);
+    let second = db
+        .apply_request(generation_request(first, 1, 0..ROWS))
+        .unwrap()
+        .sequence;
+    while db.maintenance_step().unwrap() {}
+    // Every generation-0 pack is obsolete now, but `old` still reads them.
+    let pinned = packs();
+    let after = old.query(&ORIGIN, ROWS as usize, &[]).unwrap();
+    assert_eq!(
+        (after.sequence, after.neighbors, after.remote_reads),
+        (before.sequence, before.neighbors, before.remote_reads)
+    );
+    assert_eq!(old.get(7).unwrap().unwrap().vector, [7., 0., 0., 0.]);
+    let current = db.snapshot().unwrap();
+    let latest = current.query(&ORIGIN, ROWS as usize, &[]).unwrap();
+    assert_eq!(latest.sequence, second);
+    assert_eq!(generations(&latest), [1; ROWS as usize]);
+    drop((old, current));
+    while db.maintenance_step().unwrap() {}
+    assert!(packs() < pinned, "{} packs left of {pinned}", packs());
+    db.close().unwrap();
+}
+
+/// Signals entry into a log create, then waits for release.
+type Gate = (mpsc::SyncSender<()>, mpsc::Receiver<()>);
+
+/// In-memory store whose next log create blocks until released.
+#[derive(Clone, Default)]
+struct Gated {
+    objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    gate: Arc<Mutex<Option<Gate>>>,
+}
+
+impl Gated {
+    fn arm(&self) -> (mpsc::Receiver<()>, mpsc::SyncSender<()>) {
+        let (signal, entered) = mpsc::sync_channel(1);
+        let (release, wait) = mpsc::sync_channel(1);
+        *self.gate.lock().unwrap() = Some((signal, wait));
+        (entered, release)
+    }
+}
+
+impl ObjectStore for Gated {
+    fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
+        Ok(self.objects.lock().unwrap().get(key).cloned())
+    }
+    fn list(&self) -> glider::Result<Vec<String>> {
+        Ok(self.objects.lock().unwrap().keys().cloned().collect())
+    }
+    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+        if key.starts_with("sglog-") {
+            if let Some((entered, release)) = self.gate.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        }
+        let mut objects = self.objects.lock().unwrap();
+        if objects.contains_key(key) {
+            return Err(glider::Error::Exists(key.into()));
+        }
+        objects.insert(key.into(), value.to_vec());
+        Ok(())
+    }
+    fn remove(&mut self, key: &str) -> glider::Result<()> {
+        self.objects.lock().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+/// A query does not wait for a write whose log PUT is in progress; it sees
+/// the last acknowledged state, and the write once acknowledged.
+#[test]
+fn queries_run_while_a_write_is_publishing() {
+    let store = Gated::default();
+    let temp = tempfile::tempdir().unwrap();
+    let mut options = serving(&temp.path().join("cache"));
+    options.cache = None;
+    let db = SegmentedServing::open(
+        store.clone(),
+        config(),
+        SegmentedOptions::default(),
+        options,
+    )
+    .unwrap();
+    let service = Service::start(db, Limits::default()).unwrap();
+    let client = service.client();
+    let full = |client: &glider::admission::Client<_>| {
+        let result = query_all(client);
+        (result.sequence, generations(&result))
+    };
+    let first = client
+        .write(generation_request(0, 0, 0..ROWS))
+        .unwrap()
+        .wait()
+        .unwrap()
+        .value
+        .sequence;
+    let (entered, release) = store.arm();
+    let pending = client.write(generation_request(first, 1, 0..ROWS)).unwrap();
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(full(&client), (first, vec![0; ROWS as usize]));
+    release.send(()).unwrap();
+    let second = pending.wait().unwrap().value.sequence;
+    assert_eq!(full(&client), (second, vec![1; ROWS as usize]));
+    service.shutdown(Shutdown::Drain).unwrap();
 }

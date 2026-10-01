@@ -1,6 +1,6 @@
 //! Disposable, bounded cache for root-authenticated immutable vector blocks.
-use super::{decode_block_bytes, validate_block_ref, Block, BlockRef};
-use crate::{store::ObjectStore, Config, Error, Result};
+use super::{validate_block_ref, BlockRef};
+use crate::{Error, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -134,51 +134,9 @@ impl BlockCache {
         }
     }
 
-    pub(super) fn read_block<S: ObjectStore>(
-        &mut self,
-        store: &S,
-        config: Config,
-        reference: &BlockRef,
-    ) -> Result<Block> {
-        loop {
-            let (bytes, source) = self.fetch(store, reference)?;
-            match decode_block_bytes(config, reference, &bytes) {
-                Ok(block) => {
-                    self.accept(reference, source, &bytes);
-                    return Ok(block);
-                }
-                Err(error) if source == Source::Remote => return Err(error),
-                Err(_) => self.reject(reference, source),
-            }
-        }
-    }
-
-    /// Return candidate bytes from RAM, NVMe or object storage without
-    /// authenticating them. The caller must decode against the root reference,
-    /// then call `accept`, or `reject` for corrupt cached bytes and fetch again.
-    pub(super) fn fetch<S: ObjectStore>(
-        &mut self,
-        store: &S,
-        reference: &BlockRef,
-    ) -> Result<(Vec<u8>, Source)> {
-        if let Some(found) = self.lookup(reference)? {
-            return Ok(found);
-        }
-        let bytes = store
-            .get_range(
-                &reference.object,
-                reference.offset,
-                reference.length,
-                reference.payload_len,
-            )?
-            .ok_or_else(|| {
-                Error::Corrupt(format!("segmented pack missing: {}", reference.object))
-            })?;
-        self.count_remote(bytes.len());
-        Ok((bytes, Source::Remote))
-    }
-
-    /// Candidate bytes from RAM or NVMe, or `None` for a miss.
+    /// Candidate bytes from RAM or NVMe, or `None` for a miss. The caller
+    /// must decode against the root reference, then call `accept`, or
+    /// `reject` for corrupt cached bytes and read again.
     pub(super) fn lookup(&mut self, reference: &BlockRef) -> Result<Option<(Vec<u8>, Source)>> {
         validate_block_ref(reference)?;
         let key = cache_key(reference);

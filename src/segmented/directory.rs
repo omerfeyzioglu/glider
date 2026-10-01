@@ -35,7 +35,7 @@ impl Slot {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Directory {
     slots: Vec<Slot>,
 }

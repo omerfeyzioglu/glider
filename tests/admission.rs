@@ -1,11 +1,14 @@
 use glider::{
-    admission::{Error as AdmissionError, Limits, Service, Shutdown},
+    admission::{
+        Engine, Error as AdmissionError, Limits, QueryResult, Service, Shutdown, Snapshot,
+    },
     ownership::claims,
     recovery::stage_isolated_namespace,
-    retry::{Lookup, Request, RequestId},
+    retry::{Lookup, Outcome, Request, RequestId, Revision},
     serving::{ServingOptions, SingleMachine},
     store::ObjectStore,
-    Config, Error, Metric, Mutation,
+    streaming::OwnedDocument,
+    Config, Error, Metric, Mutation, Neighbor,
 };
 use std::{
     collections::BTreeMap,
@@ -326,4 +329,100 @@ fn read_priority_runs_queued_queries_before_unaged_writes() {
         assert_eq!(second.wait().unwrap().value.sequence, 2);
         service.shutdown(Shutdown::Drain).unwrap();
     }
+}
+
+/// Snapshot of `Counting`; a query with a negative component panics.
+struct Counted(u64);
+impl Snapshot for Counted {
+    fn sequence(&self) -> u64 {
+        self.0
+    }
+    fn get(&self, _: u64) -> glider::Result<Option<OwnedDocument>> {
+        Ok(None)
+    }
+    fn query(&self, query: &[f32], _: usize, _: &[(&str, &str)]) -> glider::Result<QueryResult> {
+        assert!(query[0] >= 0., "injected reader panic");
+        Ok(QueryResult {
+            sequence: self.0,
+            neighbors: Vec::new(),
+            remote_reads: 0,
+            remote_bytes: 0,
+        })
+    }
+}
+/// Engine that only counts writes and serves every read from snapshots.
+struct Counting(u64);
+impl Engine for Counting {
+    fn config(&self) -> Config {
+        config()
+    }
+    fn sequence(&self) -> u64 {
+        self.0
+    }
+    fn recovery_required(&self) -> bool {
+        false
+    }
+    fn maintenance_time(&self) -> Duration {
+        Duration::ZERO
+    }
+    fn apply_request(&mut self, _: Request) -> glider::Result<Outcome> {
+        self.0 += 1;
+        Ok(Outcome {
+            sequence: self.0,
+            conflict: None,
+        })
+    }
+    fn revision(&self, id: u64) -> Revision {
+        Revision {
+            id,
+            boundary: self.0,
+        }
+    }
+    fn request_id(&self) -> glider::Result<RequestId> {
+        Ok(RequestId {
+            boundary: self.0,
+            nonce: [0; 16],
+        })
+    }
+    fn lookup_request(&self, _: RequestId) -> glider::Result<Lookup> {
+        Ok(Lookup::Unknown)
+    }
+    fn get(&self, _: u64) -> glider::Result<Option<OwnedDocument>> {
+        unreachable!("reads run on snapshots")
+    }
+    fn query(&mut self, _: &[f32], _: usize, _: &[(&str, &str)]) -> glider::Result<Vec<Neighbor>> {
+        unreachable!("reads run on snapshots")
+    }
+    fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {
+        Some(Arc::new(Counted(self.0)))
+    }
+    fn close(self) -> glider::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn snapshot_reads_observe_acknowledged_writes_and_a_reader_panic_fails_the_service() {
+    let service = Service::start(Counting(0), Limits::default()).unwrap();
+    let client = service.client();
+    for sequence in 1..=3 {
+        let written = client.write(request(1)).unwrap().wait().unwrap().value;
+        assert_eq!(written.sequence, sequence);
+        let read = client.query(vec![1.], 1, vec![]).unwrap().wait().unwrap();
+        assert_eq!(read.value.sequence, sequence);
+        assert_eq!(read.maintenance, Duration::ZERO);
+    }
+    assert!(client.get(1).unwrap().wait().unwrap().value.is_none());
+    let panicked = client.query(vec![-1.], 1, vec![]).unwrap();
+    assert!(matches!(panicked.wait(), Err(AdmissionError::WorkerFailed)));
+    assert!(matches!(
+        service.shutdown(Shutdown::Drain),
+        Err(AdmissionError::WorkerFailed)
+    ));
+    assert!(client.status().failed);
+    assert_eq!(client.status().commands, 0);
+    assert!(matches!(
+        client.query(vec![1.], 1, vec![]),
+        Err(AdmissionError::WorkerFailed)
+    ));
 }

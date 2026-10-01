@@ -1,17 +1,20 @@
-//! Single-owner segmented serving. Queries use the persisted sketches; seal,
-//! consolidation, pruning, reclamation and cleanup advance in bounded units
-//! that the admission worker runs only while no command is queued.
-use super::{root_key, ReadBudget, SegmentedDatabase, SegmentedOptions};
+//! Single-owner segmented serving. Queries use the persisted sketches and run
+//! on published views beside the admission committer; seal, consolidation,
+//! pruning, reclamation and cleanup advance in bounded units that the
+//! committer runs only while no command is queued.
+use super::{root_key, ReadBudget, SegmentedDatabase, SegmentedOptions, View};
 use crate::{
-    admission::{Engine, EngineMetrics},
+    admission::{Engine, EngineMetrics, QueryResult, Snapshot},
     ownership::OwnedStore,
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     store::ObjectStore,
+    streaming::OwnedDocument,
     Config, Error, Neighbor, Result,
 };
 use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -111,7 +114,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         let mut db =
             SegmentedDatabase::open_with_options(OwnedStore::claim(store)?, config, segmented)?;
         if db.selective_index_bytes() > options.max_index_bytes {
-            db.into_store().release()?;
+            db.into_store()?.release()?;
             return Err(Error::Invalid(
                 "segmented sketches exceed the serving index budget".into(),
             ));
@@ -140,7 +143,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
 
     /// Release the namespace claim after serial administrative work.
     pub fn close(self) -> Result<()> {
-        self.db.into_store().release()
+        self.db.into_store()?.release()
     }
 
     /// Kind of the most recent maintenance unit, for diagnostics.
@@ -282,6 +285,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         let copy = |destination: &mut D, key: &str| -> Result<Vec<u8>> {
             let bytes = db
                 .store
+                .read()
                 .get(key)?
                 .ok_or_else(|| Error::Corrupt(format!("backup source missing: {key}")))?;
             destination.create(key, &bytes)?;
@@ -293,6 +297,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         for (pack, blocks) in &packs {
             let bytes = db
                 .store
+                .read()
                 .get(pack)?
                 .ok_or_else(|| Error::Corrupt(format!("backup source missing: {pack}")))?;
             for block in blocks {
@@ -310,7 +315,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         }
         copy(&mut destination, "metadata")?;
         let restored =
-            SegmentedDatabase::open_with_options(destination, db.config, db.options.clone())?;
+            SegmentedDatabase::open_with_options(destination, db.config, (*db.options).clone())?;
         if restored.sequence != db.sequence
             || restored.root.generation != db.root.generation
             || restored.latest.len() != db.latest.len()
@@ -324,7 +329,34 @@ impl<S: ObjectStore> SegmentedServing<S> {
     }
 }
 
-impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
+/// A published view with the serving read budget, for queries that run
+/// beside the admission committer.
+struct Published<S> {
+    view: View<S>,
+    read_budget: ReadBudget,
+}
+
+impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
+    fn sequence(&self) -> u64 {
+        self.view.sequence()
+    }
+    fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
+        self.view.get(id)
+    }
+    fn query(&self, query: &[f32], k: usize, filter: &[(&str, &str)]) -> Result<QueryResult> {
+        let (neighbors, reads) =
+            self.view
+                .search_selective_within(query, k, self.read_budget, filter)?;
+        Ok(QueryResult {
+            sequence: self.view.sequence(),
+            neighbors,
+            remote_reads: reads.requests,
+            remote_bytes: reads.bytes,
+        })
+    }
+}
+
+impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
     fn config(&self) -> Config {
         self.db.config
     }
@@ -360,7 +392,7 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
     fn lookup_request(&self, id: RequestId) -> Result<Lookup> {
         self.db.lookup_request(id)
     }
-    fn get(&self, id: u64) -> Result<Option<crate::streaming::OwnedDocument>> {
+    fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
         self.db.get(id)
     }
     /// Unfiltered queries are approximate within the sketch/block budget; the
@@ -369,6 +401,13 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
     fn query(&mut self, query: &[f32], k: usize, filter: &[(&str, &str)]) -> Result<Vec<Neighbor>> {
         self.db
             .search_selective_within(query, k, self.options.read_budget, filter)
+    }
+    /// Admission runs queries on these views, beside the committer.
+    fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {
+        Some(Arc::new(Published {
+            view: self.db.view(),
+            read_budget: self.options.read_budget,
+        }))
     }
     fn idle_step(&mut self) -> Result<bool> {
         self.maintenance_step()
@@ -435,6 +474,6 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        self.db.into_store().release()
+        self.db.into_store()?.release()
     }
 }

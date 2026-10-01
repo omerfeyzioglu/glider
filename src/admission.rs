@@ -1,13 +1,28 @@
-//! Bounded FIFO admission; one worker owns all reads, publication and maintenance.
+//! Bounded FIFO admission. One committer owns publication and maintenance;
+//! reads run beside it on published snapshots when the engine provides them.
 use crate::{
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     serving::{SearchMode, SingleMachine},
     store::ObjectStore,
+    streaming::OwnedDocument,
     Config, Neighbor,
 };
 
-/// One serialized database owner driven by the admission worker. Reads,
-/// publication and maintenance never overlap because only the worker holds it.
+/// One acknowledged engine state that answers reads beside the committer.
+/// It never changes after publication.
+pub trait Snapshot: Send + Sync {
+    /// The acknowledged sequence this state reflects.
+    fn sequence(&self) -> u64;
+    /// Current document for an ID, or `None` if absent or deleted.
+    fn get(&self, id: u64) -> crate::Result<Option<OwnedDocument>>;
+    /// Neighbors, with the remote reads and payload bytes this query caused.
+    fn query(&self, query: &[f32], k: usize, filter: &[(&str, &str)])
+        -> crate::Result<QueryResult>;
+}
+
+/// One database owner driven by the admission committer. Commands and
+/// maintenance never overlap because only the committer holds it; reads
+/// overlap them only through published snapshots.
 pub trait Engine: Send + 'static {
     fn config(&self) -> Config;
     fn sequence(&self) -> u64;
@@ -51,6 +66,14 @@ pub trait Engine: Send + 'static {
             samples: Vec::new(),
         })
     }
+    /// The current acknowledged state for reads beside the committer, or
+    /// `None` to run reads on the committer. When the engine at start returns
+    /// a snapshot, the committer publishes a new one after every command and
+    /// maintenance unit, before delivering any result.
+    fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {
+        None
+    }
+    /// Called only after every snapshot has been dropped.
     fn close(self) -> crate::Result<()>;
 }
 
@@ -79,13 +102,11 @@ impl<S: ObjectStore + Send + 'static> Engine for SingleMachine<S> {
     fn lookup_request(&self, id: RequestId) -> crate::Result<Lookup> {
         SingleMachine::lookup_request(self, id)
     }
-    fn get(&self, id: u64) -> crate::Result<Option<crate::streaming::OwnedDocument>> {
+    fn get(&self, id: u64) -> crate::Result<Option<OwnedDocument>> {
         Ok(
-            SingleMachine::get(self, id).map(|(vector, metadata)| {
-                crate::streaming::OwnedDocument {
-                    vector: vector.to_vec(),
-                    metadata: metadata.clone(),
-                }
+            SingleMachine::get(self, id).map(|(vector, metadata)| OwnedDocument {
+                vector: vector.to_vec(),
+                metadata: metadata.clone(),
             }),
         )
     }
@@ -132,11 +153,15 @@ pub struct Limits {
     pub commands: usize,
     /// Sum of encoded payload charges, including active work.
     pub bytes: usize,
-    /// When set, a queued query runs before queued writes, lookups and
-    /// observations unless the oldest of those has waited this long. Queued
-    /// commands are concurrent, so either order is linearizable; a query
-    /// submitted after an acknowledgement always observes that write.
+    /// For engines that run reads on the committer: when set, a queued query
+    /// runs before queued writes, lookups and observations unless the oldest
+    /// of those has waited this long. Queued commands are concurrent, so
+    /// either order is linearizable; a query submitted after an
+    /// acknowledgement always observes that write.
     pub read_priority: Option<Duration>,
+    /// For engines that publish snapshots: reads executing at once, each on
+    /// its own reader thread.
+    pub queries: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -144,6 +169,7 @@ impl Default for Limits {
             commands: 8,
             bytes: 320 * 1024,
             read_priority: None,
+            queries: 4,
         }
     }
 }
@@ -259,18 +285,104 @@ where
         })
     }
 }
+type Reply<T> = mpsc::SyncSender<Result<Timed<T>>>;
+fn deliver<T: Send + 'static>(reply: Reply<T>, result: Result<Timed<T>>) -> Delivery {
+    Box::new(move || {
+        let _ = reply.send(result);
+    })
+}
+/// Queries and document reads stay data so they can run on a snapshot.
+enum Read {
+    Query {
+        query: Vec<f32>,
+        k: usize,
+        filter: Vec<(String, String)>,
+        reply: Reply<QueryResult>,
+    },
+    Get {
+        id: u64,
+        reply: Reply<Option<OwnedDocument>>,
+    },
+}
+/// Where a read runs: on a published snapshot, or on the committer.
+enum Target<'a, E> {
+    Snapshot(&'a dyn Snapshot),
+    Committer(&'a mut E),
+}
+impl Read {
+    fn execute<E: Engine>(self, target: Target<'_, E>, queue_wait: Duration) -> Delivery {
+        fn finish<T: Send + 'static>(
+            reply: Reply<T>,
+            result: crate::Result<T>,
+            queue_wait: Duration,
+            start: Instant,
+        ) -> Delivery {
+            let execution = start.elapsed();
+            let result = result.map(|value| Timed {
+                value,
+                queue_wait,
+                execution,
+                maintenance: Duration::ZERO,
+            });
+            deliver(reply, result.map_err(Error::Database))
+        }
+        let start = Instant::now();
+        match self {
+            Read::Query {
+                query,
+                k,
+                filter,
+                reply,
+            } => {
+                let filter: Vec<_> = filter
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let result = match target {
+                    Target::Snapshot(snapshot) => snapshot.query(&query, k, &filter),
+                    Target::Committer(db) => {
+                        let (reads, bytes) = db.remote_reads();
+                        db.query(&query, k, &filter).map(|neighbors| {
+                            let (reads_after, bytes_after) = db.remote_reads();
+                            QueryResult {
+                                sequence: db.sequence(),
+                                remote_reads: reads_after - reads,
+                                remote_bytes: bytes_after - bytes,
+                                neighbors,
+                            }
+                        })
+                    }
+                };
+                finish(reply, result, queue_wait, start)
+            }
+            Read::Get { id, reply } => {
+                let result = match target {
+                    Target::Snapshot(snapshot) => snapshot.get(id),
+                    Target::Committer(db) => db.get(id),
+                };
+                finish(reply, result, queue_wait, start)
+            }
+        }
+    }
+    fn reject(self, error: Error) -> Delivery {
+        match self {
+            Read::Query { reply, .. } => deliver(reply, Err(error)),
+            Read::Get { reply, .. } => deliver(reply, Err(error)),
+        }
+    }
+}
 /// Writes stay data so the worker can group consecutive ones.
 enum Work<E: Engine> {
     Task(Box<dyn Execute<E>>),
-    Write(Request, mpsc::SyncSender<Result<Timed<Outcome>>>),
+    Write(Request, Reply<Outcome>),
+    Read(Read),
 }
 impl<E: Engine> Work<E> {
     fn reject(self, error: Error) -> Delivery {
         match self {
             Work::Task(task) => task.reject(error),
-            Work::Write(_, reply) => Box::new(move || {
-                let _ = reply.send(Err(error));
-            }),
+            Work::Write(_, reply) => deliver(reply, Err(error)),
+            Work::Read(read) => read.reject(error),
         }
     }
 }
@@ -286,7 +398,10 @@ struct Job<E: Engine> {
     bytes: usize,
 }
 struct Queue<E: Engine> {
+    /// Committer work, including reads when the engine publishes no snapshot.
     jobs: VecDeque<Job<E>>,
+    /// Reads for the reader threads, when the engine publishes snapshots.
+    reads: VecDeque<Job<E>>,
     commands: usize,
     bytes: usize,
     closed: bool,
@@ -299,8 +414,17 @@ struct Queue<E: Engine> {
 const MAX_IDLE_SAMPLES: usize = 65_536;
 struct Shared<E: Engine> {
     queue: Mutex<Queue<E>>,
+    /// Wakes the committer.
     ready: Condvar,
+    /// Wakes reader threads.
+    readable: Condvar,
     limits: Limits,
+    /// Reader threads: `limits.queries`, or zero when the engine publishes
+    /// no snapshot and reads run on the committer.
+    readers: usize,
+    /// The latest published snapshot; `None` when reads run on the committer.
+    /// Only the committer replaces it, always with a newer state.
+    snapshot: Mutex<Option<Arc<dyn Snapshot>>>,
 }
 impl<E: Engine> Shared<E> {
     fn close(&self, cancel: bool) {
@@ -308,19 +432,27 @@ impl<E: Engine> Shared<E> {
         queue.closed = true;
         queue.cancel_queued |= cancel;
         self.ready.notify_all();
+        self.readable.notify_all();
     }
     fn fail(&self) {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.closed = true;
         queue.failed = true;
-        let pending = std::mem::take(&mut queue.jobs);
+        let mut pending = std::mem::take(&mut queue.jobs);
+        pending.append(&mut queue.reads);
+        // Charges of active work are released here too; see `release`.
         queue.commands = 0;
         queue.bytes = 0;
+        self.ready.notify_all();
+        self.readable.notify_all();
         drop(queue);
         for job in pending {
             job.state.store(FINISHED, Ordering::Release);
             job.work.reject(Error::WorkerFailed)();
         }
+    }
+    fn publish(&self, snapshot: Option<Arc<dyn Snapshot>>) {
+        *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = snapshot;
     }
 }
 
@@ -371,14 +503,20 @@ impl<E: Engine> Client<E> {
         let work = build(reply)?;
         queue.commands += 1;
         queue.bytes += bytes;
-        queue.jobs.push_back(Job {
+        let job = Job {
             read,
             work,
             state: state.clone(),
             queued: Instant::now(),
             bytes,
-        });
-        self.shared.ready.notify_one();
+        };
+        if self.shared.readers > 0 && matches!(job.work, Work::Read(_)) {
+            queue.reads.push_back(job);
+            self.shared.readable.notify_one();
+        } else {
+            queue.jobs.push_back(job);
+            self.shared.ready.notify_one();
+        }
         Ok(Ticket { receiver, state })
     }
     /// Durations of completed idle maintenance units (at most 65,536).
@@ -422,8 +560,10 @@ impl<E: Engine> Client<E> {
             })
         })
     }
-    pub fn get(&self, id: u64) -> Result<Ticket<Option<crate::streaming::OwnedDocument>>> {
-        self.submit(true, 16, move || Ok(move |db: &mut E| db.get(id)))
+    pub fn get(&self, id: u64) -> Result<Ticket<Option<OwnedDocument>>> {
+        self.enqueue(true, 16, move |reply| {
+            Ok(Work::Read(Read::Get { id, reply }))
+        })
     }
     pub fn lookup(&self, id: RequestId) -> Result<Ticket<Lookup>> {
         self.submit(false, 24, move || {
@@ -444,25 +584,15 @@ impl<E: Engine> Client<E> {
         if charge > crate::retry::MAX_REQUEST_BYTES {
             return Err(Error::Overloaded);
         }
-        self.submit(true, charge, move || {
+        self.enqueue(true, charge, move |reply| {
             let bytes = crate::encode(&(&query, k, &filter))?;
-            let (query, k, filter): (Vec<f32>, usize, Vec<(String, String)>) =
-                crate::decode(&bytes)?;
-            Ok(move |db: &mut E| {
-                let borrowed: Vec<_> = filter
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                let (reads, bytes) = db.remote_reads();
-                let neighbors = db.query(&query, k, &borrowed)?;
-                let (reads_after, bytes_after) = db.remote_reads();
-                Ok(QueryResult {
-                    sequence: db.sequence(),
-                    remote_reads: reads_after - reads,
-                    remote_bytes: bytes_after - bytes,
-                    neighbors,
-                })
-            })
+            let (query, k, filter) = crate::decode(&bytes)?;
+            Ok(Work::Read(Read::Query {
+                query,
+                k,
+                filter,
+                reply,
+            }))
         })
     }
 }
@@ -479,14 +609,16 @@ impl<E: Engine> Service<E> {
         if db.recovery_required() {
             return Err(crate::Error::RecoveryRequired.into());
         }
-        if limits.commands == 0 || limits.bytes == 0 {
+        if limits.commands == 0 || limits.bytes == 0 || limits.queries == 0 {
             db.close()?;
             return Err(crate::Error::Invalid("admission limits must be positive".into()).into());
         }
         let config = db.config();
+        let snapshot = db.snapshot();
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
                 jobs: VecDeque::new(),
+                reads: VecDeque::new(),
                 commands: 0,
                 bytes: 0,
                 closed: false,
@@ -496,28 +628,72 @@ impl<E: Engine> Service<E> {
                 maintenance_errors: 0,
             }),
             ready: Condvar::new(),
+            readable: Condvar::new(),
             limits,
+            readers: if snapshot.is_some() {
+                limits.queries
+            } else {
+                0
+            },
+            snapshot: Mutex::new(snapshot),
         });
+        let mut readers = Vec::with_capacity(shared.readers);
+        for _ in 0..shared.readers {
+            let reader_shared = shared.clone();
+            let spawned = std::thread::Builder::new()
+                .name("glider-reader".into())
+                .spawn(move || serve_reads(&reader_shared));
+            match spawned {
+                Ok(reader) => readers.push(reader),
+                Err(error) => {
+                    shared.close(true);
+                    for reader in readers {
+                        let _ = reader.join();
+                    }
+                    shared.publish(None);
+                    db.close()?;
+                    return Err(crate::Error::Io(error).into());
+                }
+            }
+        }
         let worker_shared = shared.clone();
-        let worker = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("glider-committer".into())
             .spawn(move || {
+                let mut db = db;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(db, &worker_shared)
-                }));
-                match result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(error)) => {
-                        worker_shared.fail();
-                        Err(error)
-                    }
-                    Err(_) => {
-                        worker_shared.fail();
-                        Err(Error::WorkerFailed)
-                    }
+                    run(&mut db, &worker_shared)
+                }))
+                .unwrap_or(Err(Error::WorkerFailed));
+                if result.is_err() {
+                    worker_shared.fail();
                 }
-            })
-            .map_err(crate::Error::Io)?;
+                // Readers stop once admission is closed and their queue is
+                // drained; then no snapshot outlives the engine.
+                for reader in readers {
+                    let _ = reader.join();
+                }
+                worker_shared.publish(None);
+                result?;
+                // A reader that panicked failed the service.
+                if worker_shared
+                    .queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .failed
+                {
+                    return Err(Error::WorkerFailed);
+                }
+                db.close().map_err(Error::Database)
+            });
+        let worker = match spawned {
+            Ok(worker) => worker,
+            Err(error) => {
+                // Stops the readers; the dropped engine keeps its claim.
+                shared.close(true);
+                return Err(crate::Error::Io(error).into());
+            }
+        };
         Ok(Self {
             client: Client { shared, config },
             worker: Some(worker),
@@ -554,23 +730,95 @@ impl<E: Engine> Drop for Service<E> {
 /// Return a finished job's admission charge.
 fn release<E: Engine>(shared: &Shared<E>, bytes: usize) {
     let mut queue = shared.queue.lock().unwrap();
-    queue.commands -= 1;
-    queue.bytes -= bytes;
+    // `fail` already returned every charge, including active work.
+    if !queue.failed {
+        queue.commands -= 1;
+        queue.bytes -= bytes;
+    }
 }
 
-fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
-    let mut idle_work = true;
+/// Publish the committer's current state for reader threads. Called before
+/// any result of the work that produced it is delivered, so a read admitted
+/// after an acknowledgement observes that write.
+fn publish<E: Engine>(db: &E, shared: &Shared<E>) {
+    if shared.readers > 0 {
+        shared.publish(db.snapshot());
+    }
+}
+
+/// Reader thread: run queued reads, each on the latest snapshot when it
+/// starts, until admission closes and no read is queued.
+fn serve_reads<E: Engine>(shared: &Shared<E>) {
     loop {
         let (job, cancel) = {
+            let mut queue = shared.queue.lock().unwrap();
+            loop {
+                if let Some(job) = queue.reads.pop_front() {
+                    break (job, queue.cancel_queued);
+                }
+                if queue.closed {
+                    return;
+                }
+                queue = shared.readable.wait(queue).unwrap();
+            }
+        };
+        let Work::Read(read) = job.work else {
+            unreachable!("reader threads receive only reads");
+        };
+        if cancel
+            || job
+                .state
+                .compare_exchange(QUEUED, STARTED, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            let delivery = read.reject(Error::Cancelled);
+            job.state.store(FINISHED, Ordering::Release);
+            release(shared, job.bytes);
+            delivery();
+            continue;
+        }
+        let queue_wait = job.queued.elapsed();
+        let snapshot = shared
+            .snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("snapshots are published while readers run");
+        let delivery = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            read.execute::<E>(Target::Snapshot(&*snapshot), queue_wait)
+        }));
+        drop(snapshot);
+        job.state.store(FINISHED, Ordering::Release);
+        release(shared, job.bytes);
+        match delivery {
+            Ok(deliver) => deliver(),
+            // The dropped reply reports `WorkerFailed` to this read's ticket.
+            Err(_) => {
+                shared.fail();
+                return;
+            }
+        }
+    }
+}
+
+/// The committer: commands, write groups and idle maintenance, one at a
+/// time. Returns once admission is closed and its queue is drained.
+fn run<E: Engine>(db: &mut E, shared: &Shared<E>) -> Result<()> {
+    let mut idle_work = true;
+    loop {
+        let (jobs, cancel) = {
             let mut queue = shared.queue.lock().unwrap();
             while queue.jobs.is_empty() && !queue.closed {
                 if idle_work {
                     // Queued commands take precedence; one bounded unit runs
-                    // only while the queue is empty and is never preempted.
+                    // only while no command is queued and is never preempted.
                     drop(queue);
                     let start = Instant::now();
                     let step = db.idle_step();
                     let elapsed = start.elapsed();
+                    if matches!(step, Ok(true)) {
+                        publish(db, shared);
+                    }
                     queue = shared.queue.lock().unwrap();
                     idle_work = match step {
                         Ok(worked) => worked,
@@ -606,10 +854,8 @@ fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
             };
             let mut jobs = match queue.jobs.remove(next) {
                 Some(job) => vec![job],
-                None => {
-                    drop(queue);
-                    return db.close().map_err(Error::Database);
-                }
+                None if queue.failed => return Err(Error::WorkerFailed),
+                None => return Ok(()),
             };
             // Group consecutive queued writes for one durable publication.
             if matches!(jobs[0].work, Work::Write(..)) {
@@ -626,9 +872,8 @@ fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
             }
             (jobs, queue.cancel_queued)
         };
-        let mut deliveries: Vec<Delivery> = Vec::with_capacity(job.len());
+        let mut deliveries: Vec<Delivery> = Vec::with_capacity(jobs.len());
         let mut writes = Vec::new();
-        let jobs = job;
         let mut started = Vec::with_capacity(jobs.len());
         for job in jobs {
             if cancel
@@ -649,7 +894,12 @@ fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
             let queue_wait = job.queued.elapsed();
             match job.work {
                 Work::Task(task) => {
-                    deliveries.push(task.execute(&mut db, queue_wait));
+                    deliveries.push(task.execute(db, queue_wait));
+                    job.state.store(FINISHED, Ordering::Release);
+                    release(shared, job.bytes);
+                }
+                Work::Read(read) => {
+                    deliveries.push(read.execute(Target::Committer(&mut *db), queue_wait));
                     job.state.store(FINISHED, Ordering::Release);
                     release(shared, job.bytes);
                 }
@@ -683,15 +933,15 @@ fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
                         maintenance,
                     })
                     .map_err(Error::Database);
-                deliveries.push(Box::new(move || {
-                    let _ = reply.send(result);
-                }));
+                deliveries.push(deliver(reply, result));
             }
         }
         idle_work = true;
         let failed = db.recovery_required();
         if failed {
             shared.fail();
+        } else {
+            publish(db, shared);
         }
         for deliver in deliveries {
             deliver();

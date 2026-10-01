@@ -9,7 +9,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     path::Path,
-    sync::Mutex,
+    sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak},
 };
 
 mod cache;
@@ -815,7 +815,7 @@ struct SealState {
     /// Planned block membership by ID; records are materialized per pack.
     blocks: Vec<Vec<u64>>,
     /// Sealed versions a newer tail write displaced during this seal.
-    displaced: BTreeMap<u64, (u64, Option<Document>)>,
+    displaced: BTreeMap<u64, (u64, Option<Arc<Document>>)>,
     entries: Vec<IndexEntry>,
     references: Vec<BlockRef>,
     sketches: Vec<PackSketch>,
@@ -824,32 +824,285 @@ struct SealState {
     index_published: bool,
 }
 
+/// The namespace store, shared by the committer and its published views.
+/// Reads proceed in parallel; `create` and `remove` take `&mut` and hold the
+/// lock exclusively. The engine's poison flag, set before every mutation,
+/// already covers a panic inside one, so lock poisoning is ignored.
+struct SharedStore<S>(Arc<RwLock<S>>);
+
+impl<S> Clone for SharedStore<S> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<S> SharedStore<S> {
+    fn read(&self) -> RwLockReadGuard<'_, S> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, S> {
+        self.0.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Acknowledged log-tail versions by ID. Documents are shared, so copying the
+/// tail for a new view copies only its nodes.
+type Tail = BTreeMap<u64, (u64, Option<Arc<Document>>)>;
+
 /// Experimental segmented namespace. Vectors in committed runs are fetched by
 /// block. The caller must enforce one exclusive object-store owner and use a
 /// fresh namespace; the current serving API does not use this engine yet.
+///
+/// The state queries read (root, directory, tail and sketches) is held in
+/// copy-on-write `Arc`s that `view` shares; a later mutation copies a part
+/// only while a view still holds it.
 pub struct SegmentedDatabase<S> {
-    store: S,
+    store: SharedStore<S>,
     config: Config,
-    root: Root,
+    root: Arc<Root>,
     sequence: u64,
     retry: retry::State,
-    latest: Directory,
-    tail: BTreeMap<u64, (u64, Option<Document>)>,
+    latest: Arc<Directory>,
+    tail: Arc<Tail>,
     tail_objects: usize,
     /// First sequence of each unsealed log object, in order.
     tail_logs: VecDeque<u64>,
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
-    cache: Option<Mutex<BlockCache>>,
-    options: SegmentedOptions,
+    /// Replaced roots; one that a view still holds pins its packs.
+    retired: Vec<Weak<Root>>,
+    cache: Option<Arc<Mutex<BlockCache>>>,
+    options: Arc<SegmentedOptions>,
     options_digest: [u8; 32],
-    sketches: SketchSet,
+    sketches: Arc<SketchSet>,
     query_threads: usize,
     reclaim_min_garbage: usize,
     seal: Option<SealState>,
     reclaim: Option<ReclaimState>,
     prune: Option<PruneState>,
     poisoned: bool,
+}
+
+/// One acknowledged state of a segmented namespace for queries that run
+/// beside the committer: the selected root with its directory and sketches,
+/// and the log tail through `sequence`. A view never changes; the committer
+/// publishes a new one after each change, so a query never observes a
+/// partially applied write or root switch.
+pub(crate) struct View<S> {
+    store: SharedStore<S>,
+    cache: Option<Arc<Mutex<BlockCache>>>,
+    config: Config,
+    options: Arc<SegmentedOptions>,
+    query_threads: usize,
+    sequence: u64,
+    root: Arc<Root>,
+    latest: Arc<Directory>,
+    tail: Arc<Tail>,
+    sketches: Arc<SketchSet>,
+}
+
+/// Remote range reads and payload bytes caused by one query.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RemoteReads {
+    pub(crate) requests: u64,
+    pub(crate) bytes: u64,
+}
+
+impl RemoteReads {
+    fn count(&mut self, bytes: usize) {
+        self.requests += 1;
+        self.bytes += bytes as u64;
+    }
+}
+
+fn lock_cache(cache: &Mutex<BlockCache>) -> Result<std::sync::MutexGuard<'_, BlockCache>> {
+    cache
+        .lock()
+        .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))
+}
+
+impl<S: ObjectStore> View<S> {
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Read and authenticate one block through the cache. Corrupt cached
+    /// bytes are discarded and read again. The cache lock is never held
+    /// across a remote read, so concurrent queries do not wait on it.
+    fn read_data_block(&self, reference: &BlockRef, reads: &mut RemoteReads) -> Result<Block> {
+        if let Some(cache) = &self.cache {
+            loop {
+                // A separate statement releases the lock before decoding.
+                let hit = lock_cache(cache)?.lookup(reference)?;
+                let Some((bytes, source)) = hit else {
+                    break;
+                };
+                match decode_block_bytes(self.config, reference, &bytes) {
+                    Ok(block) => {
+                        lock_cache(cache)?.accept(reference, source, &bytes);
+                        return Ok(block);
+                    }
+                    Err(_) => lock_cache(cache)?.reject(reference, source),
+                }
+            }
+        }
+        validate_block_ref(reference)?;
+        let bytes = self
+            .store
+            .read()
+            .get_range(
+                &reference.object,
+                reference.offset,
+                reference.length,
+                reference.payload_len,
+            )?
+            .ok_or_else(|| {
+                Error::Corrupt(format!("segmented pack missing: {}", reference.object))
+            })?;
+        reads.count(bytes.len());
+        let Some(cache) = &self.cache else {
+            return decode_block_bytes(self.config, reference, &bytes);
+        };
+        lock_cache(cache)?.count_remote(bytes.len());
+        let block = decode_block_bytes(self.config, reference, &bytes)?;
+        lock_cache(cache)?.accept(reference, cache::Source::Remote, &bytes);
+        Ok(block)
+    }
+
+    /// Fetch unauthenticated candidate bytes for the chosen blocks. Cache hits
+    /// are local; every coalesced `range` containing a miss is fetched whole
+    /// in one batched read the backend may issue concurrently, then split.
+    /// The caller authenticates each block against its reference, then
+    /// settles the cache with `accept` or `reject`.
+    fn fetch_blocks(
+        &self,
+        references: &[&BlockRef],
+        ranges: &[(&str, usize, usize, usize)],
+        reads: &mut RemoteReads,
+    ) -> Result<Vec<(Slice, cache::Source)>> {
+        let mut hits = Vec::with_capacity(references.len());
+        {
+            let mut cache = self.cache.as_deref().map(lock_cache).transpose()?;
+            for reference in references {
+                validate_block_ref(reference)?;
+                hits.push(match cache.as_mut() {
+                    Some(cache) => cache.lookup(reference)?,
+                    None => None,
+                });
+            }
+        }
+        let within = |reference: &BlockRef, range: &(&str, usize, usize, usize)| {
+            range.0 == reference.object
+                && range.1 <= reference.offset
+                && reference.offset + reference.length <= range.1 + range.2
+        };
+        let needed: Vec<_> = ranges
+            .iter()
+            .filter(|range| {
+                references
+                    .iter()
+                    .zip(&hits)
+                    .any(|(reference, hit)| hit.is_none() && within(reference, range))
+            })
+            .copied()
+            .collect();
+        let payloads: Vec<_> = if needed.is_empty() {
+            Vec::new()
+        } else {
+            self.store.read().get_ranges(&needed)?
+        }
+        .into_iter()
+        .map(|payload| payload.map(Arc::new))
+        .collect();
+        for payload in payloads.iter().flatten() {
+            reads.count(payload.len());
+        }
+        if let Some(cache) = &self.cache {
+            let mut cache = lock_cache(cache)?;
+            for payload in payloads.iter().flatten() {
+                cache.count_remote(payload.len());
+            }
+        }
+        references
+            .iter()
+            .zip(hits)
+            .map(|(reference, hit)| {
+                if let Some((bytes, source)) = hit {
+                    let end = bytes.len();
+                    return Ok((
+                        Slice {
+                            data: Arc::new(bytes),
+                            start: 0,
+                            end,
+                        },
+                        source,
+                    ));
+                }
+                let (range, payload) = needed
+                    .iter()
+                    .zip(&payloads)
+                    .find(|(range, _)| within(reference, range))
+                    .ok_or_else(|| Error::Invalid("chosen block outside its range".into()))?;
+                let payload = payload.as_ref().ok_or_else(|| {
+                    Error::Corrupt(format!("segmented pack missing: {}", reference.object))
+                })?;
+                // Blocks share their span's buffer instead of copying it.
+                let start = reference.offset - range.1;
+                Ok((
+                    Slice {
+                        data: payload.clone(),
+                        start,
+                        end: start + reference.length,
+                    },
+                    cache::Source::Remote,
+                ))
+            })
+            .collect()
+    }
+
+    /// Return the stored document; cosine vectors are normalized to unit length.
+    pub(crate) fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
+        if let Some((_, document)) = self.tail.get(&id) {
+            return Ok(document.as_ref().map(|document| OwnedDocument {
+                vector: document.vector.clone(),
+                metadata: document.metadata.clone(),
+            }));
+        }
+        let Some(location) = self.latest.get(&id) else {
+            return Ok(None);
+        };
+        if location.entry.deleted {
+            return Ok(None);
+        }
+        let run = &self.root.runs[location.run];
+        let block = self.read_data_block(
+            &run.blocks[location.entry.block as usize],
+            &mut RemoteReads::default(),
+        )?;
+        let record = block
+            .records
+            .binary_search_by_key(&id, BlockRecord::id)
+            .ok()
+            .and_then(|index| block.records.get(index))
+            .ok_or_else(|| Error::Corrupt("segmented directory entry missing in block".into()))?;
+        if record.sequence != location.entry.sequence {
+            return Err(Error::Corrupt(
+                "segmented directory sequence mismatch".into(),
+            ));
+        }
+        match &record.mutation {
+            Mutation::Put {
+                vector, metadata, ..
+            } => Ok(Some(OwnedDocument {
+                vector: vector.clone(),
+                metadata: metadata.clone(),
+            })),
+            Mutation::Delete { .. } => Err(Error::Corrupt(
+                "segmented live directory points to tombstone".into(),
+            )),
+        }
+    }
 }
 
 impl<S: ObjectStore> SegmentedDatabase<S> {
@@ -890,8 +1143,28 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(self.retry.lookup(id, self.sequence))
     }
 
-    pub(crate) fn into_store(self) -> S {
-        self.store
+    /// The store, once no view holds it any longer.
+    pub(crate) fn into_store(self) -> Result<S> {
+        Arc::try_unwrap(self.store.0)
+            .map(|store| store.into_inner().unwrap_or_else(PoisonError::into_inner))
+            .map_err(|_| Error::Invalid("a segmented read view is still open".into()))
+    }
+
+    /// Share the current acknowledged state with a reader. Later mutations
+    /// do not change the returned view.
+    pub(crate) fn view(&self) -> View<S> {
+        View {
+            store: self.store.clone(),
+            cache: self.cache.clone(),
+            config: self.config,
+            options: self.options.clone(),
+            query_threads: self.query_threads,
+            sequence: self.sequence,
+            root: self.root.clone(),
+            latest: self.latest.clone(),
+            tail: self.tail.clone(),
+            sketches: self.sketches.clone(),
+        }
     }
 
     /// Reclaim a mostly dead pack only if it frees at least this many
@@ -933,11 +1206,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         ram_bytes: usize,
         nvme_bytes: usize,
     ) -> Result<Self> {
-        self.cache = Some(Mutex::new(BlockCache::open(
+        self.cache = Some(Arc::new(Mutex::new(BlockCache::open(
             directory.as_ref(),
             ram_bytes,
             nvme_bytes,
-        )));
+        ))));
         Ok(self)
     }
 
@@ -951,109 +1224,6 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .map(|cache| cache.stats())
             })
             .transpose()
-    }
-
-    fn read_data_block(&self, reference: &BlockRef) -> Result<Block> {
-        match &self.cache {
-            Some(cache) => cache
-                .lock()
-                .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))?
-                .read_block(&self.store, self.config, reference),
-            None => read_block(&self.store, self.config, reference),
-        }
-    }
-
-    fn lock_cache(&self) -> Result<Option<std::sync::MutexGuard<'_, BlockCache>>> {
-        self.cache
-            .as_ref()
-            .map(|cache| {
-                cache
-                    .lock()
-                    .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))
-            })
-            .transpose()
-    }
-
-    /// Fetch unauthenticated candidate bytes for the chosen blocks. Cache hits
-    /// are local; every coalesced `range` containing a miss is fetched whole
-    /// in one batched read the backend may issue concurrently, then split.
-    /// The caller authenticates each block against its reference, then
-    /// settles the cache with `accept` or `reject`.
-    fn fetch_blocks(
-        &self,
-        references: &[&BlockRef],
-        ranges: &[(&str, usize, usize, usize)],
-    ) -> Result<Vec<(Slice, cache::Source)>> {
-        let mut cache = self.lock_cache()?;
-        let mut hits = Vec::with_capacity(references.len());
-        for reference in references {
-            validate_block_ref(reference)?;
-            hits.push(match cache.as_mut() {
-                Some(cache) => cache.lookup(reference)?,
-                None => None,
-            });
-        }
-        let within = |reference: &BlockRef, range: &(&str, usize, usize, usize)| {
-            range.0 == reference.object
-                && range.1 <= reference.offset
-                && reference.offset + reference.length <= range.1 + range.2
-        };
-        let needed: Vec<_> = ranges
-            .iter()
-            .filter(|range| {
-                references
-                    .iter()
-                    .zip(&hits)
-                    .any(|(reference, hit)| hit.is_none() && within(reference, range))
-            })
-            .copied()
-            .collect();
-        let payloads: Vec<_> = self
-            .store
-            .get_ranges(&needed)?
-            .into_iter()
-            .map(|payload| payload.map(std::sync::Arc::new))
-            .collect();
-        if let Some(cache) = cache.as_mut() {
-            for payload in payloads.iter().flatten() {
-                cache.count_remote(payload.len());
-            }
-        }
-        references
-            .iter()
-            .zip(hits)
-            .map(|(reference, hit)| {
-                if let Some((bytes, source)) = hit {
-                    let end = bytes.len();
-                    return Ok((
-                        Slice {
-                            data: std::sync::Arc::new(bytes),
-                            start: 0,
-                            end,
-                        },
-                        source,
-                    ));
-                }
-                let (range, payload) = needed
-                    .iter()
-                    .zip(&payloads)
-                    .find(|(range, _)| within(reference, range))
-                    .ok_or_else(|| Error::Invalid("chosen block outside its range".into()))?;
-                let payload = payload.as_ref().ok_or_else(|| {
-                    Error::Corrupt(format!("segmented pack missing: {}", reference.object))
-                })?;
-                // Blocks share their span's buffer instead of copying it.
-                let start = reference.offset - range.1;
-                Ok((
-                    Slice {
-                        data: payload.clone(),
-                        start,
-                        end: start + reference.length,
-                    },
-                    cache::Source::Remote,
-                ))
-            })
-            .collect()
     }
 
     pub fn open(store: S, config: Config) -> Result<Self> {
@@ -1198,21 +1368,22 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Err(Error::Corrupt("segmented replay tail exceeds bound".into()));
         }
         let mut db = Self {
-            store,
+            store: SharedStore(Arc::new(RwLock::new(store))),
             config,
             sequence: root.sequence,
             retry: root.retry.clone(),
-            root,
-            latest,
-            tail: BTreeMap::new(),
+            root: Arc::new(root),
+            latest: Arc::new(latest),
+            tail: Arc::default(),
             tail_objects: 0,
             tail_logs: VecDeque::new(),
             known_keys: listed,
             obsolete: VecDeque::new(),
+            retired: Vec::new(),
             cache: None,
             options_digest: Sha256::digest(encode(&options)?).into(),
-            options,
-            sketches: SketchSet::default(),
+            options: Arc::new(options),
+            sketches: Arc::default(),
             query_threads: 1,
             reclaim_min_garbage: 64 * 1024,
             seal: None,
@@ -1222,7 +1393,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         };
         for chunk in tail_logs.chunks(8) {
             let keys: Vec<_> = chunk.iter().map(|&sequence| log_key(sequence)).collect();
-            for (&log_sequence, bytes) in chunk.iter().zip(db.store.get_many(&keys)?) {
+            let logs = db.store.read().get_many(&keys)?;
+            for (&log_sequence, bytes) in chunk.iter().zip(logs) {
                 if db.sequence.checked_add(1) != Some(log_sequence) {
                     return Err(Error::Corrupt("segmented mutation log gap".into()));
                 }
@@ -1272,12 +1444,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .collect();
             // A store-reported corrupt range fails the batch; read that chunk
             // serially so each pack is judged on its own bytes.
-            let mut prefixes = match self.store.get_ranges(&requests) {
+            let batch = self.store.read().get_ranges(&requests);
+            let mut prefixes = match batch {
                 Ok(values) => values,
                 Err(Error::Corrupt(_)) => requests
                     .iter()
                     .map(|&(key, offset, length, payload)| {
-                        match self.store.get_range(key, offset, length, payload) {
+                        match self.store.read().get_range(key, offset, length, payload) {
                             Err(Error::Corrupt(_)) => Ok(None),
                             other => other,
                         }
@@ -1310,7 +1483,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         }
                         Framed::Need(length) => {
                             prefixes[index] =
-                                match self.store.get_range(pack, 0, length, payload_len) {
+                                match self.store.read().get_range(pack, 0, length, payload_len) {
                                     Err(Error::Corrupt(_)) => None,
                                     other => other?,
                                 };
@@ -1326,25 +1499,27 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         references.sort_by_key(|reference| reference.offset);
                         let blocks = references
                             .iter()
-                            .map(|reference| read_block(&self.store, self.config, reference))
+                            .map(|reference| {
+                                read_block(&*self.store.read(), self.config, reference)
+                            })
                             .collect::<Result<Vec<_>>>()?;
                         let pairs: Vec<_> = references.iter().zip(&blocks).collect();
-                        self.sketches.rebuilt += 1;
+                        Arc::make_mut(&mut self.sketches).rebuilt += 1;
                         PackSketch::build(self.config, &self.options, pack, &pairs)?
                     }
                 };
-                self.sketches.install(sketch);
+                Arc::make_mut(&mut self.sketches).install(sketch);
             }
         }
-        self.sketches.refresh(&self.root)?;
+        Arc::make_mut(&mut self.sketches).refresh(&self.root)?;
         self.activate_sketches(None);
-        self.sketches.compact_all();
+        Arc::make_mut(&mut self.sketches).compact_all();
         Ok(())
     }
 
     fn activate_sketches(&mut self, packs: Option<&BTreeSet<String>>) {
         let (latest, tail) = (&self.latest, &self.tail);
-        self.sketches.activate(packs, |id, run, block| {
+        Arc::make_mut(&mut self.sketches).activate(packs, |id, run, block| {
             !tail.contains_key(&id)
                 && latest.get(&id).is_some_and(|location| {
                     location.run == run
@@ -1372,15 +1547,22 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.obsolete = self.known_keys.difference(&retained).cloned().collect();
     }
 
+    /// Select a new root. A view holding the old one keeps its packs from
+    /// cleanup until the view is dropped.
+    fn replace_root(&mut self, root: Root) {
+        let old = std::mem::replace(&mut self.root, Arc::new(root));
+        self.retired.push(Arc::downgrade(&old));
+    }
+
     fn create_staged(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
         if self.known_keys.contains(key) {
-            if self.store.get(key)?.as_deref() != Some(bytes) {
+            if self.store.read().get(key)?.as_deref() != Some(bytes) {
                 return Err(Error::Corrupt(format!(
                     "conflicting segmented object: {key}"
                 )));
             }
         } else {
-            self.store.create(key, bytes)?;
+            self.store.write().create(key, bytes)?;
             self.known_keys.insert(key.to_owned());
         }
         Ok(())
@@ -1430,6 +1612,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     }
 
     fn apply_tail(&mut self, sequence: u64, mutations: &[Mutation]) {
+        let tail = Arc::make_mut(&mut self.tail);
         for mutation in mutations {
             let (id, entry) = match mutation {
                 Mutation::Put {
@@ -1440,15 +1623,15 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     *id,
                     (
                         sequence,
-                        Some(Document {
+                        Some(Arc::new(Document {
                             vector: self.config.normalized(vector.clone()),
                             metadata: metadata.clone(),
-                        }),
+                        })),
                     ),
                 ),
                 Mutation::Delete { id } => (*id, (sequence, None)),
             };
-            let old = self.tail.insert(id, entry);
+            let old = tail.insert(id, entry);
             // A version an in-progress seal will publish must outlive its
             // replacement in the tail until that seal materializes it.
             if let (Some(seal), Some(old)) = (self.seal.as_mut(), old) {
@@ -1560,7 +1743,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         };
         self.poisoned = true;
         let object = log_key(first);
-        if let Err(error) = self.store.create(&object, &bytes) {
+        let created = self.store.write().create(&object, &bytes);
+        if let Err(error) = created {
             let message = error.to_string();
             for &index in &accepted {
                 results[index] = Some(Err(Error::Io(std::io::Error::other(message.clone()))));
@@ -1581,8 +1765,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             for mutation in applied {
                 let (Mutation::Put { id, .. } | Mutation::Delete { id }) = mutation;
                 if let Some(location) = self.latest.get(id) {
-                    self.sketches
-                        .mark(location.run, location.entry.block as usize, *id, false);
+                    Arc::make_mut(&mut self.sketches).mark(
+                        location.run,
+                        location.entry.block as usize,
+                        *id,
+                        false,
+                    );
                 }
             }
         }
@@ -1595,42 +1783,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 
     /// Return the stored document; cosine vectors are normalized to unit length.
     pub fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
-        if let Some((_, document)) = self.tail.get(&id) {
-            return Ok(document.as_ref().map(|document| OwnedDocument {
-                vector: document.vector.clone(),
-                metadata: document.metadata.clone(),
-            }));
-        }
-        let Some(location) = self.latest.get(&id) else {
-            return Ok(None);
-        };
-        if location.entry.deleted {
-            return Ok(None);
-        }
-        let run = &self.root.runs[location.run];
-        let block = self.read_data_block(&run.blocks[location.entry.block as usize])?;
-        let record = block
-            .records
-            .binary_search_by_key(&id, BlockRecord::id)
-            .ok()
-            .and_then(|index| block.records.get(index))
-            .ok_or_else(|| Error::Corrupt("segmented directory entry missing in block".into()))?;
-        if record.sequence != location.entry.sequence {
-            return Err(Error::Corrupt(
-                "segmented directory sequence mismatch".into(),
-            ));
-        }
-        match &record.mutation {
-            Mutation::Put {
-                vector, metadata, ..
-            } => Ok(Some(OwnedDocument {
-                vector: vector.clone(),
-                metadata: metadata.clone(),
-            })),
-            Mutation::Delete { .. } => Err(Error::Corrupt(
-                "segmented live directory points to tombstone".into(),
-            )),
-        }
+        self.view().get(id)
     }
 
     /// Exact correctness oracle. Reads committed blocks on demand without
@@ -1670,9 +1823,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .filter(|(id, _)| !self.tail.contains_key(id))
             .count();
         let mut seen = 0;
+        let view = self.view();
         for (run_ordinal, run) in self.root.runs.iter().enumerate() {
             for (block_ordinal, reference) in run.blocks.iter().enumerate() {
-                let block = self.read_data_block(reference)?;
+                let block = view.read_data_block(reference, &mut RemoteReads::default())?;
                 for record in block.records {
                     let id = record.id();
                     if self.tail.contains_key(&id) {
@@ -1708,7 +1862,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 "segmented directory entry missing from blocks".into(),
             ));
         }
-        for (&id, (_, document)) in &self.tail {
+        for (&id, (_, document)) in self.tail.iter() {
             if let Some(document) = document {
                 visit(id, &document.vector, &document.metadata)?;
             }
@@ -1732,7 +1886,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let boundary = self.sequence;
         let mut puts = Vec::new();
         let mut deletes = Vec::new();
-        for (&id, (sequence, document)) in &self.tail {
+        for (&id, (sequence, document)) in self.tail.iter() {
             match document {
                 Some(document) => puts.push((
                     id,
@@ -1861,7 +2015,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.seal = Some(seal);
             return Ok(true);
         }
-        let mut root = self.root.clone();
+        let mut root = Root::clone(&self.root);
         root.generation = self
             .root
             .generation
@@ -1890,20 +2044,19 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = false;
         if !seal.entries.is_empty() {
             let run = root.runs.len() - 1;
-            self.latest.merge_sorted(
+            Arc::make_mut(&mut self.latest).merge_sorted(
                 seal.entries
                     .into_iter()
                     .map(|entry| (entry.id, Location { run, entry })),
             );
         }
-        self.tail
-            .retain(|_, (sequence, _)| *sequence > seal.boundary);
+        Arc::make_mut(&mut self.tail).retain(|_, (sequence, _)| *sequence > seal.boundary);
         self.tail_logs.retain(|&first| first > seal.boundary);
         self.tail_objects = self.tail_logs.len();
-        self.root = root;
+        self.replace_root(root);
         let packs: BTreeSet<_> = seal.sketches.iter().map(|s| s.pack().to_owned()).collect();
         for sketch in seal.sketches {
-            self.sketches.install(sketch);
+            Arc::make_mut(&mut self.sketches).install(sketch);
         }
         self.refresh_sketches(Some(&packs))?;
         self.schedule_obsolete();
@@ -1947,8 +2100,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         };
         let first = &self.root.runs[pair];
         let second = &self.root.runs[pair + 1];
-        let left = read_run_index(&self.store, first)?;
-        let right = read_run_index(&self.store, second)?;
+        let left = read_run_index(&*self.store.read(), first)?;
+        let right = read_run_index(&*self.store.read(), second)?;
         // Both indexes are ID-sorted and an ID is current in at most one run,
         // so a linear merge yields the surviving entries in ID order.
         let latest = &self.latest;
@@ -1987,7 +2140,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             entries.push(entry);
         }
         drop((left, right));
-        let mut root = self.root.clone();
+        let mut root = Root::clone(&self.root);
         root.generation = root
             .generation
             .checked_add(1)
@@ -2030,7 +2183,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
         let replacement_count = usize::from(replacement.is_some());
-        self.latest.retain(|id, location| {
+        Arc::make_mut(&mut self.latest).retain(|id, location| {
             if location.run == pair || location.run == pair + 1 {
                 if let Ok(index) = entries.binary_search_by_key(&id, |entry| entry.id) {
                     location.run = pair;
@@ -2046,7 +2199,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 true
             }
         });
-        self.root = root;
+        self.replace_root(root);
         self.refresh_sketches(None)?;
         self.schedule_obsolete();
         Ok(true)
@@ -2055,7 +2208,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Rebind sketches after a root change. Liveness of retained rows does not
     /// change; only newly installed packs need activation.
     fn refresh_sketches(&mut self, new_packs: Option<&BTreeSet<String>>) -> Result<()> {
-        if let Err(error) = self.sketches.refresh(&self.root) {
+        if let Err(error) = Arc::make_mut(&mut self.sketches).refresh(&self.root) {
             self.poisoned = true;
             return Err(error);
         }
@@ -2123,7 +2276,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 entries.push(entry);
             }
         }
-        let mut root = self.root.clone();
+        let mut root = Root::clone(&self.root);
         root.generation = root
             .generation
             .checked_add(1)
@@ -2178,7 +2331,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.create_staged(&root_key(state.root.generation), &encode(&state.root)?)?;
         self.poisoned = false;
         let removed = state.entries.is_empty();
-        self.latest.retain(|_, location| {
+        Arc::make_mut(&mut self.latest).retain(|_, location| {
             if location.run == state.run {
                 false
             } else {
@@ -2188,17 +2341,16 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 true
             }
         });
-        self.latest
-            .merge_sorted(state.entries.into_iter().map(|entry| {
-                (
-                    entry.id,
-                    Location {
-                        run: state.run,
-                        entry,
-                    },
-                )
-            }));
-        self.root = state.root;
+        Arc::make_mut(&mut self.latest).merge_sorted(state.entries.into_iter().map(|entry| {
+            (
+                entry.id,
+                Location {
+                    run: state.run,
+                    entry,
+                },
+            )
+        }));
+        self.replace_root(state.root);
         self.refresh_sketches(None)?;
         self.schedule_obsolete();
         Ok(true)
@@ -2353,7 +2505,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             let ordinal = state.blocks.len();
             let (run, block) = state.locations[ordinal];
             let reference = &self.root.runs[run].blocks[block];
-            let old = match read_block(&self.store, self.config, reference) {
+            let old = match read_block(&*self.store.read(), self.config, reference) {
                 Ok(block) => block,
                 Err(error) => {
                     self.reclaim = Some(state);
@@ -2395,7 +2547,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.reclaim = Some(state);
             return Ok(true);
         }
-        let mut root = self.root.clone();
+        let mut root = Root::clone(&self.root);
         root.generation = root
             .generation
             .checked_add(1)
@@ -2408,10 +2560,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
-        self.root = root;
+        self.replace_root(root);
         let sketch = state.sketch.expect("reclaim sketch staged with its pack");
         let packs = BTreeSet::from([sketch.pack().to_owned()]);
-        self.sketches.install(sketch);
+        Arc::make_mut(&mut self.sketches).install(sketch);
         self.refresh_sketches(Some(&packs))?;
         self.schedule_obsolete();
         Ok(true)
@@ -2437,16 +2589,32 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if max_objects == 0 {
             return Err(Error::Invalid("cleanup step must allow an object".into()));
         }
-        let keys: Vec<_> = self.obsolete.iter().take(max_objects).cloned().collect();
+        // A query on an older view may still read a pack its root references.
+        self.retired.retain(|root| root.strong_count() > 0);
+        let pinned: Vec<_> = self.retired.iter().filter_map(Weak::upgrade).collect();
+        let keys: Vec<_> = self
+            .obsolete
+            .iter()
+            .filter(|key| {
+                !pinned.iter().any(|root| {
+                    root.runs
+                        .iter()
+                        .any(|run| run.blocks.iter().any(|block| &block.object == *key))
+                })
+            })
+            .take(max_objects)
+            .cloned()
+            .collect();
+        drop(pinned);
         if keys.is_empty() {
             return Ok(0);
         }
         self.poisoned = true;
-        self.store.remove_many(&keys)?;
+        self.store.write().remove_many(&keys)?;
         for key in &keys {
             self.known_keys.remove(key);
-            self.obsolete.pop_front();
         }
+        self.obsolete.retain(|key| !keys.contains(key));
         self.poisoned = false;
         Ok(keys.len())
     }
@@ -2887,6 +3055,7 @@ mod tests {
         assert_eq!((db.sequence(), db.tail_objects), (2, 1));
         let logs = |db: &SegmentedDatabase<LocalStore>| {
             db.store
+                .read()
                 .list()
                 .unwrap()
                 .into_iter()
@@ -3115,7 +3284,7 @@ mod tests {
         assert_eq!(db.current_block_of(0), db.current_block_of(2));
         assert_eq!(db.current_block_of(1), db.current_block_of(3));
         for reference in &db.root.runs[0].blocks {
-            let block = read_block(&db.store, config, reference).unwrap();
+            let block = read_block(&*db.store.read(), config, reference).unwrap();
             assert_eq!(block.records.len(), 170);
             assert!(block
                 .records

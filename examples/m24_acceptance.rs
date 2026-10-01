@@ -3,7 +3,7 @@
 //! quality and independent read/write traffic, and `verify` checks restart
 //! state, update-wave quality, cache loss and backup in fresh processes.
 use glider::{
-    admission::{Engine, Limits, Service, Shutdown},
+    admission::{Engine, Limits, Service, Shutdown, Snapshot},
     retry::{Request, RequestId},
     segmented::{
         ReadBudget, SegmentedDatabase, SegmentedOptions, SegmentedServing, SegmentedServingOptions,
@@ -396,7 +396,7 @@ struct Profiled<S: ObjectStore> {
     profile: Profile,
 }
 
-impl<S: ObjectStore + Send + 'static> Engine for Profiled<S> {
+impl<S: ObjectStore + Send + Sync + 'static> Engine for Profiled<S> {
     fn config(&self) -> Config {
         self.inner.config()
     }
@@ -509,6 +509,10 @@ impl<S: ObjectStore + Send + 'static> Engine for Profiled<S> {
     }
     fn remote_reads(&self) -> (u64, u64) {
         self.inner.remote_reads()
+    }
+    /// Served queries run on these snapshots, so they are not profiled here.
+    fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {
+        self.inner.snapshot()
     }
     fn close(self) -> glider::Result<()> {
         self.inner.close()
