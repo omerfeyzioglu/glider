@@ -166,6 +166,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
     let segmented = SegmentedOptions {
         resident_filter: Some(("cohort".into(), "one-percent".into())),
+        routed_keys: Vec::new(),
     };
     let mut options = SegmentedServingOptions::m31("unused-cache".into());
     options.cache = None;

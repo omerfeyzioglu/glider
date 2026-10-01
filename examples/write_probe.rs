@@ -19,6 +19,7 @@ fn main() {
     };
     let options = SegmentedOptions {
         resident_filter: Some(("cohort".into(), "one-percent".into())),
+        routed_keys: Vec::new(),
     };
     let mut serving = SegmentedServingOptions::m21(dir.path().join("cache"));
     serving.cache = None;
