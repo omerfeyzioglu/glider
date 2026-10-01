@@ -578,13 +578,28 @@ struct MetadataV3 {
     options: SegmentedOptions,
 }
 
+/// Version 4 declares routed equality keys as well as resident state.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataV4 {
+    version: u32,
+    config: Config,
+    options: SegmentedOptions,
+}
+
 #[derive(Deserialize)]
 struct MetadataVersion {
     version: u32,
 }
 
 fn metadata_bytes(config: Config, options: &SegmentedOptions) -> Result<Vec<u8>> {
-    if *options == SegmentedOptions::default() {
+    if !options.routed_keys.is_empty() {
+        encode(&MetadataV4 {
+            version: 4,
+            config,
+            options: options.clone(),
+        })
+    } else if *options == SegmentedOptions::default() {
         encode(&MetadataV2 { version: 2, config })
     } else {
         encode(&MetadataV3 {
@@ -608,6 +623,16 @@ fn check_metadata(bytes: &[u8], config: Config, options: &SegmentedOptions) -> R
         }
         3 => {
             let metadata: MetadataV3 = decode(bytes)?;
+            if !metadata.options.routed_keys.is_empty() {
+                return Err(Error::Corrupt("metadata v3 contains routed keys".into()));
+            }
+            (metadata.config, metadata.options)
+        }
+        4 => {
+            let metadata: MetadataV4 = decode(bytes)?;
+            if metadata.options.routed_keys.is_empty() {
+                return Err(Error::Corrupt("metadata v4 has no routed keys".into()));
+            }
             (metadata.config, metadata.options)
         }
         version => {
@@ -1052,6 +1077,17 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 "resident filter key must be nonempty".into(),
             ));
         }
+        if options.routed_keys.len() > 4
+            || options.routed_keys.iter().any(String::is_empty)
+            || options
+                .routed_keys
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(Error::Invalid(
+                "routed keys must be sorted, unique, nonempty and at most four".into(),
+            ));
+        }
         let mut keys = store.list()?;
         keys.sort();
         if keys.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -1258,14 +1294,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     };
                     match unframe(bytes, payload_len) {
                         Framed::Sketch(sketch) => {
-                            decoded =
-                                PackSketch::decode(sketch, self.config, &self.options_digest, pack)
-                                    .ok()
-                                    .map(|mut decoded| {
-                                        decoded.frame_len =
-                                            Some(sketch::FRAME_HEADER + sketch.len());
-                                        decoded
-                                    });
+                            decoded = PackSketch::decode(
+                                sketch,
+                                self.config,
+                                &self.options_digest,
+                                pack,
+                                &self.options.routed_keys,
+                            )
+                            .ok()
+                            .map(|mut decoded| {
+                                decoded.frame_len = Some(sketch::FRAME_HEADER + sketch.len());
+                                decoded
+                            });
                             break;
                         }
                         Framed::Need(length) => {

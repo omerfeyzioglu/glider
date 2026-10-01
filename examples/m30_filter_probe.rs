@@ -114,7 +114,7 @@ impl Quality {
     }
 }
 
-fn run(args: &[String]) -> Result<Value> {
+fn run(args: &[String], routed: bool) -> Result<Value> {
     let [base_path, query_path, rows_arg, output] = args else {
         return Err("usage: m30_filter_probe BASE.fvecs QUERY.fvecs ROWS OUT_DIR".into());
     };
@@ -122,7 +122,8 @@ fn run(args: &[String]) -> Result<Value> {
     if rows < 10 || !rows.is_multiple_of(100) {
         return Err("ROWS must be at least 10 and a multiple of 100".into());
     }
-    let output = Path::new(output);
+    let output = Path::new(output).join(if routed { "routed" } else { "post-filter" });
+    let output = output.as_path();
     fs::create_dir_all(output)?;
     let namespace = output.join("namespace");
     if namespace.exists() {
@@ -164,6 +165,13 @@ fn run(args: &[String]) -> Result<Value> {
         config,
         SegmentedOptions {
             resident_filter: Some(("cohort".into(), "one-percent".into())),
+            routed_keys: if routed {
+                ["half", "pct", "permille", "tenth"]
+                    .map(str::to_owned)
+                    .to_vec()
+            } else {
+                Vec::new()
+            },
         },
         serving,
     )?;
@@ -207,6 +215,7 @@ fn run(args: &[String]) -> Result<Value> {
         "blocks": db.database().block_count(),
         "tail_objects": db.database().tail_objects(),
         "sequence": sequence,
+        "sketch_charged_bytes": db.database().selective_index_bytes(),
     });
     let mut quality: BTreeMap<&str, BTreeMap<&str, Quality>> = BTreeMap::new();
     for (index, query) in queries.iter().enumerate() {
@@ -252,6 +261,7 @@ fn run(args: &[String]) -> Result<Value> {
         "store": "LocalStore",
         "request_batch_rows": 100,
         "resident_filter": ["cohort", "one-percent"],
+        "routed_keys": if routed { vec!["half", "pct", "permille", "tenth"] } else { Vec::new() },
         "budgets": budgets.iter().map(|(name, budget)| (*name, json!({"blocks":budget.blocks,"requests":budget.requests,"bytes":budget.bytes}))).collect::<BTreeMap<_, _>>(),
         "predicates": PREDICATES.iter().map(|&(key, value, modulus, remainder)| (key, json!({"value":value,"id_modulus":modulus,"id_remainder":remainder,"matching_rows":(0..rows as u64).filter(|id| id % modulus == remainder).count()}))).collect::<BTreeMap<_, _>>(),
         "layout": layout,
@@ -261,6 +271,11 @@ fn run(args: &[String]) -> Result<Value> {
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
-    println!("{}", serde_json::to_string(&run(&args)?)?);
+    let post_filter = run(&args, false)?;
+    let routed = run(&args, true)?;
+    println!(
+        "{}",
+        serde_json::to_string(&json!({"post_filter": post_filter, "routed": routed}))?
+    );
     Ok(())
 }
