@@ -2,7 +2,7 @@ use glider::{
     ivf::IvfConfig,
     store::{LocalStore, ObjectStore},
     streaming::StreamingDatabase,
-    Config, Database, Error, Metric, Mutation, Neighbor,
+    Config, Database, Error, Metric, Neighbor,
 };
 use std::collections::BTreeMap;
 
@@ -153,6 +153,7 @@ fn segmented_cosine_oracle_seal_selective_and_resident() {
     use glider::{
         retry::{Request, RequestId},
         segmented::{SegmentedDatabase, SegmentedOptions},
+        Mutation,
     };
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("db");
