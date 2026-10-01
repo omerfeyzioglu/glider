@@ -892,9 +892,11 @@ and selective tests, and older namespaces open or fail with a clear error.
 
 ## M27 — Group commit to free write and request budget
 
-Status: implemented (log v2 groups with crash tests in CI). The accepted
-envelope used 5.96 of 6 PUT/s, about 4 of them one log object per client
-batch; the acceptance rerun that measures the new rate is pending.
+Status: implemented, target not met. Log v2 groups have crash tests in CI;
+the acceptance rerun passes at 5.30 PUT/s, but paced independent writes never
+queue together, so each still publishes its own log object
+(`benchmarks/M27.md`). Reaching 4 PUT/s needs client batching, not a longer
+committer window.
 
 Steps:
 - Let the single committer publish several queued independent requests in one
