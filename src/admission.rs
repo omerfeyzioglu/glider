@@ -31,6 +31,15 @@ pub trait Engine: Send + 'static {
     fn idle_step(&mut self) -> crate::Result<bool> {
         Ok(false)
     }
+    /// Apply queued independent requests together. Engines that support
+    /// group commit publish them in one durable object; the default applies
+    /// them one by one. Returns one result per request, in order.
+    fn apply_requests(&mut self, requests: Vec<Request>) -> Vec<crate::Result<Outcome>> {
+        requests
+            .into_iter()
+            .map(|request| self.apply_request(request))
+            .collect()
+    }
     /// Cumulative remote block reads and payload bytes charged to queries.
     fn remote_reads(&self) -> (u64, u64) {
         (0, 0)
@@ -236,9 +245,28 @@ where
         })
     }
 }
+/// Writes stay data so the worker can group consecutive ones.
+enum Work<E: Engine> {
+    Task(Box<dyn Execute<E>>),
+    Write(Request, mpsc::SyncSender<Result<Timed<Outcome>>>),
+}
+impl<E: Engine> Work<E> {
+    fn reject(self, error: Error) -> Delivery {
+        match self {
+            Work::Task(task) => task.reject(error),
+            Work::Write(_, reply) => Box::new(move || {
+                let _ = reply.send(Err(error));
+            }),
+        }
+    }
+}
+/// At most this many queued writes, and this many encoded bytes, share one
+/// group commit.
+const MAX_GROUP_WRITES: usize = 16;
+const MAX_GROUP_BYTES: usize = 1024 * 1024;
 struct Job<E: Engine> {
     read: bool,
-    task: Box<dyn Execute<E>>,
+    work: Work<E>,
     state: Arc<AtomicU8>,
     queued: Instant,
     bytes: usize,
@@ -277,7 +305,7 @@ impl<E: Engine> Shared<E> {
         drop(queue);
         for job in pending {
             job.state.store(FINISHED, Ordering::Release);
-            job.task.reject(Error::WorkerFailed)();
+            job.work.reject(Error::WorkerFailed)();
         }
     }
 }
@@ -302,6 +330,15 @@ impl<E: Engine> Client<E> {
         B: FnOnce() -> crate::Result<F>,
         F: FnOnce(&mut E) -> crate::Result<T> + Send + 'static,
     {
+        self.enqueue(read, bytes, move |reply| {
+            let operation = build()?;
+            Ok(Work::Task(Box::new(Task { reply, operation })))
+        })
+    }
+    fn enqueue<T, B>(&self, read: bool, bytes: usize, build: B) -> Result<Ticket<T>>
+    where
+        B: FnOnce(mpsc::SyncSender<Result<Timed<T>>>) -> crate::Result<Work<E>>,
+    {
         let (reply, receiver) = mpsc::sync_channel(1);
         let state = Arc::new(AtomicU8::new(QUEUED));
         let mut queue = self.shared.queue.lock().unwrap();
@@ -317,12 +354,12 @@ impl<E: Engine> Client<E> {
             return Err(Error::Overloaded);
         }
         // Reserve capacity under the queue lock before bounded normalization.
-        let operation = build()?;
+        let work = build(reply)?;
         queue.commands += 1;
         queue.bytes += bytes;
         queue.jobs.push_back(Job {
             read,
-            task: Box::new(Task { reply, operation }),
+            work,
             state: state.clone(),
             queued: Instant::now(),
             bytes,
@@ -352,10 +389,10 @@ impl<E: Engine> Client<E> {
     pub fn write(&self, request: Request) -> Result<Ticket<Outcome>> {
         request.validate(self.config)?;
         let charge = crate::encoded_len(&request)?;
-        self.submit(false, charge, move || {
+        self.enqueue(false, charge, move |reply| {
             let bytes = crate::encode(&request)?;
             let request: Request = crate::decode(&bytes)?;
-            Ok(move |db: &mut E| db.apply_request(request))
+            Ok(Work::Write(request, reply))
         })
     }
     pub fn observe(&self, id: u64) -> Result<Ticket<Observation>> {
@@ -497,6 +534,13 @@ impl<E: Engine> Drop for Service<E> {
         }
     }
 }
+/// Return a finished job's admission charge.
+fn release<E: Engine>(shared: &Shared<E>, bytes: usize) {
+    let mut queue = shared.queue.lock().unwrap();
+    queue.commands -= 1;
+    queue.bytes -= bytes;
+}
+
 fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
     let mut idle_work = true;
     loop {
@@ -543,36 +587,98 @@ fn run<E: Engine>(mut db: E, shared: &Shared<E>) -> Result<()> {
                 }
                 _ => 0,
             };
-            match queue.jobs.remove(next) {
-                Some(job) => (job, queue.cancel_queued),
+            let mut jobs = match queue.jobs.remove(next) {
+                Some(job) => vec![job],
                 None => {
                     drop(queue);
                     return db.close().map_err(Error::Database);
                 }
+            };
+            // Group consecutive queued writes for one durable publication.
+            if matches!(jobs[0].work, Work::Write(..)) {
+                let mut bytes = jobs[0].bytes;
+                while jobs.len() < MAX_GROUP_WRITES
+                    && queue.jobs.front().is_some_and(|job| {
+                        matches!(job.work, Work::Write(..)) && bytes + job.bytes <= MAX_GROUP_BYTES
+                    })
+                {
+                    let job = queue.jobs.pop_front().expect("front checked");
+                    bytes += job.bytes;
+                    jobs.push(job);
+                }
             }
+            (jobs, queue.cancel_queued)
         };
-        let deliver = if cancel
-            || job
-                .state
-                .compare_exchange(QUEUED, STARTED, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            job.task.reject(Error::Cancelled)
-        } else {
-            job.task.execute(&mut db, job.queued.elapsed())
-        };
-        job.state.store(FINISHED, Ordering::Release);
-        {
-            let mut queue = shared.queue.lock().unwrap();
-            queue.commands -= 1;
-            queue.bytes -= job.bytes;
+        let mut deliveries: Vec<Delivery> = Vec::with_capacity(job.len());
+        let mut writes = Vec::new();
+        let jobs = job;
+        let mut started = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            if cancel
+                || job
+                    .state
+                    .compare_exchange(QUEUED, STARTED, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                deliveries.push(job.work.reject(Error::Cancelled));
+                job.state.store(FINISHED, Ordering::Release);
+                release(shared, job.bytes);
+            } else {
+                started.push(job);
+            }
+        }
+        let mut write_jobs = Vec::new();
+        for job in started {
+            let queue_wait = job.queued.elapsed();
+            match job.work {
+                Work::Task(task) => {
+                    deliveries.push(task.execute(&mut db, queue_wait));
+                    job.state.store(FINISHED, Ordering::Release);
+                    release(shared, job.bytes);
+                }
+                Work::Write(request, reply) => {
+                    writes.push((request, reply, queue_wait));
+                    write_jobs.push((job.state, job.bytes));
+                }
+            }
+        }
+        if !writes.is_empty() {
+            let before = db.maintenance_time();
+            let start = Instant::now();
+            let (requests, replies): (Vec<_>, Vec<_>) = writes
+                .into_iter()
+                .map(|(request, reply, wait)| (request, (reply, wait)))
+                .unzip();
+            let results = db.apply_requests(requests);
+            let elapsed = start.elapsed();
+            let maintenance = db.maintenance_time() - before;
+            // Active writes hold their charge until their results exist.
+            for (state, bytes) in write_jobs {
+                state.store(FINISHED, Ordering::Release);
+                release(shared, bytes);
+            }
+            for (result, (reply, queue_wait)) in results.into_iter().zip(replies) {
+                let result = result
+                    .map(|value| Timed {
+                        value,
+                        queue_wait,
+                        execution: elapsed.saturating_sub(maintenance),
+                        maintenance,
+                    })
+                    .map_err(Error::Database);
+                deliveries.push(Box::new(move || {
+                    let _ = reply.send(result);
+                }));
+            }
         }
         idle_work = true;
         let failed = db.recovery_required();
         if failed {
             shared.fail();
         }
-        deliver();
+        for deliver in deliveries {
+            deliver();
+        }
         if failed {
             return Err(Error::WorkerFailed);
         }

@@ -296,6 +296,22 @@ while their encoded sizes total at most 512 KiB, bounding its memory and time. `
 S3 backend issues up to 16 concurrently, and other backends default to serial
 reads. Opening uses them for run indexes, the log tail and sketch frames.
 
+### Group commit
+
+`SegmentedDatabase::apply_requests` publishes several independent requests in
+one conditional log create. Each accepted request gets its own consecutive
+sequence, retry receipt and conditional decision, made in order against the
+state left by the earlier requests, on a copy of the retry state; nothing is
+applied or visible before the shared create succeeds. A single request keeps
+log version 1; a group uses log version 2 (`first_sequence` plus ordered
+request/outcome entries) at the key of its first sequence, and recovery
+replays it as consecutive sequences. Invalid requests and retained duplicates
+are answered individually without publication. If the create fails, every
+accepted request in the group is uncertain and the handle is poisoned, as for
+a single write. The admission worker groups consecutive queued writes (at most
+16 and 1 MiB) without any added delay, so concurrent writers share one PUT;
+log-object, tail and backup bookkeeping count objects, not sequences.
+
 ### Segmented serving
 
 `SegmentedServing` claims the namespace with the owned-store protocol, opens
