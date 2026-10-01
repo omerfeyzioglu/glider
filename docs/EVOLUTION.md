@@ -245,3 +245,13 @@ consolidation transients pushed RSS over 64 MiB until removed; mimalloc and
 row-count block routing were measured and rejected. The final 300-second
 MinIO run passed every M21 gate; a reduced AWS check confirmed correctness and
 found a forced-seal defect. [Evidence](../benchmarks/M24.md).
+
+## 2026-10-01 — Group commit does not reduce PUTs under paced writes
+
+Log version 2 lets the committer publish consecutive queued requests in one
+log object without delaying acknowledgement. Rerunning the M21 acceptance
+showed every one of 1,200 paced writes still produced its own log object:
+independent arrivals 250 ms apart never queue together. The envelope passed
+at 5.30 PUT/s because maintenance published fewer packs and roots; the M27
+target of 4 PUT/s needs batching by clients or a different arrival pattern,
+not more committer work. [Evidence](../benchmarks/M27.md).
