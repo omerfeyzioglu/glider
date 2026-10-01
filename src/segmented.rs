@@ -2246,6 +2246,231 @@ mod tests {
     use crate::{store::LocalStore, Metric};
     use std::collections::BTreeMap;
 
+    struct PropertyRng(u64);
+
+    impl PropertyRng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn value(&mut self) -> f32 {
+            match self.next() % 8 {
+                0 => -0.,
+                1 => f32::MAX,
+                2 => f32::MIN,
+                _ => (self.next() as i32 as f32) / 2048.,
+            }
+        }
+    }
+
+    #[test]
+    fn run_index_decoder_round_trips_and_rejects_mutations() {
+        let seed = 0x7a31_90cc_d551_2e04_u64;
+        let mut rng = PropertyRng(seed);
+        for case in 0..40 {
+            let first = 1 + rng.next() % 100;
+            let last = first + rng.next() % 100;
+            let blocks = 1 + rng.next() as usize % 8;
+            let entries = (0..1 + rng.next() % 30)
+                .map(|row| IndexEntry {
+                    id: row * 3 + rng.next() % 3,
+                    sequence: first + rng.next() % (last - first + 1),
+                    block: rng.next() as u32 % blocks as u32,
+                    deleted: rng.next().is_multiple_of(2),
+                })
+                .collect();
+            let index = RunIndex {
+                sequence: last,
+                entries,
+            };
+            let bytes = index.encode(first, blocks).unwrap();
+            let decoded = RunIndex::decode(&bytes, first, last, blocks).unwrap();
+            assert_eq!(
+                decoded.entries, index.entries,
+                "seed {seed:#x}, case {case}"
+            );
+            assert_eq!(
+                decoded.encode(first, blocks).unwrap(),
+                bytes,
+                "seed {seed:#x}, case {case}"
+            );
+            let check = |candidate: &[u8], mutation: &str| {
+                let result =
+                    std::panic::catch_unwind(|| RunIndex::decode(candidate, first, last, blocks));
+                let decoded = result.unwrap_or_else(|_| {
+                    panic!("index panicked: seed {seed:#x}, case {case}, {mutation}")
+                });
+                if let Ok(index) = decoded {
+                    assert_eq!(
+                        index.encode(first, blocks).unwrap(),
+                        candidate,
+                        "seed {seed:#x}, case {case}, {mutation}"
+                    );
+                }
+            };
+            for length in 0..bytes.len().min(160) {
+                check(&bytes[..length], &format!("truncate {length}"));
+            }
+            check(&bytes[..bytes.len() - 1], "truncate final byte");
+            for flip in 0..24 {
+                let mut changed = bytes.clone();
+                let offset = rng.next() as usize % changed.len();
+                changed[offset] ^= 1 << (rng.next() % 8);
+                check(&changed, &format!("flip {flip} at {offset}"));
+            }
+            let mut changed = bytes.clone();
+            changed.push(0);
+            check(&changed, "append");
+            let mut changed = bytes.clone();
+            changed[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+            check(&changed, "huge entry count");
+        }
+    }
+
+    #[test]
+    fn authenticated_block_dispatch_round_trips_and_rejects_mutations() {
+        let seed = 0x29ac_773e_0861_b4d2_u64;
+        let mut rng = PropertyRng(seed);
+        for case in 0..40 {
+            let config = Config {
+                dimensions: 1 + case as usize,
+                metric: if case % 2 == 0 {
+                    Metric::SquaredEuclidean
+                } else {
+                    Metric::Manhattan
+                },
+            };
+            let records = (0..1 + rng.next() % 6)
+                .map(|row| {
+                    let id = row * 3 + rng.next() % 3;
+                    let mutation = if rng.next().is_multiple_of(4) {
+                        Mutation::Delete { id }
+                    } else {
+                        let metadata = (0..rng.next() % 3)
+                            .map(|key| (format!("key-{key}"), format!("value-{}", rng.next())))
+                            .collect();
+                        Mutation::Put {
+                            id,
+                            vector: (0..config.dimensions).map(|_| rng.value()).collect(),
+                            metadata,
+                        }
+                    };
+                    BlockRecord {
+                        sequence: 1 + rng.next() % 100,
+                        mutation,
+                    }
+                })
+                .collect();
+            let block = Block::new(config, case, records).unwrap();
+            let (_, refs) =
+                encode_pack("pack-property", config, std::slice::from_ref(&block)).unwrap();
+            for (version, bytes) in [
+                (1, encode(&block).unwrap()),
+                (2, codec::encode(&block).unwrap()),
+            ] {
+                let mut reference = refs[0].clone();
+                reference.length = bytes.len();
+                reference.payload_len = bytes.len();
+                reference.sha256 = format!("{:x}", Sha256::digest(&bytes));
+                let decoded = decode_block_bytes(config, &reference, &bytes).unwrap();
+                let reencoded = if version == 1 {
+                    encode(&decoded).unwrap()
+                } else {
+                    codec::encode(&decoded).unwrap()
+                };
+                assert_eq!(
+                    reencoded, bytes,
+                    "seed {seed:#x}, case {case}, version {version}"
+                );
+                let check = |candidate: &[u8], mutation: &str, authenticated: bool| {
+                    let mut reference = reference.clone();
+                    if authenticated {
+                        reference.length = candidate.len();
+                        reference.sha256 = format!("{:x}", Sha256::digest(candidate));
+                    }
+                    let result = std::panic::catch_unwind(|| {
+                        decode_block_bytes(config, &reference, candidate)
+                    });
+                    let decoded = result.unwrap_or_else(|_| panic!("block dispatch panicked: seed {seed:#x}, case {case}, version {version}, {mutation}"));
+                    // Accepted bytes must at least decode to a valid block
+                    // whose re-encoding is stable; digests reject altered
+                    // bytes in production before decoding.
+                    if let Ok(block) = decoded {
+                        let encode_version = |block: &Block| {
+                            if version == 1 {
+                                encode(block).unwrap()
+                            } else {
+                                codec::encode(block).unwrap()
+                            }
+                        };
+                        let reencoded = encode_version(&block);
+                        let again = decode_block_bytes(
+                            config,
+                            &BlockRef {
+                                length: reencoded.len(),
+                                sha256: format!("{:x}", Sha256::digest(&reencoded)),
+                                ..reference.clone()
+                            },
+                            &reencoded,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            encode_version(&again),
+                            reencoded,
+                            "seed {seed:#x}, case {case}, version {version}, {mutation}"
+                        );
+                    }
+                };
+                for length in 0..bytes.len().min(96) {
+                    check(
+                        &bytes[..length],
+                        &format!("truncate {length}"),
+                        version == 2,
+                    );
+                }
+                check(
+                    &bytes[..bytes.len() - 1],
+                    "truncate final byte",
+                    version == 2,
+                );
+                for flip in 0..12 {
+                    let mut changed = bytes.clone();
+                    let offset = rng.next() as usize % changed.len();
+                    changed[offset] ^= 1 << (rng.next() % 8);
+                    check(&changed, &format!("flip {flip} at {offset}"), version == 2);
+                    check(&changed, "wrong digest", false);
+                }
+                let mut changed = bytes.clone();
+                changed.push(0);
+                check(&changed, "append", version == 2);
+                if version == 2 {
+                    let mut changed = bytes.clone();
+                    changed[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+                    check(&changed, "huge raw length", true);
+                    let mut raw =
+                        zstd::bulk::decompress(&bytes[8..], codec::MAX_RAW_BLOCK_BYTES).unwrap();
+                    raw[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+                    let mut changed = bytes[..8].to_vec();
+                    changed.extend_from_slice(&zstd::bulk::compress(&raw, 3).unwrap());
+                    check(&changed, "huge record count", true);
+                } else {
+                    let mut changed = bytes.clone();
+                    changed[0] = b'!';
+                    check(&changed, "authenticated invalid JSON", true);
+                }
+                let mut wrong = reference.clone();
+                wrong.rows += 1;
+                assert!(
+                    decode_block_bytes(config, &wrong, &bytes).is_err(),
+                    "seed {seed:#x}, case {case}, version {version}"
+                );
+            }
+        }
+    }
+
     /// `base + id` on every axis plus under 0.01 of noise on axes after the
     /// first, so test blocks do not compress to a trivial size.
     fn noisy(base: f32, id: u64) -> Vec<f32> {

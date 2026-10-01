@@ -1265,14 +1265,174 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::{approximate, approximate_within, code_bytes, set_code};
+    use super::*;
     use crate::{
         retry::{Request, RequestId},
-        segmented::SegmentedDatabase,
+        segmented::{encode_pack, BlockRecord, SegmentedDatabase},
         store::LocalStore,
         Config, Metric, Mutation,
     };
     use std::collections::BTreeMap;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn value(&mut self) -> f32 {
+            match self.next() % 8 {
+                0 => -0.,
+                1 => f32::MAX,
+                2 => f32::MIN,
+                _ => (self.next() as i32 as f32) / 4096.,
+            }
+        }
+    }
+
+    #[test]
+    fn sketch_and_frame_decoders_round_trip_and_reject_mutations() {
+        let seed = 0x615e_34b0_4f20_09ac_u64;
+        let mut rng = Rng(seed);
+        for case in 0..40 {
+            let config = Config {
+                dimensions: 1 + case as usize,
+                metric: if case % 2 == 0 {
+                    Metric::SquaredEuclidean
+                } else {
+                    Metric::Manhattan
+                },
+            };
+            let options = SegmentedOptions {
+                resident_filter: Some(("kind".into(), "resident".into())),
+            };
+            let pack = format!("pack-property-{case}");
+            let blocks: Vec<_> = (0..1 + rng.next() % 3)
+                .map(|block| {
+                    let records = (0..1 + rng.next() % 5)
+                        .map(|row| {
+                            let id = block * 100 + row * 3 + rng.next() % 3;
+                            let mutation = if rng.next().is_multiple_of(4) {
+                                Mutation::Delete { id }
+                            } else {
+                                let metadata = if rng.next().is_multiple_of(2) {
+                                    BTreeMap::from([("kind".into(), "resident".into())])
+                                } else {
+                                    BTreeMap::new()
+                                };
+                                Mutation::Put {
+                                    id,
+                                    vector: (0..config.dimensions).map(|_| rng.value()).collect(),
+                                    metadata,
+                                }
+                            };
+                            BlockRecord {
+                                sequence: 1 + rng.next() % 100,
+                                mutation,
+                            }
+                        })
+                        .collect();
+                    Block::new(config, block as u32, records).unwrap()
+                })
+                .collect();
+            let (_, refs) = encode_pack(&pack, config, &blocks).unwrap();
+            let pairs: Vec<_> = refs.iter().zip(&blocks).collect();
+            let digest = [case as u8; 32];
+            let sketch = PackSketch::build(config, &options, &pack, &pairs).unwrap();
+            let bytes = sketch.encode(config, &digest);
+            let decoded = PackSketch::decode(&bytes, config, &digest, &pack).unwrap();
+            assert_eq!(
+                decoded.encode(config, &digest),
+                bytes,
+                "seed {seed:#x}, case {case}"
+            );
+            let framed = frame(&bytes);
+            let Framed::Sketch(found) = unframe(&framed, framed.len()) else {
+                panic!("valid frame rejected: seed {seed:#x}, case {case}");
+            };
+            assert_eq!(found, bytes, "seed {seed:#x}, case {case}");
+            assert!(
+                matches!(unframe(&framed[..FRAME_HEADER], framed.len()), Framed::Need(end) if end == framed.len()),
+                "seed {seed:#x}, case {case}"
+            );
+
+            let check_sketch = |candidate: &[u8], mutation: &str| {
+                let outcome = std::panic::catch_unwind(|| {
+                    PackSketch::decode(candidate, config, &digest, &pack)
+                });
+                let decoded = outcome.unwrap_or_else(|_| {
+                    panic!("sketch panicked: seed {seed:#x}, case {case}, {mutation}")
+                });
+                if let Ok(sketch) = decoded {
+                    assert_eq!(
+                        sketch.encode(config, &digest),
+                        candidate,
+                        "seed {seed:#x}, case {case}, {mutation}"
+                    );
+                }
+            };
+            for length in 0..bytes.len().min(160) {
+                check_sketch(&bytes[..length], &format!("truncate {length}"));
+            }
+            check_sketch(&bytes[..bytes.len() - 1], "truncate final byte");
+            for flip in 0..24 {
+                let mut changed = bytes.clone();
+                let offset = rng.next() as usize % changed.len();
+                changed[offset] ^= 1 << (rng.next() % 8);
+                check_sketch(&changed, &format!("flip {flip} at {offset}"));
+            }
+            let mut changed = bytes.clone();
+            changed.push(0);
+            check_sketch(&changed, "append");
+            for offset in [48, 52, 56, 60] {
+                let mut changed = bytes.clone();
+                changed[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+                check_sketch(&changed, &format!("huge field at {offset}"));
+            }
+
+            let check_frame = |candidate: &[u8], mutation: &str| {
+                let result = std::panic::catch_unwind(|| unframe(candidate, candidate.len()));
+                let framed = result.unwrap_or_else(|_| {
+                    panic!("frame panicked: seed {seed:#x}, case {case}, {mutation}")
+                });
+                if let Framed::Sketch(sketch) = framed {
+                    assert_eq!(
+                        frame(sketch),
+                        candidate[..FRAME_HEADER + sketch.len()],
+                        "seed {seed:#x}, case {case}, {mutation}"
+                    );
+                }
+            };
+            for length in 0..framed.len().min(160) {
+                check_frame(&framed[..length], &format!("truncate {length}"));
+            }
+            check_frame(&framed[..framed.len() - 1], "truncate final byte");
+            for flip in 0..16 {
+                let mut changed = framed.clone();
+                let offset = rng.next() as usize % changed.len();
+                changed[offset] ^= 1 << (rng.next() % 8);
+                check_frame(&changed, &format!("flip {flip} at {offset}"));
+            }
+            for length in [u64::MAX, MAX_SKETCH_BYTES as u64 + 1] {
+                let mut changed = framed.clone();
+                changed[8..16].copy_from_slice(&length.to_le_bytes());
+                check_frame(&changed, "huge frame length");
+            }
+            let mut with_payload = framed.clone();
+            with_payload.extend_from_slice(&[1, 2, 3]);
+            assert!(
+                matches!(
+                    unframe(&with_payload, with_payload.len()),
+                    Framed::Sketch(_)
+                ),
+                "seed {seed:#x}, case {case}"
+            );
+        }
+    }
 
     #[test]
     fn five_bit_codec_crosses_byte_boundaries() {
