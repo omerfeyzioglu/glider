@@ -122,8 +122,8 @@ impl ServerConfig {
     /// Read the configuration from environment variables:
     ///
     /// - `GLIDER_LISTEN` (default `127.0.0.1:8080`), `GLIDER_API_TOKEN`
-    /// - `GLIDER_DIMENSIONS`, `GLIDER_METRIC` (`squared_euclidean` or
-    ///   `manhattan`), optional `GLIDER_RESIDENT_FILTER=key=value`
+    /// - `GLIDER_DIMENSIONS`, `GLIDER_METRIC` (`squared_euclidean`,
+    ///   `manhattan` or `cosine`), optional `GLIDER_RESIDENT_FILTER=key=value`
     /// - storage: `GLIDER_DATA_DIR` for a local directory, or
     ///   `GLIDER_S3_BUCKET`, `GLIDER_S3_NAMESPACE`, `GLIDER_S3_REGION`
     ///   (default `us-east-1`), optional `GLIDER_S3_ENDPOINT` and the usual
@@ -141,6 +141,7 @@ impl ServerConfig {
         {
             "squared_euclidean" => Metric::SquaredEuclidean,
             "manhattan" => Metric::Manhattan,
+            "cosine" => Metric::Cosine,
             _ => return Err(invalid("GLIDER_METRIC")),
         };
         let resident_filter = env("GLIDER_RESIDENT_FILTER")
