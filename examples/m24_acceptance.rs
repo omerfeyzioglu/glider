@@ -29,7 +29,14 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const ROWS: u64 = 250_000;
+/// Rows in the namespace: the M21 250,000 unless `GLIDER_M24_ROWS` selects
+/// a reduced-scale check (a multiple of 400).
+fn rows() -> u64 {
+    env::var("GLIDER_M24_ROWS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(250_000)
+}
 const DIMENSIONS: usize = 128;
 const FILTER: (&str, &str) = ("cohort", "one-percent");
 
@@ -202,13 +209,13 @@ impl Rows {
 
 /// Overwrite generation g of an ID uses base row (id + 137g) mod 250,000.
 fn vector(base: &Rows, id: u64, generation: u64) -> Result<Vec<f32>> {
-    base.row((id + 137 * generation) % ROWS)
+    base.row((id + 137 * generation) % rows())
 }
 
 /// Writer c, round r overwrites 100 IDs in its own quarter with generation r+1.
 fn batch_ids(client: u64, round: u64) -> impl Iterator<Item = u64> {
-    let slot = round % (ROWS / 4 / 100);
-    (0..100).map(move |n| client * (ROWS / 4) + slot * 100 + n)
+    let slot = round % (rows() / 4 / 100);
+    (0..100).map(move |n| client * (rows() / 4) + slot * 100 + n)
 }
 
 fn rss() -> u64 {
@@ -321,7 +328,7 @@ fn load(args: &[String]) -> Result<Value> {
     let mut sequence = 0;
     let mut longest_step = Duration::ZERO;
     let mut units = BTreeMap::new();
-    for batch in 0..ROWS / 100 {
+    for batch in 0..rows() / 100 {
         let mutations = (batch * 100..(batch + 1) * 100)
             .map(|id| {
                 Ok(Mutation::Put {
@@ -355,7 +362,7 @@ fn load(args: &[String]) -> Result<Value> {
         }
     }
     let after = handles.metrics.snapshot();
-    let result = json!({"rows":ROWS,"open":open,"load_ms":ms(started.elapsed()),
+    let result = json!({"rows":rows(),"open":open,"load_ms":ms(started.elapsed()),
         "http":counts(&before,&after),"longest_maintenance_step_ms":ms(longest_step),
         "runs":db.database().run_count(),"blocks":db.database().block_count(),
         "tail_objects":db.database().tail_objects(),"sequence":sequence,
@@ -558,12 +565,20 @@ fn serve(args: &[String]) -> Result<Value> {
     };
     let queries = Rows::open(queries)?;
     let base = Arc::new(Rows::open(base)?);
-    let oracle: Value = serde_json::from_slice(&fs::read(oracle)?)?;
+    // "-" skips the static-quality pass, whose oracle covers only 250,000 rows.
+    let oracle: Option<Value> = if oracle == "-" {
+        None
+    } else {
+        Some(serde_json::from_slice(&fs::read(oracle)?)?)
+    };
     let rounds: u64 = rounds.parse()?;
     let rss_before_open = rss();
     let (mut db, handles, open) = open_serving(namespace, Some(PathBuf::from(cache)))?;
     let rss_after_open = rss();
-    let static_quality = static_pass(&mut db, &queries, &oracle)?;
+    let static_quality = match &oracle {
+        Some(oracle) => static_pass(&mut db, &queries, oracle)?,
+        None => Value::Null,
+    };
     let rss_after_static = rss();
     let cache_after_static = db.database().cache_stats()?;
     drop(oracle);
@@ -981,40 +996,47 @@ fn verify(args: &[String]) -> Result<Value> {
         loss_equal &= &found == expected;
     }
     let mut db = db;
-    let Opened {
-        store: destination,
-        metrics,
-        ..
-    } = store(backup)?;
-    let before = metrics.snapshot();
-    let started = Instant::now();
-    db.backup_to(destination)?;
-    let backup_ms = ms(started.elapsed());
-    let backup_http = counts(&before, &metrics.snapshot());
-    let restored = SegmentedDatabase::open_with_options(store(backup)?.store, config(), options())?;
-    let mut backup_equal = restored.sequence() == db.sequence();
-    for (oracle, expected) in oracles.iter().zip(&first_results) {
-        let filter = if oracle.filtered {
-            vec![FILTER]
-        } else {
-            Vec::new()
-        };
-        let found: Vec<_> = restored
-            .search_selective_within(&oracle.query, 10, serving_budget, &filter)?
-            .iter()
-            .map(|n| n.id)
-            .collect();
-        backup_equal &= &found == expected;
+    // "-" skips the backup copy, e.g. for a bandwidth-bounded remote check.
+    let mut backup_report = json!(null);
+    if backup != "-" {
+        let Opened {
+            store: destination,
+            metrics,
+            ..
+        } = store(backup)?;
+        let before = metrics.snapshot();
+        let started = Instant::now();
+        db.backup_to(destination)?;
+        let backup_ms = ms(started.elapsed());
+        let backup_http = counts(&before, &metrics.snapshot());
+        let restored =
+            SegmentedDatabase::open_with_options(store(backup)?.store, config(), options())?;
+        let mut backup_equal = restored.sequence() == db.sequence();
+        for (oracle, expected) in oracles.iter().zip(&first_results) {
+            let filter = if oracle.filtered {
+                vec![FILTER]
+            } else {
+                Vec::new()
+            };
+            let found: Vec<_> = restored
+                .search_selective_within(&oracle.query, 10, serving_budget, &filter)?
+                .iter()
+                .map(|n| n.id)
+                .collect();
+            backup_equal &= &found == expected;
+        }
+        backup_report = json!({"backup_ms":backup_ms,"backup_http":backup_http,
+            "backup_restored_equal":backup_equal,
+            "restored_sketch_rebuilds":restored.sketch_rebuilds()});
     }
     db.close()?;
     Ok(
         json!({"reopen":reopen,"scan_ms":scan_ms,"live_documents":seen,
-        "expected_documents":ROWS,"value_mismatches":mismatches,
+        "expected_documents":rows(),"value_mismatches":mismatches,
         "overwritten_ids":generation.len(),"update_wave_quality":quality,
         "unfiltered_mean_recall_by_block_budget":budgets,
         "cache_loss_open":loss_open,"cache_loss_results_equal":loss_equal,
-        "backup_ms":backup_ms,"backup_http":backup_http,"backup_restored_equal":backup_equal,
-        "restored_sketch_rebuilds":restored.sketch_rebuilds()}),
+        "backup":backup_report}),
     )
 }
 

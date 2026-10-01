@@ -14,6 +14,7 @@ from pathlib import Path
 import platform
 import secrets
 import tempfile
+import time
 
 from minio_harness import container_scope, ready, run
 from test_s3 import IMAGE
@@ -70,7 +71,7 @@ def gates(load, serve, verify, visible_bytes):
         "list_le_1_per_minute": http["list"] <= max(1, seconds / 60),
         "visible_payload_le_1GiB": visible_bytes <= 1024 * MIB,
         "cache_loss_preserves_results": verify["cache_loss_results_equal"],
-        "backup_restores_committed_view": verify["backup_restored_equal"],
+        "backup_restores_committed_view": verify["backup"]["backup_restored_equal"],
         "no_maintenance_errors": serve["maintenance_errors"] == 0,
     }
     return checks
@@ -127,6 +128,15 @@ def main():
         port = run("docker", "port", name, "9000/tcp", capture=True).strip().split(":")[-1]
         endpoint = "http://127.0.0.1:" + port
         ready(endpoint, name)
+        # S3 signing rejects requests when the Docker VM clock lags the host,
+        # which happens briefly after the host sleeps; wait for it to resync.
+        for _ in range(60):
+            server = int(run("docker", "exec", name, "date", "-u", "+%s", capture=True).strip())
+            if abs(server - int(time.time())) <= 5:
+                break
+            time.sleep(5)
+        else:
+            raise RuntimeError("Docker VM clock is not synchronized with the host")
         run("docker", "exec", name, "mc", "mb", "test/glider-test", capture=True)
         env.update(AWS_ACCESS_KEY_ID=env["MINIO_ROOT_USER"], AWS_SECRET_ACCESS_KEY=env["MINIO_ROOT_PASSWORD"],
                    GLIDER_S3_ENDPOINT=endpoint, GLIDER_S3_BUCKET="glider-test")

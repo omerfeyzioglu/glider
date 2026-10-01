@@ -296,14 +296,22 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
         if self.db.tail_objects >= super::MAX_TAIL_OBJECTS && !self.db.poisoned {
             let started = Instant::now();
             self.counters.forced_seals += 1;
-            let result = (|| {
+            let result = (|| -> Result<()> {
                 while self.db.prune.is_some() {
                     self.db.prune_step()?;
                 }
                 while self.db.reclaim.is_some() {
                     self.db.reclaim_step()?;
                 }
-                self.db.seal_delta()
+                // Finish a seal started while idle; it may already free the
+                // tail. Only then start another.
+                while self.db.seal.is_some() {
+                    self.db.seal_step()?;
+                }
+                if self.db.tail_objects >= super::MAX_TAIL_OBJECTS {
+                    self.db.seal_delta()?;
+                }
+                Ok(())
             })();
             self.maintenance_time += started.elapsed();
             result?;

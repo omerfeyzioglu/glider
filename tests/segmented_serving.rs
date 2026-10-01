@@ -190,3 +190,46 @@ fn service_interleaves_maintenance_and_backup_restores_the_committed_view() {
     );
     glider::admission::Engine::close(db).unwrap();
 }
+
+/// A write at the hard tail bound must finish a seal that idle maintenance
+/// started (on slow storage the tail can outgrow it) instead of failing.
+#[test]
+fn write_at_tail_bound_finishes_an_idle_seal_in_progress() {
+    use glider::admission::Engine;
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = SegmentedServing::open(
+        LocalStore::open(temp.path().join("db")).unwrap(),
+        config(),
+        options(),
+        serving(&temp.path().join("cache")),
+    )
+    .unwrap();
+    let write = |db: &mut SegmentedServing<LocalStore>, round: u64| {
+        db.apply_request(Request {
+            id: RequestId {
+                boundary: db.sequence(),
+                nonce: u128::from(round).to_le_bytes(),
+            },
+            conditions: Vec::new(),
+            mutations: vec![Mutation::Put {
+                id: round,
+                vector: vector(round, 1),
+                metadata: BTreeMap::new(),
+            }],
+        })
+    };
+    for round in 0..4 {
+        write(&mut db, round).unwrap();
+    }
+    // One idle unit plans a seal of these four logs without finishing it.
+    assert!(db.maintenance_step().unwrap());
+    assert_eq!(db.last_unit(), "seal_plan");
+    for round in 4..80 {
+        write(&mut db, round).unwrap();
+    }
+    assert_eq!(db.counters().forced_seals, 2);
+    assert!(db.database().tail_objects() < 64);
+    let exact = db.database().search_exact(&vector(40, 1), 3, &[]).unwrap();
+    assert_eq!(ids(&exact)[0], 40);
+    db.close().unwrap();
+}
