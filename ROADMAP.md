@@ -849,7 +849,8 @@ exact search as the quality oracle.
 
 ## M25 — Make the segmented engine's guarantees continuously tested
 
-Status: next.
+Status: done. CI runs the in-memory crash-point matrix, a sampled matrix on
+MinIO and decoder property tests on every PR.
 
 Steps:
 - Extend the segmented MinIO fault test, which CI runs but which covers only
@@ -869,7 +870,11 @@ exactly or fails closed.
 
 ## M26 — One engine and a stable library API
 
-Status: planned.
+Status: done, except inner product. The segmented engine is no longer behind
+a feature flag, engine and configuration mismatches fail with explicit errors,
+and DESIGN.md states each engine's role and format compatibility. Inner
+product is deferred: sketch lower bounds assume Euclidean geometry, and cosine
+covers normalized embeddings.
 
 Steps:
 - Promote the segmented engine out of `experimental-segmented`; expose one
@@ -887,8 +892,11 @@ and selective tests, and older namespaces open or fail with a clear error.
 
 ## M27 — Group commit to free write and request budget
 
-Status: planned. The accepted envelope uses 5.96 of 6 PUT/s, about 4 of them
-one log object per client batch.
+Status: implemented, target not met. Log v2 groups have crash tests in CI;
+the acceptance rerun passes at 5.30 PUT/s, but paced independent writes never
+queue together, so each still publishes its own log object
+(`benchmarks/M27.md`). Reaching 4 PUT/s needs client batching, not a longer
+committer window.
 
 Steps:
 - Let the single committer publish several queued independent requests in one
@@ -903,7 +911,8 @@ Done when: the M21 envelope passes with at most 4 PUT/s and write p95 still
 
 ## M28 — Network service
 
-Status: planned.
+Status: implemented (`glider-server`, container image, Compose quickstart).
+The concurrent read execution decision still needs a throughput measurement.
 
 Steps:
 - Add a `glider-server` binary: HTTP/JSON API for collections, batched
@@ -921,7 +930,7 @@ clean checkout.
 
 ## M29 — Operations
 
-Status: planned.
+Status: in progress. Prometheus metrics are done; admin commands and drills remain.
 
 Steps:
 - Prometheus metrics (latency classes, queue depth, maintenance backlog,
@@ -936,9 +945,10 @@ verified state; the runbook needs no source reading.
 
 ## M30 — General metadata filtering
 
-Status: planned. Only one declared equality predicate is answered
-selectively today; other filters return an error unless the caller uses
-exact search.
+Status: in progress. The declared resident predicate is exact; any other
+equality conjunction is post-filtered over the routed blocks (no extra reads,
+approximate, possibly fewer than k). The quality policy and its measurement
+remain.
 
 Steps:
 - Specify supported predicates (equality, IN, conjunctions) and a quality

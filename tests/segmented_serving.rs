@@ -1,5 +1,3 @@
-#![cfg(feature = "experimental-segmented")]
-
 use glider::{
     admission::{Limits, Service, Shutdown},
     retry::{Request, RequestId},

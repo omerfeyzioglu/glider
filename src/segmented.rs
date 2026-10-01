@@ -597,6 +597,11 @@ fn metadata_bytes(config: Config, options: &SegmentedOptions) -> Result<Vec<u8>>
 
 fn check_metadata(bytes: &[u8], config: Config, options: &SegmentedOptions) -> Result<()> {
     let (stored_config, stored_options) = match decode::<MetadataVersion>(bytes)?.version {
+        1 => {
+            return Err(Error::Invalid(
+                "namespace uses the resident Database format (metadata v1)".into(),
+            ))
+        }
         2 => {
             let metadata: MetadataV2 = decode(bytes)?;
             (metadata.config, SegmentedOptions::default())
@@ -605,10 +610,17 @@ fn check_metadata(bytes: &[u8], config: Config, options: &SegmentedOptions) -> R
             let metadata: MetadataV3 = decode(bytes)?;
             (metadata.config, metadata.options)
         }
-        _ => return Err(Error::Corrupt("invalid segmented metadata".into())),
+        version => {
+            return Err(Error::Corrupt(format!(
+                "unsupported segmented metadata version {version}"
+            )))
+        }
     };
     if stored_config != config || stored_options != *options {
-        return Err(Error::Corrupt("invalid segmented metadata".into()));
+        return Err(Error::Invalid(format!(
+            "namespace was created with {stored_config:?} and {stored_options:?}, \
+             not {config:?} and {options:?}"
+        )));
     }
     Ok(())
 }

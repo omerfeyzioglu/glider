@@ -83,17 +83,17 @@ def main():
                     hasher.update(chunk)
             if hasher.hexdigest() != digest:
                 raise ValueError(f"unexpected SIFT1M digest: {filename}")
-        run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
+        run("cargo", "build", "--locked", "--release", "--features", "s3",
             "--example", "m22_capacity", env=env)
         if cache_probe:
-            run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
+            run("cargo", "build", "--locked", "--release", "--features", "s3",
                 "--example", "m23_cache", env=env)
         (capacity or cache_probe).mkdir(parents=True, exist_ok=False)
     else:
         run("cargo", "test", "--locked", "--features", "s3", "--lib", "--no-run", env=env)
     if not (range_only or segmented_only or capacity or cache_probe):
         run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
-        run("cargo", "test", "--locked", "--release", "--features", "s3,experimental-segmented",
+        run("cargo", "test", "--locked", "--release", "--features", "s3",
             "--test", "segmented_crash", "--no-run", env=env)
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
@@ -162,7 +162,7 @@ def main():
             return
         run(*test_args, "segmented::tests::minio_segmented_publication_recovers_before_and_after_root_create",
             "--", "--ignored", "--nocapture", env=env)
-        run("cargo", "test", "--locked", "--release", "--features", "s3,experimental-segmented",
+        run("cargo", "test", "--locked", "--release", "--features", "s3",
             "--test", "segmented_crash", "minio_", "--", "--ignored", env=env)
         run(*test_args, "store::s3::tests::minio_", "--", "--ignored", "--nocapture", env=env)
         run(*test_args, "store::s3::tests::server_restart_prepare", "--", "--ignored", env=env)

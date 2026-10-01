@@ -5,10 +5,9 @@ edition = "2021"
 
 [features]
 default = []
-experimental-segmented = []
 s3 = ["dep:object_store", "dep:tokio", "dep:futures", "dep:async-trait"]
 # HTTP service binary over the segmented engine.
-server = ["s3", "experimental-segmented", "dep:axum", "tokio/signal", "tokio/macros"]
+server = ["s3", "dep:axum", "tokio/signal", "tokio/macros"]
 
 [dependencies]
 object_store = { version = "0.14.1", default-features = false, features = ["aws"], optional = true }
@@ -49,19 +48,18 @@ required-features = ["s3"]
 
 [[example]]
 name = "m22_capacity"
-required-features = ["s3", "experimental-segmented"]
+required-features = ["s3"]
 
 [[example]]
 name = "m23_cache"
-required-features = ["s3", "experimental-segmented"]
+required-features = ["s3"]
 
 [[example]]
 name = "m24_layout_probe"
-required-features = ["experimental-segmented"]
 
 [[example]]
 name = "m24_acceptance"
-required-features = ["s3", "experimental-segmented"]
+required-features = ["s3"]
 
 [[bin]]
 name = "glider-server"

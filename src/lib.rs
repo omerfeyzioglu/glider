@@ -21,7 +21,6 @@ pub mod ivf;
 pub mod ownership;
 pub mod recovery;
 pub mod retry;
-#[cfg(any(test, feature = "experimental-segmented"))]
 pub mod segmented;
 // Unit-test builds give `LocalStore` a non-`Send` fault hook; the server
 // is exercised by its integration test instead.
@@ -191,6 +190,10 @@ pub struct MaintenanceStatus {
     pub visible_objects: usize,
     pub should_compact: bool,
     pub writes_blocked: bool,
+}
+#[derive(Deserialize)]
+struct MetadataVersion {
+    version: u32,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -528,10 +531,21 @@ fn inspect_namespace<S: ObjectStore>(
     let mut keys = store.list()?;
     match store.get("metadata")? {
         Some(bytes) => {
-            let metadata: Metadata = decode(&bytes)?;
-            if metadata.version != 1 {
-                return Err(Error::Corrupt("unsupported metadata version".into()));
+            match decode::<MetadataVersion>(&bytes)?.version {
+                1 => {}
+                version @ (2 | 3) => {
+                    return Err(Error::Invalid(format!(
+                        "namespace uses the segmented format (metadata v{version}); \
+                         open it with SegmentedDatabase"
+                    )))
+                }
+                version => {
+                    return Err(Error::Corrupt(format!(
+                        "unsupported metadata version {version}"
+                    )))
+                }
             }
+            let metadata: Metadata = decode(&bytes)?;
             metadata
                 .config
                 .validate()

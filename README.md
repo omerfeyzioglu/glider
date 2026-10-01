@@ -335,9 +335,12 @@ serial library API has no HTTP listener or background scheduler. See
 and the 30-minute soak command. After uncertainty, follow the
 [fresh-prefix recovery procedure](docs/RECOVERY.md).
 
-## Larger-than-RAM segmented serving (experimental)
+## Segmented collections (library API)
 
-With the `experimental-segmented` feature (plus `s3` for object storage),
+The HTTP server is built on this engine; the sections above describe the
+resident `Database` engine, which keeps every vector in RAM and suits small
+collections. The two use different namespace formats, and opening one with the
+other fails with an explicit error. With the `s3` feature for object storage,
 `SegmentedServing` keeps only a compact ID directory, persisted per-pack
 five-bit routing sketches and the unsealed log tail in memory. Vectors stay in
 immutable object-storage packs read through a bounded RAM/NVMe block cache.

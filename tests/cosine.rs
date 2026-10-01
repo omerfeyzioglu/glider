@@ -1,5 +1,6 @@
 use glider::{
     ivf::IvfConfig,
+    segmented::SegmentedDatabase,
     store::{LocalStore, ObjectStore},
     streaming::StreamingDatabase,
     Config, Database, Error, Metric, Neighbor,
@@ -147,12 +148,11 @@ fn resident_cosine_oracle_replay_and_metadata() {
     .is_err());
 }
 
-#[cfg(feature = "experimental-segmented")]
 #[test]
 fn segmented_cosine_oracle_seal_selective_and_resident() {
     use glider::{
         retry::{Request, RequestId},
-        segmented::{SegmentedDatabase, SegmentedOptions},
+        segmented::SegmentedOptions,
         Mutation,
     };
     let temp = tempfile::tempdir().unwrap();
@@ -293,4 +293,35 @@ fn segmented_cosine_oracle_seal_selective_and_resident() {
         options
     )
     .is_err());
+}
+
+/// A namespace opens only with the engine and configuration that created it;
+/// every mismatch is an explicit input error, not corruption.
+#[test]
+fn engine_and_configuration_mismatches_fail_clearly() {
+    let temp = tempfile::tempdir().unwrap();
+    let resident = temp.path().join("resident");
+    let segmented = temp.path().join("segmented");
+    drop(Database::open(LocalStore::open(&resident).unwrap(), config()).unwrap());
+    drop(SegmentedDatabase::open(LocalStore::open(&segmented).unwrap(), config()).unwrap());
+    let euclidean = Config {
+        metric: Metric::SquaredEuclidean,
+        ..config()
+    };
+    let invalid = |result: glider::Result<()>, expected: &str| match result {
+        Err(Error::Invalid(message)) => assert!(message.contains(expected), "{message}"),
+        other => panic!("expected invalid input mentioning {expected}: {other:?}"),
+    };
+    invalid(
+        SegmentedDatabase::open(LocalStore::open(&resident).unwrap(), config()).map(drop),
+        "resident Database format",
+    );
+    invalid(
+        Database::open(LocalStore::open(&segmented).unwrap(), config()).map(drop),
+        "segmented format",
+    );
+    invalid(
+        SegmentedDatabase::open(LocalStore::open(&segmented).unwrap(), euclidean).map(drop),
+        "Cosine",
+    );
 }
