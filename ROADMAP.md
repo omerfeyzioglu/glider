@@ -1005,8 +1005,12 @@ tail hits, and default responses are unchanged.
 
 ## M34 — Concurrent queries
 
-Status: planned. One admission executor runs queries, writes and maintenance
-in turn; at 1M a query executes in ~11 ms but waits up to 43 ms (p95).
+Status: in progress. Queries and document reads run on bounded reader threads
+over immutable published views; read-your-writes, snapshot and pack-retention
+tests pass. In the in-memory 1M probe the query queue p95 fell from 39-47 ms
+to 2-7 ms, but four simultaneous queries share the CPU, so end-to-end p95
+stayed at 52-67 ms ([M31 probe](benchmarks/M31.md#concurrent-queries-m34)).
+Heavy maintenance still runs on the committer.
 
 Steps:
 - Execute queries in parallel against an immutable published view (root,
@@ -1039,8 +1043,13 @@ cold behavior keeps the remote budget, and cache-loss tests still pass.
 
 ## M36 — Restarts without an operator
 
-Status: planned. A killed writer leaves its ownership claim, so the next
-process refuses to open and recovery needs `glider-admin restore`.
+Status: implemented. Local drills and MinIO takeover tests pass; not yet run
+on AWS S3.
+`glider-server` holds a renewed lease and takes over with permanent fence
+objects at the deposed writer's next log and root keys (`DESIGN.md`,
+"Segmented writer takeover"); `tools/drills.py` restarts a killed server
+on the same directory and checks that a frozen server resumed after takeover
+cannot write.
 
 Steps:
 - Replace the permanent claim with a renewed lease plus a monotonically

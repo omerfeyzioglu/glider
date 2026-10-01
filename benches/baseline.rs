@@ -102,14 +102,14 @@ impl<S: ObjectStore> ObjectStore for Counted<S> {
         self.counts.set(counts);
         Ok(result)
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.inner.remove(key)?;
         let mut counts = self.counts.get();
         counts.remove_calls += 1;
         self.counts.set(counts);
         Ok(())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         self.inner.create(key, value)?;
         let mut counts = self.counts.get();
         counts.create_calls += 1;

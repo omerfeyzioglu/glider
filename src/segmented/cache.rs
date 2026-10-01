@@ -1,6 +1,6 @@
 //! Disposable, bounded cache for root-authenticated immutable vector blocks.
-use super::{authenticate, decode_block_bytes, validate_block_ref, Block, BlockRef, Root};
-use crate::{store::ObjectStore, Config, Error, Result};
+use super::{authenticate, validate_block_ref, BlockRef, Root};
+use crate::{Error, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -78,6 +78,26 @@ struct WarmPass {
     next: usize,
     /// The whole root fits the NVMe limit, so admission may evict entries
     /// the pass has not touched; otherwise it only fills free space.
+    evict: bool,
+}
+
+/// The next warm-up unit, planned under the cache lock.
+pub(super) enum WarmUnit {
+    /// Nothing is left to warm in this pass.
+    Done,
+    /// Cached packs were skipped without I/O; more remain.
+    Skipped,
+    /// Read this range without holding the cache, then `warm_admit` it.
+    Read(WarmRead),
+}
+
+/// One planned warm-up range read: a span of one pack's uncached blocks.
+pub(super) struct WarmRead {
+    pub(super) object: String,
+    pub(super) offset: usize,
+    pub(super) length: usize,
+    pub(super) payload_len: usize,
+    blocks: Vec<BlockRef>,
     evict: bool,
 }
 
@@ -168,51 +188,9 @@ impl BlockCache {
         }
     }
 
-    pub(super) fn read_block<S: ObjectStore>(
-        &mut self,
-        store: &S,
-        config: Config,
-        reference: &BlockRef,
-    ) -> Result<Block> {
-        loop {
-            let (bytes, source) = self.fetch(store, reference)?;
-            match decode_block_bytes(config, reference, &bytes) {
-                Ok(block) => {
-                    self.accept(reference, source, &bytes);
-                    return Ok(block);
-                }
-                Err(error) if source == Source::Remote => return Err(error),
-                Err(_) => self.reject(reference, source),
-            }
-        }
-    }
-
-    /// Return candidate bytes from RAM, NVMe or object storage without
-    /// authenticating them. The caller must decode against the root reference,
-    /// then call `accept`, or `reject` for corrupt cached bytes and fetch again.
-    pub(super) fn fetch<S: ObjectStore>(
-        &mut self,
-        store: &S,
-        reference: &BlockRef,
-    ) -> Result<(Vec<u8>, Source)> {
-        if let Some(found) = self.lookup(reference)? {
-            return Ok(found);
-        }
-        let bytes = store
-            .get_range(
-                &reference.object,
-                reference.offset,
-                reference.length,
-                reference.payload_len,
-            )?
-            .ok_or_else(|| {
-                Error::Corrupt(format!("segmented pack missing: {}", reference.object))
-            })?;
-        self.count_remote(bytes.len());
-        Ok((bytes, Source::Remote))
-    }
-
-    /// Candidate bytes from RAM or NVMe, or `None` for a miss.
+    /// Candidate bytes from RAM or NVMe, or `None` for a miss. The caller
+    /// must decode against the root reference, then call `accept`, or
+    /// `reject` for corrupt cached bytes and read again.
     pub(super) fn lookup(&mut self, reference: &BlockRef) -> Result<Option<(Vec<u8>, Source)>> {
         validate_block_ref(reference)?;
         let key = cache_key(reference);
@@ -281,26 +259,20 @@ impl BlockCache {
         }
     }
 
-    /// One bounded warm-up unit: read one range of the next pack's uncached
-    /// blocks (at most `unit_bytes`, but at least one block), authenticate
-    /// each block against the root and admit it to the NVMe tier. Packs
-    /// already cached are skipped without I/O, at most 64 per unit. Returns
-    /// false once the pass has nothing left to do. A new root generation or
-    /// a lost cached entry starts a new pass.
-    pub(super) fn warm_step<S: ObjectStore>(
-        &mut self,
-        store: &S,
-        root: &Root,
-        unit_bytes: usize,
-    ) -> Result<bool> {
+    /// Plan one bounded warm-up unit: one range of the next pack's uncached
+    /// blocks (at most `unit_bytes`, but at least one block). Packs already
+    /// cached are skipped without I/O, at most 64 per unit. A new root
+    /// generation or a lost cached entry starts a new pass. The caller reads
+    /// the range without holding the cache, then calls `warm_admit`.
+    pub(super) fn warm_plan(&mut self, root: &Root, unit_bytes: usize) -> Result<WarmUnit> {
         if !self.nvme_available || self.nvme_limit == 0 {
-            return Ok(false);
+            return Ok(WarmUnit::Done);
         }
         let mut pass = match self.warm.take() {
             Some(pass) if pass.generation == root.generation && pass.lost == self.lost => pass,
             _ => self.plan_warm(root),
         };
-        let result = self.advance_warm(&mut pass, store, root, unit_bytes);
+        let result = self.advance_warm(&mut pass, root, unit_bytes);
         self.warm = Some(pass);
         result
     }
@@ -345,20 +317,19 @@ impl BlockCache {
         }
     }
 
-    fn advance_warm<S: ObjectStore>(
+    fn advance_warm(
         &mut self,
         pass: &mut WarmPass,
-        store: &S,
         root: &Root,
         unit_bytes: usize,
-    ) -> Result<bool> {
+    ) -> Result<WarmUnit> {
         if self.stats.warm_complete {
-            return Ok(false);
+            return Ok(WarmUnit::Done);
         }
         for _ in 0..64 {
             let Some(&[first, end]) = pass.packs.get(pass.next..pass.next + 2) else {
                 self.stats.warm_complete = true;
-                return Ok(false);
+                return Ok(WarmUnit::Done);
             };
             let blocks: Vec<&BlockRef> = pass.blocks[first..end]
                 .iter()
@@ -385,43 +356,71 @@ impl BlockCache {
                 .take_while(|reference| reference.offset + reference.length - start <= unit_bytes)
                 .count();
             let missing = &missing[..take];
-            let charge: usize = missing
-                .iter()
-                .map(|reference| disk_charge(reference.length))
-                .sum();
-            if !pass.evict && self.nvme_bytes + charge > self.nvme_limit {
+            if !pass.evict && !self.fits_free(missing) {
                 self.stats.warm_complete = true;
-                return Ok(false);
+                return Ok(WarmUnit::Done);
             }
             let last = missing[take - 1];
-            let length = last.offset + last.length - start;
-            let bytes = store
-                .get_range(&last.object, start, length, last.payload_len)?
-                .ok_or_else(|| {
-                    Error::Corrupt(format!("segmented pack missing: {}", last.object))
-                })?;
-            self.stats.warm_fetches += 1;
-            self.stats.warm_payload_bytes += bytes.len() as u64;
-            for reference in missing {
-                let at = reference.offset - start;
-                let block = bytes
-                    .get(at..at + reference.length)
-                    .ok_or_else(|| Error::Corrupt("segmented range read is short".into()))?;
-                authenticate(reference, block)?;
-                self.put_nvme(&cache_key(reference), block);
-            }
-            // A failed admission (for example a full disk) ends the pass
-            // instead of fetching the same blocks again.
-            if !missing
-                .iter()
-                .all(|reference| self.nvme.contains_key(&cache_key(reference)))
-            {
-                self.stats.warm_complete = true;
-                return Ok(false);
-            }
-            return Ok(true);
+            return Ok(WarmUnit::Read(WarmRead {
+                object: last.object.clone(),
+                offset: start,
+                length: last.offset + last.length - start,
+                payload_len: last.payload_len,
+                blocks: missing.iter().map(|&reference| reference.clone()).collect(),
+                evict: pass.evict,
+            }));
+        }
+        Ok(WarmUnit::Skipped)
+    }
+
+    /// Authenticate the bytes of a planned warm-up read against the root and
+    /// admit its blocks to the NVMe tier. Returns false if the pass ended.
+    pub(super) fn warm_admit(&mut self, read: WarmRead, bytes: &[u8]) -> Result<bool> {
+        self.stats.warm_fetches += 1;
+        self.stats.warm_payload_bytes += bytes.len() as u64;
+        let mut blocks = Vec::with_capacity(read.blocks.len());
+        for reference in &read.blocks {
+            let at = reference.offset - read.offset;
+            let block = bytes
+                .get(at..at + reference.length)
+                .ok_or_else(|| Error::Corrupt("segmented range read is short".into()))?;
+            authenticate(reference, block)?;
+            blocks.push(block);
+        }
+        // Queries may have admitted entries while the range was read; a pass
+        // that may not evict still fills only free space.
+        let pending: Vec<_> = read
+            .blocks
+            .iter()
+            .filter(|reference| !self.nvme.contains_key(&cache_key(reference)))
+            .collect();
+        if !read.evict && !self.fits_free(&pending) {
+            self.stats.warm_complete = true;
+            return Ok(false);
+        }
+        for (reference, block) in read.blocks.iter().zip(blocks) {
+            self.put_nvme(&cache_key(reference), block);
+        }
+        // A failed admission (for example a full disk) ends the pass
+        // instead of fetching the same blocks again.
+        if !read
+            .blocks
+            .iter()
+            .all(|reference| self.nvme.contains_key(&cache_key(reference)))
+        {
+            self.stats.warm_complete = true;
+            return Ok(false);
         }
         Ok(true)
+    }
+
+    /// Whether `blocks` fit in the NVMe tier's free space.
+    fn fits_free(&self, blocks: &[&BlockRef]) -> bool {
+        let charge: usize = blocks
+            .iter()
+            .map(|reference| disk_charge(reference.length))
+            .sum();
+        self.nvme_bytes + charge <= self.nvme_limit
     }
 
     /// Whether the NVMe tier holds `key`; if `touch`, mark it recently used.

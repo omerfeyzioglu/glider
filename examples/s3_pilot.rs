@@ -155,7 +155,7 @@ fn write(probe: &Probe, marker: &str) -> Result<()> {
     }
     // Local control file only: the supervisor may now clean these fresh test prefixes.
     fs::write(marker, &probe.root)?;
-    let mut objects = probe.store("objects")?;
+    let objects = probe.store("objects")?;
     objects.create("immutable", b"original")?;
     assert!(matches!(
         objects.create("immutable", b"replacement"),
@@ -223,7 +223,7 @@ fn recover(probe: &Probe) -> Result<()> {
 }
 fn cleanup(probe: &Probe) -> Result<()> {
     for name in NAMES {
-        let mut store = probe.store(name)?;
+        let store = probe.store(name)?;
         for key in store.list()? {
             store.remove(&key)?;
         }

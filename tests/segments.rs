@@ -19,7 +19,7 @@ struct State {
     duplicate_key: Option<String>,
 }
 impl ObjectStore for Memory {
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.0.borrow_mut().objects.remove(key);
         Ok(())
     }
@@ -39,7 +39,7 @@ impl ObjectStore for Memory {
         }
         Ok(state.objects.get(key).cloned())
     }
-    fn create(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, bytes: &[u8]) -> Result<()> {
         let mut state = self.0.borrow_mut();
         let fault = state.fault.take();
         if fault.is_none_or(|(publish, _)| publish) {

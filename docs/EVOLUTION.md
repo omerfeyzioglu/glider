@@ -269,3 +269,34 @@ NVMe tier, one authenticated range read at a time, without exceeding the
 cache limit. Warm quality now depends on the cache; correctness does not.
 The warm 1M recall and latency gates are not yet measured.
 [Evidence](../benchmarks/M31.md).
+
+## 2026-10-01 — Automatic takeover with permanent fences
+
+A killed `glider-server` left its permanent ownership claim, so every crash
+needed an operator to restore into a fresh prefix. A lease alone cannot fence
+a paused writer whose clock is wrong, and the object contract has no
+compare-and-swap. A writer's next log and root keys are deterministic, so a
+taker now occupies exactly those keys with permanent conditional creates (a
+takeover record and a root fence marker): a resumed writer's next publication
+fails at the store, at no per-write cost, for two small objects per process
+start. A renewed lease only paces takeovers. Lease and database handles, and
+old and new servers, now share a local directory, where create was
+check-then-write and a reopen could reclaim another handle's in-progress
+publication; `LocalStore` now serializes mutation under a directory lock.
+Drills restart a killed server on the same directory and show that a frozen,
+resumed server cannot write.
+
+## 2026-10-01 — Queries run beside the committer on published views
+
+Segmented queries and document reads moved off the single admission committer
+onto bounded reader threads. The committer publishes an immutable view (root,
+directory, tail, sketch liveness) after each command and maintenance unit and
+before any acknowledgement, so reads keep snapshot consistency and
+read-your-writes; packs of a replaced root stay until no view holds it.
+`ObjectStore` mutations now take `&self` so reads never wait for a PUT or
+DELETE, which a store lock would have forced. In the 1M in-memory probe the
+query queue p95 fell from about 43 to 4 ms, but four simultaneous queries now
+share the CPU and end-to-end p95 stayed near 53 ms: routing cost per query, not
+serialization, bounds this workload. Idle cache warm-up likewise reads its
+range outside the cache lock, so queries never wait for its GET.
+[Evidence](../benchmarks/M31.md#concurrent-queries-m34).

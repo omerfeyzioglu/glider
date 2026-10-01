@@ -5,6 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 /// Strongly consistent object operations within an exclusively owned namespace.
@@ -14,6 +15,10 @@ use std::{
 /// Existing objects cannot change.
 /// Listing must be complete, but need not be sorted. Missing/corrupt durable data
 /// is an error, never an excuse to serve a partially recovered database.
+///
+/// Every operation takes `&self`. A `Sync` backend may serve reads on other
+/// threads while one mutation is in flight; such a read is unaffected by that
+/// mutation, since it never names an object being created or removed.
 pub trait ObjectStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
     /// Read a bounded payload slice from an immutable object. The caller must
@@ -55,15 +60,15 @@ pub trait ObjectStore {
             .collect()
     }
     fn list(&self) -> Result<Vec<String>>;
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()>;
+    fn create(&self, key: &str, value: &[u8]) -> Result<()>;
     /// Durably remove an object; absence is success. Errors may have removed it.
     /// After uncertainty, stabilize or reject access until reopened. The engine
     /// must never reuse reclaimed keys: an old remote DELETE may arrive late.
-    fn remove(&mut self, key: &str) -> Result<()>;
+    fn remove(&self, key: &str) -> Result<()>;
     /// Remove independent, never-reused obsolete keys. Success acknowledges all
     /// removals; an error may have removed any subset. Implementations may use
     /// bounded parallelism. Callers must recover before trusting stale counts.
-    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+    fn remove_many(&self, keys: &[String]) -> Result<()> {
         for key in keys {
             self.remove(key)?;
         }
@@ -71,13 +76,18 @@ pub trait ObjectStore {
     }
 }
 
-/// Development backend; callers must ensure exclusive ownership of this path,
-/// including across processes. Requires a filesystem honoring file/directory sync.
+/// Development backend. Handles in one or several processes may share a path:
+/// an exclusive lock on the namespace directory serializes every create,
+/// removal and reopen reclamation, so create-if-absent is atomic and a reopen
+/// never reclaims another live handle's in-progress publication. Each call
+/// locks its own descriptor, so threads sharing one handle are serialized
+/// too; reads take no lock. Requires a local filesystem honoring
+/// file/directory sync and `flock`.
 /// After a publication error or panic, discard this handle and call `open` again;
 /// all object operations reject access until a fresh handle stabilizes recovery.
 pub struct LocalStore {
     root: PathBuf,
-    poisoned: bool,
+    poisoned: AtomicBool,
     #[cfg(test)]
     fault: std::rc::Rc<std::cell::RefCell<tests::Fault>>,
 }
@@ -100,7 +110,7 @@ impl LocalStore {
         let root = path.to_path_buf();
         let store = Self {
             root,
-            poisoned: false,
+            poisoned: AtomicBool::new(false),
             #[cfg(test)]
             fault,
         };
@@ -118,6 +128,9 @@ impl LocalStore {
         store.io("open-parent-sync", || File::open(parent)?.sync_all())?;
         // A previous process may have published a full seal but failed before
         // syncing it. Stabilize that recovered prefix before accepting new writes.
+        // Holding the lock, no other handle is publishing or removing, so every
+        // incomplete object is debris of an interrupted attempt.
+        let _lock = store.lock()?;
         for key in store.candidates()? {
             if store.get(&key)?.is_none() {
                 // Includes interrupted creates and seal-first deletes. Otherwise
@@ -166,8 +179,17 @@ impl LocalStore {
         })?;
         Ok(())
     }
+    /// Exclusive advisory lock on the namespace directory, released when the
+    /// returned handle closes; the OS releases a dead process's lock.
+    /// Readers take none: a complete seal is written only after its synced
+    /// body, and removal deletes the seal first.
+    fn lock(&self) -> Result<File> {
+        let directory = File::open(&self.root)?;
+        directory.lock()?;
+        Ok(directory)
+    }
     fn ready(&self) -> Result<()> {
-        if self.poisoned {
+        if self.poisoned.load(Ordering::Acquire) {
             Err(Error::RecoveryRequired)
         } else {
             Ok(())
@@ -195,6 +217,32 @@ impl LocalStore {
             file.write_all(bytes)
         })
     }
+    /// Write the body, then the seal that makes the object visible.
+    fn publish(&self, key: &str, body: &[u8]) -> Result<()> {
+        // Truncation only reclaims an unpublished attempt, never a logical object.
+        let body_path = self.path(&format!("{key}-body"))?;
+        let mut file = self.io("body-create", || {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(body_path)
+        })?;
+        self.write("body-write", &mut file, body)?;
+        self.io("body-sync", || file.sync_all())?;
+        self.io("body-directory-sync", || File::open(&self.root)?.sync_all())?;
+        let seal_path = self.path(&format!("{key}-seal"))?;
+        let mut seal = self.io("seal-create", || {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(seal_path)
+        })?;
+        self.write("seal-write", &mut seal, SEAL)?;
+        self.io("seal-sync", || seal.sync_all())?;
+        self.io("seal-directory-sync", || File::open(&self.root)?.sync_all())
+    }
     fn path(&self, key: &str) -> Result<PathBuf> {
         if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
             return Err(Error::Invalid("invalid object key".into()));
@@ -218,7 +266,18 @@ impl ObjectStore for LocalStore {
         if marker != SEAL {
             return Err(Error::Corrupt(format!("invalid seal: {key}")));
         }
-        let bytes = fs::read(self.path(&format!("{key}-body"))?)?;
+        let bytes = match fs::read(self.path(&format!("{key}-body"))?) {
+            Ok(bytes) => bytes,
+            // Another handle removed the object (seal first) after the seal
+            // was read; a body missing under a remaining seal is corruption.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && !self.path(&format!("{key}-seal"))?.exists() =>
+            {
+                return Ok(None)
+            }
+            Err(e) => return Err(e.into()),
+        };
         decode_envelope(&bytes, key).map(Some)
     }
     fn list(&self) -> Result<Vec<String>> {
@@ -232,48 +291,43 @@ impl ObjectStore for LocalStore {
         }
         Ok(keys)
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.ready()?;
         self.path(key)?;
-        self.poisoned = true;
-        self.remove_files(key)?;
-        self.poisoned = false;
-        Ok(())
+        let _lock = self.lock()?;
+        uncertain(&self.poisoned, || self.remove_files(key))
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.ready()?;
+        self.path(key)?;
+        let _lock = self.lock()?;
         if self.get(key)?.is_some() {
             return Err(Error::Exists(key.into()));
         }
         let body = encode_envelope(value);
-        // Poison before any filesystem mutation, including a caught panic. Only a
-        // fresh open may validate and stabilize an uncertain publication.
-        self.poisoned = true;
-        // Truncation only reclaims an unpublished attempt, never a logical object.
-        let body_path = self.path(&format!("{key}-body"))?;
-        let mut file = self.io("body-create", || {
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(body_path)
-        })?;
-        self.write("body-write", &mut file, &body)?;
-        self.io("body-sync", || file.sync_all())?;
-        self.io("body-directory-sync", || File::open(&self.root)?.sync_all())?;
-        let seal_path = self.path(&format!("{key}-seal"))?;
-        let mut seal = self.io("seal-create", || {
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(seal_path)
-        })?;
-        self.write("seal-write", &mut seal, SEAL)?;
-        self.io("seal-sync", || seal.sync_all())?;
-        self.io("seal-directory-sync", || File::open(&self.root)?.sync_all())?;
-        self.poisoned = false;
-        Ok(())
+        // Any failure after the first filesystem mutation, including a caught
+        // panic, poisons. Only a fresh open may validate and stabilize an
+        // uncertain publication.
+        uncertain(&self.poisoned, || self.publish(key, &body))
     }
+}
+
+/// Run a mutation whose error or panic leaves its outcome uncertain; either
+/// sets `poisoned`. Reads running meanwhile on other threads are not rejected.
+pub(crate) fn uncertain(
+    poisoned: &AtomicBool,
+    mutation: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    struct Armed<'a>(&'a AtomicBool);
+    impl Drop for Armed<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let armed = Armed(poisoned);
+    mutation()?;
+    std::mem::forget(armed);
+    Ok(())
 }
 
 #[cfg(test)]

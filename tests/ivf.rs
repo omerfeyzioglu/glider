@@ -22,11 +22,11 @@ impl ObjectStore for Memory {
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.objects.borrow().keys().cloned().collect())
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.objects.borrow_mut().remove(key);
         Ok(())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         self.creates.set(self.creates.get() + 1);
         let fault = self.fault.replace(0);
         if fault != 1 && fault != 3 {

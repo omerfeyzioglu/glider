@@ -33,10 +33,10 @@ impl<S: ObjectStore> ObjectStore for Counted<S> {
     fn list(&self) -> glider::Result<Vec<String>> {
         self.inner.list()
     }
-    fn create(&mut self, key: &str, bytes: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, bytes: &[u8]) -> glider::Result<()> {
         self.inner.create(key, bytes)
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.inner.remove(key)
     }
 }

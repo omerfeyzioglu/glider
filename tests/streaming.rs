@@ -26,14 +26,14 @@ impl ObjectStore for Memory {
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.objects.borrow().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         if self.objects.borrow().contains_key(key) {
             return Err(Error::Exists(key.into()));
         }
         self.objects.borrow_mut().insert(key.into(), value.to_vec());
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.objects.borrow_mut().remove(key);
         Ok(())
     }

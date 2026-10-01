@@ -2,13 +2,16 @@
 //! reader. Each immutable pack starts with a derived sketch frame bound to the
 //! digests of its blocks; the root and logs remain authoritative.
 use super::{
-    authenticate, codec, consider, consider_with, decode_block_bytes, Block, BlockRef, QueryHit,
-    QueryOptions, Ranked, Root, SegmentedDatabase,
+    authenticate, cache::Source, codec, consider, consider_with, decode_block_bytes, lock_cache,
+    Block, BlockRef, QueryHit, QueryOptions, Ranked, RemoteReads, Root, SegmentedDatabase, View,
 };
 use crate::{store::ObjectStore, Config, Error, Metric, Mutation, Neighbor, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::{
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    sync::Arc,
+};
 
 const BITS: usize = 5;
 const LEVELS: f64 = 31.;
@@ -102,6 +105,7 @@ pub struct SegmentedOptions {
     pub routed_keys: Vec<String>,
 }
 
+#[derive(Clone)]
 struct RoutedKey {
     key: String,
     dictionary: Vec<String>,
@@ -248,6 +252,7 @@ fn approximate_within(codes: &[u8], table: &[[f64; 32]], limit: f64) -> Option<f
 
 /// Row IDs, stored as u32 offsets from the smallest ID when the pack's ID
 /// span allows it.
+#[derive(Clone)]
 enum Ids {
     Narrow { base: u64, offsets: Vec<u32> },
     Wide(Vec<u64>),
@@ -320,14 +325,16 @@ impl Ids {
     }
 }
 
+#[derive(Clone)]
 struct SketchBlock {
     digest: [u8; 32],
     start: usize,
     end: usize,
-    /// Current root location, recomputed on every root change.
-    root: Option<(usize, usize)>,
 }
 
+/// One pack's persisted sketch. Immutable once loaded, except that sketch
+/// compaction drops shadowed rows.
+#[derive(Clone)]
 pub(super) struct PackSketch {
     pack: String,
     /// Bytes of the pack's leading sketch frame, when known; block data
@@ -338,7 +345,6 @@ pub(super) struct PackSketch {
     scales: Vec<f32>,
     ids: Ids,
     codes: Vec<u8>,
-    live: Vec<u64>,
     resident_rows: Vec<u32>,
     resident_vectors: Vec<f32>,
     routed: Vec<RoutedKey>,
@@ -429,7 +435,6 @@ impl PackSketch {
             scales,
             ids: Ids::Wide(Vec::new()),
             codes: Vec::new(),
-            live: Vec::new(),
             resident_rows: Vec::new(),
             resident_vectors: Vec::new(),
             routed: options
@@ -498,10 +503,8 @@ impl PackSketch {
                 digest: digest_bytes(&reference.sha256)?,
                 start,
                 end: ids.len(),
-                root: None,
             });
         }
-        sketch.live = vec![0; ids.len().div_ceil(64)];
         sketch.ids = Ids::new(ids);
         Ok(sketch)
     }
@@ -608,12 +611,7 @@ impl PackSketch {
         for _ in 0..blocks {
             let digest = take(input, 32)?.try_into().unwrap();
             let end = start + take_u32(input)? as usize;
-            sketch_blocks.push(SketchBlock {
-                digest,
-                start,
-                end,
-                root: None,
-            });
+            sketch_blocks.push(SketchBlock { digest, start, end });
             start = end;
         }
         if start != rows {
@@ -704,7 +702,6 @@ impl PackSketch {
             blocks: sketch_blocks,
             minima,
             scales,
-            live: vec![0; rows.div_ceil(64)],
             ids: Ids::new(ids),
             codes,
             resident_rows,
@@ -724,7 +721,6 @@ impl PackSketch {
             + (self.minima.capacity() + self.scales.capacity()) * size_of::<f32>()
             + self.ids.charged_bytes()
             + self.codes.capacity()
-            + self.live.capacity() * size_of::<u64>()
             + self.resident_rows.capacity() * size_of::<u32>()
             + self.resident_vectors.capacity() * size_of::<f32>()
             + self.routed.capacity() * size_of::<RoutedKey>()
@@ -740,19 +736,8 @@ impl PackSketch {
                 .sum::<usize>()
     }
 
-    fn dead_rows(&self) -> usize {
-        self.ids.len()
-            - self
-                .live
-                .iter()
-                .map(|word| word.count_ones() as usize)
-                .sum::<usize>()
-    }
-
-    /// Drop rows whose bit is clear. A cleared row is shadowed by an
-    /// acknowledged newer mutation and never becomes live again; reopening
-    /// reloads the persisted sketch and recomputes liveness.
-    fn compact(&mut self) {
+    /// Drop rows whose `live` bit is clear and return the number kept.
+    fn compact(&mut self, live: &[u64]) -> usize {
         let width = self.codes.len() / self.ids.len().max(1);
         let dimensions = self.minima.len();
         // Rows move only toward the front, so compaction is in place and the
@@ -768,7 +753,7 @@ impl PackSketch {
                 if resident {
                     resident_index += 1;
                 }
-                if self.live[row / 64] & (1 << (row % 64)) == 0 {
+                if live[row / 64] & (1 << (row % 64)) == 0 {
                     continue;
                 }
                 if resident {
@@ -801,6 +786,52 @@ impl PackSketch {
         self.resident_rows.shrink_to_fit();
         self.resident_vectors.truncate(kept_resident * dimensions);
         self.resident_vectors.shrink_to_fit();
+        kept
+    }
+}
+
+/// A pack sketch bound to the selected root. Row liveness and block root
+/// locations change with writes and root switches, so they live beside the
+/// shared sketch: copying this for a new view copies only them.
+#[derive(Clone)]
+struct LoadedSketch {
+    sketch: Arc<PackSketch>,
+    /// One bit per row.
+    live: Vec<u64>,
+    /// Root `(run, block)` of each sketch block, recomputed on root changes.
+    roots: Vec<Option<(usize, usize)>>,
+}
+
+impl LoadedSketch {
+    fn new(sketch: PackSketch) -> Self {
+        Self {
+            live: vec![0; sketch.ids.len().div_ceil(64)],
+            roots: vec![None; sketch.blocks.len()],
+            sketch: Arc::new(sketch),
+        }
+    }
+
+    fn charged_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.sketch.charged_bytes()
+            + self.live.capacity() * size_of::<u64>()
+            + self.roots.capacity() * size_of::<Option<(usize, usize)>>()
+    }
+
+    fn dead_rows(&self) -> usize {
+        self.sketch.ids.len()
+            - self
+                .live
+                .iter()
+                .map(|word| word.count_ones() as usize)
+                .sum::<usize>()
+    }
+
+    /// Drop rows whose bit is clear. A cleared row is shadowed by an
+    /// acknowledged newer mutation and never becomes live again; reopening
+    /// reloads the persisted sketch and recomputes liveness.
+    fn compact(&mut self) {
+        let kept = Arc::make_mut(&mut self.sketch).compact(&self.live);
         self.live = vec![u64::MAX; kept.div_ceil(64)];
         if !kept.is_multiple_of(64) {
             *self.live.last_mut().unwrap() = (1 << (kept % 64)) - 1;
@@ -809,7 +840,7 @@ impl PackSketch {
 
     /// Live rows of one block of this pack.
     fn live_rows(&self, block: usize) -> usize {
-        let block = &self.blocks[block];
+        let block = &self.sketch.blocks[block];
         (block.start..block.end)
             .filter(|&row| self.is_live(row))
             .count()
@@ -818,22 +849,22 @@ impl PackSketch {
     fn is_live(&self, row: usize) -> bool {
         self.live[row / 64] & (1 << (row % 64)) != 0
     }
+}
 
-    fn set_live(&mut self, row: usize, live: bool) {
-        if live {
-            self.live[row / 64] |= 1 << (row % 64);
-        } else {
-            self.live[row / 64] &= !(1 << (row % 64));
-        }
+fn set_bit(bits: &mut [u64], row: usize, value: bool) {
+    if value {
+        bits[row / 64] |= 1 << (row % 64);
+    } else {
+        bits[row / 64] &= !(1 << (row % 64));
     }
 }
 
 /// Loaded sketches for every pack referenced by the selected root. A row is
 /// live when it is the current committed version of its ID and no acknowledged
 /// log-tail mutation shadows it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct SketchSet {
-    packs: Vec<PackSketch>,
+    packs: Vec<LoadedSketch>,
     /// Root `(run, block)` to `(pack slot, block within pack)`.
     locations: Vec<Vec<(usize, usize)>>,
     pub(super) rebuilt: usize,
@@ -843,7 +874,7 @@ impl SketchSet {
     pub(super) fn charged_bytes(&self) -> usize {
         self.packs
             .iter()
-            .map(PackSketch::charged_bytes)
+            .map(LoadedSketch::charged_bytes)
             .sum::<usize>()
             + self
                 .locations
@@ -854,9 +885,9 @@ impl SketchSet {
 
     /// Compact every pack with a dead row.
     pub(super) fn compact_all(&mut self) {
-        for sketch in &mut self.packs {
-            if sketch.dead_rows() > 0 {
-                sketch.compact();
+        for loaded in &mut self.packs {
+            if loaded.dead_rows() > 0 {
+                loaded.compact();
             }
         }
     }
@@ -864,15 +895,15 @@ impl SketchSet {
     /// Compact the pack with the most dead rows if it has at least
     /// `min_dead`. Returns whether a pack was compacted.
     pub(super) fn compact_step(&mut self, min_dead: usize) -> bool {
-        let Some(sketch) = self
+        let Some(loaded) = self
             .packs
             .iter_mut()
-            .max_by_key(|sketch| sketch.dead_rows())
-            .filter(|sketch| sketch.dead_rows() >= min_dead.max(1))
+            .max_by_key(|loaded| loaded.dead_rows())
+            .filter(|loaded| loaded.dead_rows() >= min_dead.max(1))
         else {
             return false;
         };
-        sketch.compact();
+        loaded.compact();
         true
     }
 
@@ -880,13 +911,14 @@ impl SketchSet {
     pub(super) fn frame_len(&self, pack: &str) -> Option<usize> {
         self.packs
             .iter()
-            .find(|sketch| sketch.pack == pack)
-            .and_then(|sketch| sketch.frame_len)
+            .find(|loaded| loaded.sketch.pack == pack)
+            .and_then(|loaded| loaded.sketch.frame_len)
     }
 
     pub(super) fn install(&mut self, sketch: PackSketch) {
-        self.packs.retain(|existing| existing.pack != sketch.pack);
-        self.packs.push(sketch);
+        self.packs
+            .retain(|existing| existing.sketch.pack != sketch.pack);
+        self.packs.push(LoadedSketch::new(sketch));
     }
 
     /// Bind loaded sketches to the root. Every referenced block must have a
@@ -898,12 +930,12 @@ impl SketchSet {
             .flat_map(|run| run.blocks.iter().map(|block| block.object.as_str()))
             .collect();
         self.packs
-            .retain(|sketch| referenced.contains(sketch.pack.as_str()));
+            .retain(|loaded| referenced.contains(loaded.sketch.pack.as_str()));
         let slots: BTreeMap<&str, usize> = self
             .packs
             .iter()
             .enumerate()
-            .map(|(slot, sketch)| (sketch.pack.as_str(), slot))
+            .map(|(slot, loaded)| (loaded.sketch.pack.as_str(), slot))
             .collect();
         let mut locations = Vec::with_capacity(root.runs.len());
         let mut bound = Vec::new();
@@ -914,12 +946,13 @@ impl SketchSet {
                     Error::Corrupt(format!("segmented sketch missing: {}", reference.object))
                 })?;
                 let digest = digest_bytes(&reference.sha256)?;
-                let sketch_block = self.packs[slot]
+                let sketch = &self.packs[slot].sketch;
+                let sketch_block = sketch
                     .blocks
                     .iter()
                     .position(|candidate| candidate.digest == digest)
                     .filter(|&index| {
-                        let rows = &self.packs[slot].blocks[index];
+                        let rows = &sketch.blocks[index];
                         rows.end - rows.start <= reference.rows
                     })
                     .ok_or_else(|| Error::Corrupt("segmented sketch block mismatch".into()))?;
@@ -928,14 +961,11 @@ impl SketchSet {
             }
             locations.push(blocks);
         }
-        for sketch in &mut self.packs {
-            for block in &mut sketch.blocks {
-                block.root = None;
-            }
+        for loaded in &mut self.packs {
+            loaded.roots.fill(None);
         }
         for (slot, sketch_block, run, block) in bound {
-            if self.packs[slot].blocks[sketch_block]
-                .root
+            if self.packs[slot].roots[sketch_block]
                 .replace((run, block))
                 .is_some()
             {
@@ -954,10 +984,10 @@ impl SketchSet {
         let Some(&(slot, sketch_block)) = self.locations.get(run).and_then(|r| r.get(block)) else {
             return;
         };
-        let sketch = &mut self.packs[slot];
-        let range = &sketch.blocks[sketch_block];
-        if let Some(row) = sketch.ids.find(range.start, range.end, id) {
-            sketch.set_live(row, live);
+        let loaded = &mut self.packs[slot];
+        let range = &loaded.sketch.blocks[sketch_block];
+        if let Some(row) = loaded.sketch.ids.find(range.start, range.end, id) {
+            set_bit(&mut loaded.live, row, live);
         }
     }
 
@@ -967,19 +997,20 @@ impl SketchSet {
         packs: Option<&BTreeSet<String>>,
         mut current: impl FnMut(u64, usize, usize) -> bool,
     ) {
-        for sketch in &mut self.packs {
-            if packs.is_some_and(|names| !names.contains(&sketch.pack)) {
+        for loaded in &mut self.packs {
+            if packs.is_some_and(|names| !names.contains(&loaded.sketch.pack)) {
                 continue;
             }
-            for index in 0..sketch.blocks.len() {
-                let (start, end, root) = {
-                    let block = &sketch.blocks[index];
-                    (block.start, block.end, block.root)
-                };
-                for row in start..end {
-                    let live =
+            let LoadedSketch {
+                sketch,
+                live,
+                roots,
+            } = loaded;
+            for (block, root) in sketch.blocks.iter().zip(roots.iter()) {
+                for row in block.start..block.end {
+                    let current =
                         root.is_some_and(|(run, block)| current(sketch.ids.get(row), run, block));
-                    sketch.set_live(row, live);
+                    set_bit(live, row, current);
                 }
             }
         }
@@ -1002,7 +1033,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Drop shadowed rows from the in-memory sketch of the pack with the most
     /// such rows, if it has at least `min_dead`. Performs no storage I/O.
     pub fn compact_sketch(&mut self, min_dead: usize) -> bool {
-        self.sketches.compact_step(min_dead)
+        Arc::make_mut(&mut self.sketches).compact_step(min_dead)
     }
 
     /// Pack sketches rebuilt from authoritative blocks because the derived
@@ -1055,13 +1086,30 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         filter: &[(&str, &str)],
         options: QueryOptions,
     ) -> Result<Vec<QueryHit>> {
+        self.view()
+            .search_selective_within(query, k, budget, filter, options)
+            .map(|(hits, _)| hits)
+    }
+}
+
+impl<S: ObjectStore> View<S> {
+    /// `SegmentedDatabase::search_selective_within_options` on this view,
+    /// with the remote reads the query caused.
+    pub(crate) fn search_selective_within(
+        &self,
+        query: &[f32],
+        k: usize,
+        budget: ReadBudget,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<(Vec<QueryHit>, RemoteReads)> {
         let query = self.config.query(query)?;
         if k == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), RemoteReads::default()));
         }
         let mut heap = BinaryHeap::new();
         let mut resident = false;
-        match filter {
+        let mut reads = match filter {
             [] => self.route_and_rerank(&query, k, budget, &[], options, &mut heap)?,
             [(key, value)]
                 if self
@@ -1072,9 +1120,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             {
                 resident = true;
                 let dimensions = self.config.dimensions;
-                for sketch in &self.sketches.packs {
+                for loaded in &self.sketches.packs {
+                    let sketch = &loaded.sketch;
                     for (index, &row) in sketch.resident_rows.iter().enumerate() {
-                        if sketch.is_live(row as usize) {
+                        if loaded.is_live(row as usize) {
                             let vector = &sketch.resident_vectors
                                 [index * dimensions..(index + 1) * dimensions];
                             consider(
@@ -1088,12 +1137,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         }
                     }
                 }
+                RemoteReads::default()
             }
             // Other predicates: read the same routed blocks and keep only
             // matching records. Approximate, and may return fewer than k.
             _ => self.route_and_rerank(&query, k, budget, filter, options, &mut heap)?,
-        }
-        for (&id, (_, document)) in &self.tail {
+        };
+        for (&id, (_, document)) in self.tail.iter() {
             if let Some(document) = document {
                 if crate::matches_filter(&document.metadata, filter) {
                     consider_with(
@@ -1116,11 +1166,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let mut results: Vec<_> = heap.into_iter().map(|ranked: Ranked| ranked.0).collect();
         results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
         if resident && (options.include_metadata || options.include_vector) {
+            // Resident hits come from the sketch; fetch only the final hits'
+            // documents from this view, charging their remote reads.
             for hit in &mut results {
                 if hit.metadata.is_some() || hit.vector.is_some() {
                     continue;
                 }
-                let document = self.get(hit.id)?.ok_or_else(|| {
+                let document = self.document(hit.id, &mut reads)?.ok_or_else(|| {
                     Error::Corrupt("resident hit missing from current documents".into())
                 })?;
                 if self.config.metric.score(&query, &document.vector).to_bits()
@@ -1134,7 +1186,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 hit.vector = options.include_vector.then_some(document.vector);
             }
         }
-        Ok(results)
+        Ok((results, reads))
     }
 
     fn route_and_rerank(
@@ -1145,7 +1197,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         filter: &[(&str, &str)],
         options: QueryOptions,
         heap: &mut BinaryHeap<Ranked>,
-    ) -> Result<()> {
+    ) -> Result<RemoteReads> {
         if budget.blocks == 0 || budget.requests == 0 {
             return Err(Error::Invalid(
                 "selective search needs a block budget".into(),
@@ -1182,7 +1234,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let mut order: Vec<(f64, usize)> = packs
             .iter()
             .enumerate()
-            .map(|(slot, sketch)| {
+            .map(|(slot, loaded)| {
+                let sketch = &loaded.sketch;
                 let bound = (0..config.dimensions)
                     .map(|axis| {
                         let (minimum, scale) = (sketch.minima[axis], sketch.scales[axis]);
@@ -1224,7 +1277,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 if bound > threshold(&top) {
                     continue;
                 }
-                let sketch = &packs[slot];
+                let loaded = &packs[slot];
+                let sketch = &loaded.sketch;
                 let predicates: Vec<_> = sketch
                     .routed
                     .iter()
@@ -1249,13 +1303,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     }
                 }
                 for (index, block) in sketch.blocks.iter().enumerate() {
-                    if block.root.is_none() {
+                    if loaded.roots[index].is_none() {
                         continue;
                     }
                     let limit = threshold(&top);
                     let mut best = f64::INFINITY;
                     for row in block.start..block.end {
-                        if sketch.is_live(row)
+                        if loaded.is_live(row)
                             && predicates.iter().all(|(key, wanted)| {
                                 key.codes[row] == 255 || Some(key.codes[row]) == *wanted
                             })
@@ -1307,7 +1361,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         budget: ReadBudget,
         selection: (&[(&str, &str)], QueryOptions),
         heap: &mut BinaryHeap<Ranked>,
-    ) -> Result<()> {
+    ) -> Result<RemoteReads> {
         let (filter, options) = selection;
         // In rank order, cached candidates are read locally up to the local
         // limit; the other candidates among the first `budget.blocks` are
@@ -1317,10 +1371,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let mut fetched = Vec::new();
         let mut remote = Vec::new();
         {
-            let mut cache = self.lock_cache()?;
+            let mut cache = self.cache.as_deref().map(lock_cache).transpose()?;
             for (rank, &(_, slot, index)) in ranked.iter().enumerate() {
-                let sketch = &self.sketches.packs[slot];
-                let (run, ordinal) = sketch.blocks[index].root.expect("routed blocks are rooted");
+                let loaded = &self.sketches.packs[slot];
+                let (run, ordinal) = loaded.roots[index].expect("routed blocks are rooted");
                 let reference = &self.root.runs[run].blocks[ordinal];
                 let hit = match cache.as_mut() {
                     Some(cache) if fetched.len() < budget.local_blocks => {
@@ -1330,7 +1384,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 };
                 match hit {
                     Some((bytes, source)) => {
-                        targets.push((run, ordinal, sketch.live_rows(index)));
+                        targets.push((run, ordinal, loaded.live_rows(index)));
                         references.push(reference);
                         fetched.push((super::Slice::from(bytes), source));
                     }
@@ -1346,16 +1400,16 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         for &(object, offset, length, _) in &ranges {
             let slot = ranked
                 .iter()
-                .find(|&&(_, slot, _)| self.sketches.packs[slot].pack == object)
+                .find(|&&(_, slot, _)| self.sketches.packs[slot].sketch.pack == object)
                 .map(|&(_, slot, _)| slot)
                 .expect("each span comes from a candidate");
-            let sketch = &self.sketches.packs[slot];
-            let mut inside: Vec<_> = sketch
-                .blocks
+            let loaded = &self.sketches.packs[slot];
+            let mut inside: Vec<_> = loaded
+                .roots
                 .iter()
                 .enumerate()
-                .filter_map(|(index, block)| {
-                    let (run, ordinal) = block.root?;
+                .filter_map(|(index, root)| {
+                    let (run, ordinal) = (*root)?;
                     let reference = &self.root.runs[run].blocks[ordinal];
                     (reference.offset >= offset
                         && reference.offset + reference.length <= offset + length
@@ -1365,7 +1419,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .then(|| {
                         (
                             reference.offset,
-                            (run, ordinal, sketch.live_rows(index)),
+                            (run, ordinal, loaded.live_rows(index)),
                             reference,
                         )
                     })
@@ -1377,7 +1431,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 references.push(reference);
             }
         }
-        fetched.extend(self.fetch_blocks(&references[local..], &ranges)?);
+        let mut reads = RemoteReads::default();
+        fetched.extend(self.fetch_blocks(&references[local..], &ranges, &mut reads)?);
         let (config, latest, tail) = (self.config, &self.latest, &self.tail);
         // Current records of one authenticated block, as a local top-k.
         let scan = |index: usize, block: Block| -> Result<Vec<Ranked>> {
@@ -1518,19 +1573,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .collect()
             })
         };
-        let mut cache = self.lock_cache()?;
         for (index, outcome) in outcomes.into_iter().enumerate() {
             let (bytes, source) = &fetched[index];
-            let scanned = match (outcome, cache.as_mut()) {
+            let scanned = match (outcome, self.cache.as_deref()) {
                 (Ok(scanned), cache) => {
                     if let Some(cache) = cache {
-                        cache.accept(references[index], *source, bytes);
+                        lock_cache(cache)?.accept(references[index], *source, bytes);
                     }
                     scanned?
                 }
-                (Err(_), Some(cache)) if *source != super::cache::Source::Remote => {
-                    cache.reject(references[index], *source);
-                    let block = cache.read_block(&self.store, config, references[index])?;
+                (Err(_), Some(cache)) if *source != Source::Remote => {
+                    lock_cache(cache)?.reject(references[index], *source);
+                    let block = self.read_data_block(references[index], &mut reads)?;
                     scan(index, block)?
                 }
                 (Err(error), _) => return Err(error),
@@ -1544,7 +1598,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 }
             }
         }
-        Ok(())
+        Ok(reads)
     }
 }
 
@@ -2025,7 +2079,8 @@ mod tests {
                 for _ in 0..20 {
                     let query: Vec<f32> = (0..19).map(|_| (next() % 2_000) as f32 / 7.).collect();
                     let mut brute = Vec::new();
-                    for (slot, sketch) in db.sketches.packs.iter().enumerate() {
+                    for (slot, loaded) in db.sketches.packs.iter().enumerate() {
+                        let sketch = &loaded.sketch;
                         let table: Vec<[f64; 32]> = (0..19)
                             .map(|axis| {
                                 std::array::from_fn(|code| {
@@ -2043,7 +2098,7 @@ mod tests {
                             .collect();
                         for (index, block) in sketch.blocks.iter().enumerate() {
                             let best = (block.start..block.end)
-                                .filter(|&row| block.root.is_some() && sketch.is_live(row))
+                                .filter(|&row| loaded.roots[index].is_some() && loaded.is_live(row))
                                 .map(|row| {
                                     approximate(
                                         &sketch.codes[row * width..(row + 1) * width],
@@ -2059,7 +2114,11 @@ mod tests {
                     brute.sort_by(|a, b| a.0.total_cmp(&b.0).then((a.1, a.2).cmp(&(b.1, b.2))));
                     for blocks in [1, 3, 8] {
                         let expected: Vec<_> = brute.iter().copied().take(blocks).collect();
-                        assert_eq!(db.route(&query, blocks, &[]), expected, "seed {seed}");
+                        assert_eq!(
+                            db.view().route(&query, blocks, &[]),
+                            expected,
+                            "seed {seed}"
+                        );
                     }
                 }
             }

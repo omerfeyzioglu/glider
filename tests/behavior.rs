@@ -122,7 +122,7 @@ struct State {
 #[derive(Default, Clone)]
 struct Memory(Rc<RefCell<State>>);
 impl ObjectStore for Memory {
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.0.borrow_mut().objects.remove(key);
         Ok(())
     }
@@ -132,7 +132,7 @@ impl ObjectStore for Memory {
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.0.borrow().objects.keys().rev().cloned().collect())
     }
-    fn create(&mut self, k: &str, v: &[u8]) -> Result<()> {
+    fn create(&self, k: &str, v: &[u8]) -> Result<()> {
         let mut s = self.0.borrow_mut();
         let failure = s.fail.take();
         let panic = s.panic.take();

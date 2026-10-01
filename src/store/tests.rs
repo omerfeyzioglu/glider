@@ -49,7 +49,7 @@ fn open(root: &Path, fault: &Rc<RefCell<Fault>>) -> Result<LocalStore> {
 #[test]
 fn payload_range_defaults_to_validated_full_object() {
     let temp = tempfile::tempdir().unwrap();
-    let mut store = LocalStore::open(temp.path().join("ranges")).unwrap();
+    let store = LocalStore::open(temp.path().join("ranges")).unwrap();
     store.create("object", b"abcdefghij").unwrap();
     assert_eq!(
         store.get_range("object", 3, 4, 10).unwrap(),
@@ -150,7 +150,7 @@ fn failed_metadata_handle_cannot_bypass_stabilization() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("db");
         let fault = Rc::new(RefCell::new(Fault::default()));
-        let mut store = open(&root, &fault).unwrap();
+        let store = open(&root, &fault).unwrap();
         fault.borrow_mut().arm(&point, 0);
         let metadata = crate::encode(&crate::Metadata {
             version: 1,
@@ -255,7 +255,7 @@ fn publication_and_recovery_barriers_remain_ordered() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("db");
     let fault = Rc::new(RefCell::new(Fault::default()));
-    let mut store = open(&root, &fault).unwrap();
+    let store = open(&root, &fault).unwrap();
     fault.borrow_mut().trace.clear();
     store.create("object", b"value").unwrap();
     assert_eq!(fault.borrow().trace, publication_points());
@@ -281,7 +281,7 @@ fn local_publication_panic_also_blocks_recovery_on_the_same_handle() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("db");
         let fault = Rc::new(RefCell::new(Fault::default()));
-        let mut store = open(&root, &fault).unwrap();
+        let store = open(&root, &fault).unwrap();
         fault.borrow_mut().arm(point, 0);
         fault.borrow_mut().panic = true;
         let metadata = crate::encode(&crate::Metadata {
@@ -431,7 +431,7 @@ fn removal_is_idempotent_and_orders_seal_barrier_before_body_removal() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("db");
     let fault = Rc::new(RefCell::new(Fault::default()));
-    let mut store = open(&root, &fault).unwrap();
+    let store = open(&root, &fault).unwrap();
     store.create("object", b"value").unwrap();
     fault.borrow_mut().trace.clear();
     store.remove("object").unwrap();

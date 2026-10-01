@@ -1,6 +1,6 @@
 //! Synchronous S3-compatible storage. Use from blocking threads, including
 //! `spawn_blocking` when called by an async application.
-use super::{decode_envelope, encode_envelope, ObjectStore};
+use super::{decode_envelope, encode_envelope, uncertain, ObjectStore};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
@@ -17,7 +17,10 @@ use object_store::{
 };
 use std::{
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tokio::runtime::{Builder, Runtime};
 
@@ -126,7 +129,7 @@ pub struct S3Store {
     namespace: Path,
     runtime: Option<Runtime>,
     metrics: RequestMetrics,
-    poisoned: bool,
+    poisoned: AtomicBool,
     read_limits: Option<ReadLimits>,
 }
 impl S3Store {
@@ -178,7 +181,7 @@ impl S3Store {
             namespace: Path::from(namespace),
             runtime: Some(runtime),
             metrics,
-            poisoned: false,
+            poisoned: AtomicBool::new(false),
             read_limits: None,
         })
     }
@@ -194,7 +197,7 @@ impl S3Store {
         self.metrics.clone()
     }
     fn ready(&self) -> Result<()> {
-        if self.poisoned {
+        if self.poisoned.load(Ordering::Acquire) {
             return Err(Error::RecoveryRequired);
         }
         Ok(())
@@ -399,20 +402,19 @@ impl ObjectStore for S3Store {
             Ok(keys)
         })
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.ready()?;
         let path = self.path(key)?;
-        self.poisoned = true;
-        self.run(async {
-            match self.remote.delete(&path).await {
-                Err(object_store::Error::NotFound { .. }) => Ok(()),
-                other => other,
-            }
-        })?;
-        self.poisoned = false;
-        Ok(())
+        uncertain(&self.poisoned, || {
+            self.run(async {
+                match self.remote.delete(&path).await {
+                    Err(object_store::Error::NotFound { .. }) => Ok(()),
+                    other => other,
+                }
+            })
+        })
     }
-    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+    fn remove_many(&self, keys: &[String]) -> Result<()> {
         self.ready()?;
         let paths: Vec<_> = keys
             .iter()
@@ -421,44 +423,45 @@ impl ObjectStore for S3Store {
         if paths.is_empty() {
             return Ok(());
         }
-        self.poisoned = true;
-        // Keep native single-key DELETE semantics and no automatic retries.
-        // Finish the bounded batch even on error; every key is already obsolete.
-        // A response loss can still leave a late delete, safe by non-reuse.
-        let remote = &self.remote;
-        let results = self.runtime.as_ref().unwrap().block_on(async {
-            futures::stream::iter(paths)
-                .map(|path| async move {
-                    match remote.delete(&path).await {
-                        Err(object_store::Error::NotFound { .. }) => Ok(()),
-                        other => other,
-                    }
-                })
-                .buffer_unordered(4)
-                .collect::<Vec<_>>()
-                .await
-        });
-        for result in results {
-            result.map_err(remote_error)?;
-        }
-        self.poisoned = false;
-        Ok(())
+        uncertain(&self.poisoned, || {
+            // Keep native single-key DELETE semantics and no automatic retries.
+            // Finish the bounded batch even on error; every key is already
+            // obsolete. A response loss can still leave a late delete, safe by
+            // non-reuse.
+            let remote = &self.remote;
+            let results = self.runtime.as_ref().unwrap().block_on(async {
+                futures::stream::iter(paths)
+                    .map(|path| async move {
+                        match remote.delete(&path).await {
+                            Err(object_store::Error::NotFound { .. }) => Ok(()),
+                            other => other,
+                        }
+                    })
+                    .buffer_unordered(4)
+                    .collect::<Vec<_>>()
+                    .await
+            });
+            for result in results {
+                result.map_err(remote_error)?;
+            }
+            Ok(())
+        })
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         self.ready()?;
         let path = self.path(key)?;
         let bytes = encode_envelope(value);
-        self.poisoned = true;
-        self.run(self.remote.put_opts(
-            &path,
-            bytes.into(),
-            PutOptions {
-                mode: PutMode::Create,
-                ..Default::default()
-            },
-        ))?;
-        self.poisoned = false;
-        Ok(())
+        uncertain(&self.poisoned, || {
+            self.run(self.remote.put_opts(
+                &path,
+                bytes.into(),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..Default::default()
+                },
+            ))?;
+            Ok(())
+        })
     }
 }
 

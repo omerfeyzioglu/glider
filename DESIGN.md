@@ -41,9 +41,10 @@ For version 3/5 chunked snapshots, a separate read-only `StreamingDatabase` path
 keeps the selected manifest and newer mutations in memory and scans validated
 data chunks directly from the object store for exact queries.
 
-One mutable database handle exclusively owns a storage namespace. For a
-single-writer deployment, `OwnedDatabase` establishes an object-store claim
-before opening the database. Legacy `Database::open` on an unclaimed namespace
+One mutable database handle exclusively owns a storage namespace. A segmented
+writer takes the namespace over and fences every earlier writer ("Segmented
+writer takeover" below). For a resident single-writer deployment,
+`OwnedDatabase` establishes an object-store claim before opening the database. Legacy `Database::open` on an unclaimed namespace
 still requires the caller to ensure exclusive ownership; a namespace enrolled
 in owned mode rejects raw opens. No multi-writer protocol is provided. An owned
 object-store handle isolates the engine from filesystem operations. The newest complete checkpoint and newer
@@ -369,16 +370,17 @@ log-object, tail and backup bookkeeping count objects, not sequences.
 
 ### Segmented serving
 
-`SegmentedServing` claims the namespace with the owned-store protocol, opens
+`SegmentedServing` takes the namespace over with fencing (below), opens
 it with a sketch byte budget and an optional block cache, and implements the
-`admission::Engine` trait, so `admission::Service` runs it on the single
-committer thread. Queries use `search_selective_within` with a fixed read
+`admission::Engine` trait, so `admission::Service` runs its commands and
+maintenance on the single committer thread and its queries on published
+views (M34 below). Queries use `search_selective_within` with a fixed read
 budget (M21: 12 ranked candidates, 8 range requests, 1 MiB remote, and up to
 24 cached blocks read locally);
 unfiltered results are approximate under the M21 quality policy (mean
 recall@10 >=0.90, fifth percentile >=0.80, <1% short results), and the
 resident predicate is exact. Maintenance never runs concurrently with a
-command: while the queue is empty the worker executes one bounded unit (one
+command: while the queue is empty the committer executes one bounded unit (one
 seal/prune/reclaim step, an in-memory sketch compaction of one pack, a seal
 plan, one run consolidation, a prune/reclaim plan, a four-object cleanup
 batch or, when none is due, one cache warm-up read) and then rechecks the
@@ -410,8 +412,8 @@ digest bind disposable RAM/NVMe cache entries to a pinned root in the
 segmented namespace; `SegmentedServing` serves it, and the declared M21
 250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
 measured 10,000-row independent-arrival boundary and alternatives are in
-`benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4,
-root/index/log v1 and block v1/v2 in a fresh namespace. It acknowledges
+`benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4, index v1,
+root v1/v2 (plus v3 fence markers), log v1/v2/v3 and block v1/v2. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
 requires reopen. It can coalesce adjacent small ID indexes through another root
@@ -436,11 +438,12 @@ checked against the selected root before decoding.
 Missing or corrupt cache bytes trigger an authoritative range fetch. Opening
 rejects a missing selected pack, and corrupt bytes fetched from object storage
 fail closed. Cache bytes never acknowledge mutations or participate in root
-recovery. The cache mutex covers lookup, remote fetch and admission; a
-selective query fetches its blocks serially under it, then authenticates,
-decodes and scores them on scoped threads before settling hits or rejecting
-corrupt cached bytes. Maintenance never overlaps a command: the segmented
-serving engine runs bounded units only while the admission queue is empty.
+recovery. The cache mutex covers lookup and admission but never a remote
+read, so concurrent queries fetch in parallel and may both fetch one missed
+block; a selective query authenticates, decodes and scores its blocks on
+scoped threads before settling hits or rejecting corrupt cached bytes.
+Maintenance never overlaps a command: the segmented serving engine runs
+bounded units only while the committer's queue is empty.
 
 Warm-up keeps the selected root on local disk so warm queries need no remote
 reads, as object-storage-native systems keep a namespace on NVMe after first
@@ -454,12 +457,15 @@ are touched, so only entries outside the root or not yet reached are evicted;
 otherwise the pass fills free space only and stops at the limit, leaving the
 query-driven LRU contents in place. A pass ends when every pack is visited,
 the limit is reached, or an admission fails (such as a full disk); a new root
-generation or an entry found missing or corrupt starts a new pass. Warm-up
-reads are counted separately from query reads. `cache_stats` reports the
+generation or an entry found missing or corrupt starts a new pass. A unit
+plans its range under the cache mutex, reads it without the mutex, then
+admits it under the mutex after rechecking free space, so queries on
+published views never wait for its GET. Warm-up reads are counted separately
+from query reads. `cache_stats` reports the
 root's cache charge (`namespace_bytes`), the charge the current pass found or
 admitted (`warm_bytes`) and completion; the server reports them in status and
 metrics. A unit is not preemptible, so its read latency adds to the wait of a
-command arriving during it. The cache directory may be on instance-store NVMe,
+command (not a query) arriving during it. The cache directory may be on instance-store NVMe,
 EBS or a container volume; its loss, corruption or absence only slows queries
 and lowers warm recall toward the cold choice.
 
@@ -529,8 +535,11 @@ to get/list. Reads and listings must expose only durable complete objects; after
 an uncertain create, a backend must stabilize them or reject access until reopened.
 Complete keys cannot be replaced. Successful removal means durable absence;
 removing an absent key succeeds. Removal errors are uncertain and require the
-same stabilization or rejection. The engine never reuses reclaimed keys, so a
-delayed remote DELETE cannot remove newer authoritative data. Listings must be complete and
+same stabilization or rejection. Operations take `&self`; a backend shared
+between threads must serve reads of other keys while one mutation is in
+flight and reject access only after a mutation fails. The engine never reuses
+reclaimed keys, so a delayed remote DELETE cannot remove newer authoritative
+data. Listings must be complete and
 strongly consistent, though ordering is not required. The S3-compatible
 backend collects all listing pages and provides this object contract using native
 complete-object publication.
@@ -630,8 +639,8 @@ prefix and `stage_isolated_namespace` for takeover unless the chosen service can
 prove every old request has quiesced. The old prefix remains quarantined. A
 graceful successful `close` permits same-prefix reopen. Claims may be inspected
 and explicitly cleared for a verified stopped process, but a claim alone does
-not fence its earlier in-flight requests. There is no timed lease or automatic
-takeover. Existing namespaces can enroll only after all legacy writer processes
+not fence its earlier in-flight requests. The resident engine has no timed
+lease or automatic takeover; the segmented engine's takeover is below. Existing namespaces can enroll only after all legacy writer processes
 are stopped: an already-open older binary cannot be fenced retroactively. Older
 binaries reject the new key kinds. The wrapper hides ownership keys from
 database recovery and compaction; raw `Database::open` rejects an enrolled
@@ -654,11 +663,98 @@ frozen listing. This does not repair loss of an acknowledged source object and
 does not replace a backup. The exact operating procedure is in
 `docs/RECOVERY.md`.
 
-This chooses immutable claims over a mutable lease: lease expiry cannot safely
+This chooses immutable claims over a mutable lease: lease expiry alone cannot
 fence a delayed writer with the current object-store operations. A process-only
 singleton without a storage witness cannot detect a second opener on another
 host. The claim protocol uses conditional create, strongly consistent list and
 durable remove, without filesystem locking or in-place mutation.
+
+### Segmented writer takeover (M36)
+
+A segmented writer publishes logs only at `sglog-{s+1}` after its newest
+sequence `s`, and roots only at the generation after the highest it knows,
+each with one conditional create. `SegmentedDatabase::take_over`, used by
+`SegmentedServing::open`, therefore fences every earlier writer by occupying
+exactly those keys. It lists the namespace (creating metadata and root zero
+if it is empty, and checking the stored configuration first), reads the
+newest root and log, then creates:
+
+1. a takeover record at `sglog-{e}`, `e` = last sequence + 1: log version 3,
+   `{"version":3,"sequence":e}`. It changes no document, consumes one
+   sequence and defines the new writer epoch `e`;
+2. a fence marker at `sgroot-{g}`, `g` = highest listed generation + 1:
+   `{"version":3,"generation":g}`. It holds no state; root selection skips
+   markers and takes the newest root below them.
+
+It then lists again and opens normally. An earlier writer that resumes,
+however late and whatever its clock, finds its next log or root key taken:
+the conditional create fails with `Exists`, which proves non-publication, so
+it answers those requests `Busy` (fenced, not committed) and poisons. Its
+in-flight create to one of those keys either lands first, making the
+takeover's create fail so the caller relists and retries, or fails. Logs are
+contiguous and acknowledged only after their create, so every write an
+earlier writer acknowledged precedes `e` and is in the new writer's
+post-fence listing. Root version 2 adds `fences: {logs, roots}`, the keys of
+every takeover record and marker; every later root carries them, cleanup
+retains them and they are never reclaimed, because a deposed writer may
+resume at any time and its next keys are exactly these. A deposed writer can
+still create unreferenced packs and indexes (removed by a later open's
+cleanup) and delete objects obsolete under its own newest root; the new
+writer selected that root or a newer one and keys are never reused, so those
+deletes remove nothing it needs. Deposed writers' reads are not fenced: a
+paused server can answer reads from its old view until it learns of the
+takeover at its next renewal or write. Plain `SegmentedDatabase::open`
+fences nothing and requires external exclusivity.
+
+Semantics: a successful takeover acknowledges that both fences are durable
+and that the handle includes every write any earlier writer acknowledged.
+Authoritative state is unchanged: the selected root and the contiguous log
+tail, which now includes takeover records (counted as unsealed log objects
+but not toward the 64-object replay bound). A crash or error during takeover
+may leave the takeover record without the marker, or both; either is valid
+state, and the next takeover adds its own pair. `Exists` from a takeover means
+an earlier writer published concurrently; `glider-server` makes up to four
+attempts, each with a fresh listing. Each takeover permanently adds two small objects
+and two integers to every later root, linear in process starts (1,000 starts
+add about 16 KiB of root JSON).
+
+Takeover never depends on time; `lease::Lease` only decides when a process
+should attempt it, so a live writer is not deposed. The holder publishes
+immutable `sglease-{n:020}` objects (version 1 JSON: 32-hex holder token,
+declared `duration_ms` of at most one hour, `released` flag) every third of
+its duration, then lists: a higher number means it was deposed (a resumed
+holder may publish into a number its successor already removed); otherwise
+it removes lower numbers. A taker reads the newest lease; unless it is a
+release marker, it sleeps that lease's declared duration on its own monotonic
+clock and lists again. If no newer number appeared it creates the next number;
+the conditional create admits one of several concurrent takers and the
+others fail `Busy`. Skew, pauses or slow renewal only make a takeover early
+(fencing keeps it safe) or late (unavailability). `glider-server` acquires the
+lease (`GLIDER_LEASE_SECONDS`, default 10), takes over, renews in the
+background, shuts down when a renewal finds it deposed, and releases with a
+marker on graceful shutdown so the next start need not wait. `glider-admin`
+commands acquire and release the lease the same way. Renewal costs one PUT,
+one LIST and one DELETE per third of the duration.
+
+Namespaces written before M36 (version 1 roots, no takeover records, claim
+objects) open; claims are ignored and left in place. Pre-M36 binaries reject a
+namespace after its first takeover (log version 3, root version 2 or 3).
+Stop older servers before upgrading: they hold no lease, so a new server
+deposes and fences them at once.
+
+Alternatives: (a) the permanent claim plus an operator restore to a fresh
+prefix (the M9 procedure) is safe but needs a manual step and a full copy;
+(b) lease expiry alone cannot stop a paused writer with a slow clock; (c) a
+conditional mutable head or compare-and-swap is outside the object contract;
+(d) write-then-verify an epoch object before every acknowledgement avoids
+permanent per-takeover objects, but adds a request to every write's
+acknowledgement path and still needs separate fencing of roots and deletes;
+(e) skipping fences after a clean release needs proof, atomic with the data
+listing, that the previous holder stopped; a release marker is not atomic
+with it, because a process can acquire after the release, pause, and open
+after another takeover. Permanent fences at the deposed writer's next keys
+cost nothing per write, use only conditional create and complete listings,
+and keep one takeover path.
 
 ### Bounded retries and conditional batches (M15)
 
@@ -983,32 +1079,35 @@ are in `docs/SERVING.md` and `docs/RECOVERY.md`.
 
 `glider-server` (feature `server`) exposes one segmented collection over
 HTTP/JSON through an axum router in front of `admission::Service`; blocking
-ticket waits run on Tokio's blocking pool. Every write carries a request ID:
-`/v1/query` optionally includes metadata and/or vector on each hit; omitted
-flags preserve the ID-and-distance response.
+ticket waits run on Tokio's blocking pool. `/v1/query` optionally includes
+metadata and/or vector on each hit; omitted flags preserve the
+ID-and-distance response. Every write carries a request ID:
 a client-supplied ID makes the request safely retryable, otherwise the server
 issues one at the current sequence and returns it, so an uncertain response
 can be resolved through the request lookup. HTTP adds no durability step:
 the response is sent only after the admission worker reports durable
 publication. Overload maps to 429, invalid input to 400, request-ID misuse to
 409, corruption to 500 and an unavailable or poisoned engine to 503.
-SIGINT/SIGTERM stops accepting connections, drains queued commands and
-releases the ownership claim; a failed worker keeps the claim for the
-documented recovery procedure. An optional static bearer token guards every
+Startup acquires the writer lease and takes the namespace over (M36 above).
+SIGINT/SIGTERM, or a renewal that finds the server deposed, stops accepting
+connections, drains queued commands and releases the lease, even after a
+worker failure; after a crash the next start waits out the lease. Either
+way the next takeover fences the old process. An optional static bearer token guards every
 endpoint except `/healthz` and `/metrics`. The latter serves Prometheus 0.0.4
 text: server atomics record per-endpoint response classes and latency buckets,
 while a read-only admission command samples sequence, segmented maintenance,
-cache, warm-up and sketch values on the owning worker; `/v1/status` reports
+cache, warm-up, writer epoch and sketch values on the committer; `/v1/status` reports
 the same cache warm-up state. Queue state is sampled separately;
 metrics are observational and do not change publication or recovery semantics.
 
 ## Bounded concurrent admission (M16)
 
 `admission::Service` moves one engine (`SingleMachine` or `SegmentedServing`,
-through the `admission::Engine` trait) to a single blocking worker.
+through the `admission::Engine` trait) to a single blocking committer thread.
 Cloneable clients share a FIFO of writes, exact queries, revision observations
-and result lookups. At most eight commands and 320 KiB of encoded payload are
-admitted by default, including active work. Count and byte exhaustion returns
+and result lookups; an engine that publishes views runs queries and document
+reads on reader threads instead (M34 below). At most eight commands and
+320 KiB of encoded payload are admitted by default, including active work. Count and byte exhaustion returns
 `Overloaded` before retaining a normalized payload; inputs are validated and
 caller-controlled spare capacities are discarded. The queue lock covers bounded
 normalization and bookkeeping, never storage or search. Encoded bytes are an
@@ -1035,7 +1134,7 @@ publication will not start. Once the worker takes a command, cancellation cannot
 undo it; dropping the response does not stop a PUT. Resolve uncertainty with
 its M15 ID after recovery. A dropped queued ticket is cancelled, but retains its
 charge until the worker removes it. Queries bind results and reported sequence
-to one committed state; there is no simultaneous reader touching the map.
+to one committed state; on `SingleMachine` no reader runs beside the committer.
 
 `begin_shutdown` closes admission synchronously and either drains accepted work
 or cancels queued work. Active execution finishes in both modes. `shutdown` joins
@@ -1043,11 +1142,66 @@ the worker and acknowledges successful ownership release; its time bound depends
 on the configured backend operation deadlines. Dropping the service closes
 admission and cancels queued work, but does not acknowledge shutdown. A worker
 panic or uncertain storage error fails pending work, closes admission, releases
-queue charges and leaves the ownership claim for isolated recovery. Input errors
+queue charges and leaves `SingleMachine`'s ownership claim for isolated
+recovery; a segmented engine is fenced by the next takeover instead. Input errors
 and conditional conflicts do not stop a healthy worker. Thread-spawn failure
 can leave the already acquired claim; inspect/recover it as a stopped owner.
 No successful write result is delivered before durable publication. Backup is
 performed after graceful shutdown using the serial serving API.
+
+### Concurrent queries on published views (M34)
+
+An engine may return an immutable `admission::Snapshot` of its acknowledged
+state; `SegmentedServing` does, `SingleMachine` does not. The service then
+starts `Limits::queries` reader threads (default 4) beside the committer.
+Queries and document reads enter a separate FIFO under the same count and
+byte admission limits; each runs on the latest published snapshot when a
+reader starts it, so at most `queries` reads execute at once, each with at
+most `query_threads` scoped scoring threads. Writes, lookups, observations,
+metrics and maintenance stay on the single committer. `read_priority`
+applies only to engines whose reads run on the committer. A query's
+requested metadata and vectors come from the versions its snapshot scored,
+and each query reports the remote range reads and bytes it caused itself,
+including document fetches for requested fields of resident-filter hits;
+differences of shared counters would mix concurrent queries.
+
+The committer publishes a new snapshot after every command or write group
+and every maintenance unit that did work, and before delivering any result
+of that work. Publication replaces one `Arc` under a mutex. Hence a read
+admitted after an acknowledgement observes that write, a client's
+successive reads never go back in sequence, and a read never observes a
+partially applied group, root switch or seal: the snapshot is exactly the
+state the committer's own queries would see between two units. A failed
+command or uncertain write publishes nothing, and the service fails.
+A read that panics fails the service like a committer panic.
+
+A segmented snapshot (`View`) holds `Arc`s to the selected root, latest-ID
+directory, log tail and loaded sketches. The committer changes these
+copy-on-write: a write copies the tail map's nodes (bounded by 64 log
+objects; documents are shared) and the sketch liveness bits, a root switch
+also copies the directory, and sketch compaction copies one pack's sketch.
+Replaced roots are kept as weak references; cleanup skips packs that a root
+still held by a snapshot references, so a reader never loses blocks it may
+read, and removes them in a later unit after the snapshot is dropped. Each
+reader holds one snapshot and the service one more, so at most
+`queries + 1` states and their packs are retained; a slow reader delays
+reclamation, never publication. Logs, indexes and roots are never read
+through a snapshot. Snapshots add no durable format and do not change
+acknowledgement, group commit, retry, takeover or recovery.
+
+Readers and the committer share one store handle: every `ObjectStore`
+operation takes `&self`, and a `Sync` backend serves reads while a create
+or remove is in flight. Snapshots read only packs of published roots, never
+an object being created or removed. Backends poison themselves when a
+mutation fails or panics, not while it runs, so concurrent reads are not
+rejected. The local backend's creates and removals hold its namespace
+directory `flock` (Local backend below) whichever thread issues them;
+reads take no lock. A reader-writer lock around the whole engine was rejected: a query
+would wait for an entire command, including its log PUT, and for a
+non-preemptible maintenance unit (tens of milliseconds on S3), and a commit
+would wait for in-flight range GETs; a lock around only the store has the
+same defect for every query that misses the cache. Published views cost a
+copy of the changed state per publication instead of blocking either side.
 
 ## Local backend
 
@@ -1081,8 +1235,17 @@ with a deleted body. Reopen reclaims unsealed debris; failure during cleanup or
 synchronization fails open. Filesystem synchronization stays inside LocalStore.
 
 The namespace's parent directory must already exist. Initialization syncs both
-namespace and parent. Local durability requires exclusive access and a
-filesystem/device honoring file and directory synchronization. These operations
+namespace and parent. Local durability requires a filesystem/device honoring
+file and directory synchronization. Several handles, in one or several
+processes, may share a namespace: a lease keeper and its database, or an old
+and a new server during takeover. Each create (existence check, body, seal),
+removal and reopen reclamation holds an exclusive `flock` on the namespace
+directory, so create-if-absent is atomic across handles and reclamation never
+removes another live handle's in-progress publication; the OS releases a dead
+process's lock, and a process paused while holding it stalls other writers
+(liveness only). Readers take no lock: a read that finds a seal whose body was
+then removed reports the object absent only if the seal is gone too.
+Network filesystems without `flock` semantics are unsupported. These operations
 implement the object contract locally; they are not engine-level storage APIs.
 
 ## S3-compatible backend

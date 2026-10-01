@@ -25,7 +25,7 @@ impl ObjectStore for Memory {
     fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
         Ok(self.0.lock().unwrap().objects.get(key).cloned())
     }
-    fn create(&mut self, key: &str, bytes: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, bytes: &[u8]) -> glider::Result<()> {
         let mut s = self.0.lock().unwrap();
         let fault = if s.fault.as_ref().is_some_and(|f| key.starts_with(&f.0)) {
             s.fault.take()
@@ -45,7 +45,7 @@ impl ObjectStore for Memory {
         }
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         let mut s = self.0.lock().unwrap();
         s.objects.remove(key);
         if s.fault.as_ref().is_some_and(|f| f.0 == "remove") {
@@ -384,10 +384,10 @@ impl ObjectStore for ExitStore {
     fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
         self.inner.get(key)
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.inner.remove(key)
     }
-    fn create(&mut self, key: &str, bytes: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, bytes: &[u8]) -> glider::Result<()> {
         if key.starts_with("mutation-") {
             if self.publish {
                 self.inner.create(key, bytes)?;

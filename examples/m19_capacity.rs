@@ -104,7 +104,7 @@ impl ObjectStore for Observed {
         self.note("list", "", 0, start);
         result
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         let start = Instant::now();
         let result = self.inner.create(key, value);
         self.note("put", key, value.len(), start);
@@ -115,13 +115,13 @@ impl ObjectStore for Observed {
         }
         result
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         let start = Instant::now();
         let result = self.inner.remove(key);
         self.note("delete", key, 0, start);
         result
     }
-    fn remove_many(&mut self, keys: &[String]) -> glider::Result<()> {
+    fn remove_many(&self, keys: &[String]) -> glider::Result<()> {
         let start = Instant::now();
         let result = self.inner.remove_many(keys);
         self.note("remove_many", &keys.join(","), 0, start);

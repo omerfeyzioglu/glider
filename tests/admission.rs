@@ -1,15 +1,19 @@
 use glider::{
-    admission::{Error as AdmissionError, Limits, Service, Shutdown},
+    admission::{
+        Engine, Error as AdmissionError, Limits, QueryResult, Service, Shutdown, Snapshot,
+    },
     ownership::claims,
     recovery::stage_isolated_namespace,
-    retry::{Lookup, Request, RequestId},
+    retry::{Lookup, Outcome, Request, RequestId, Revision},
+    segmented::QueryOptions,
     serving::{ServingOptions, SingleMachine},
     store::ObjectStore,
-    Config, Error, Metric, Mutation,
+    streaming::OwnedDocument,
+    Config, Error, Metric, Mutation, Neighbor,
 };
 use std::{
     collections::BTreeMap,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Condvar, Mutex},
     time::Duration,
 };
 #[derive(Clone, Copy)]
@@ -49,11 +53,11 @@ impl ObjectStore for Store {
     fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
         Ok(self.0.lock().unwrap().objects.get(key).cloned())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.0.lock().unwrap().objects.remove(key);
         Ok(())
     }
-    fn create(&mut self, key: &str, bytes: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, bytes: &[u8]) -> glider::Result<()> {
         let gate = if key.starts_with("mutation-") {
             self.0.lock().unwrap().gate.take()
         } else {
@@ -326,4 +330,174 @@ fn read_priority_runs_queued_queries_before_unaged_writes() {
         assert_eq!(second.wait().unwrap().value.sequence, 2);
         service.shutdown(Shutdown::Drain).unwrap();
     }
+}
+
+/// Holds queries until released and records how many run at once.
+#[derive(Default)]
+struct Hold {
+    /// Running queries, the most at once, and whether they may finish.
+    state: Mutex<(usize, usize, bool)>,
+    changed: Condvar,
+}
+impl Hold {
+    fn enter(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 += 1;
+        state.1 = state.1.max(state.0);
+        self.changed.notify_all();
+        let mut state = self
+            .changed
+            .wait_while(state, |(_, _, released)| !*released)
+            .unwrap();
+        state.0 -= 1;
+    }
+    fn wait_running(&self, running: usize) {
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(
+                self.state.lock().unwrap(),
+                Duration::from_secs(5),
+                |state| state.0 < running,
+            )
+            .unwrap();
+        assert!(!timeout.timed_out(), "{} queries running", state.0);
+    }
+    fn release(&self) -> usize {
+        let mut state = self.state.lock().unwrap();
+        state.2 = true;
+        self.changed.notify_all();
+        state.1
+    }
+}
+/// Snapshot of `Counting`; a query with a negative component panics.
+struct Counted(u64, Option<Arc<Hold>>);
+impl Snapshot for Counted {
+    fn sequence(&self) -> u64 {
+        self.0
+    }
+    fn get(&self, _: u64) -> glider::Result<Option<OwnedDocument>> {
+        Ok(None)
+    }
+    fn query(
+        &self,
+        query: &[f32],
+        _: usize,
+        _: &[(&str, &str)],
+        _: QueryOptions,
+    ) -> glider::Result<QueryResult> {
+        assert!(query[0] >= 0., "injected reader panic");
+        if let Some(hold) = &self.1 {
+            hold.enter();
+        }
+        Ok(QueryResult {
+            sequence: self.0,
+            neighbors: Vec::new(),
+            hits: Vec::new(),
+            remote_reads: 0,
+            remote_bytes: 0,
+        })
+    }
+}
+/// Engine that only counts writes and serves every read from snapshots.
+struct Counting(u64, Option<Arc<Hold>>);
+impl Engine for Counting {
+    fn config(&self) -> Config {
+        config()
+    }
+    fn sequence(&self) -> u64 {
+        self.0
+    }
+    fn recovery_required(&self) -> bool {
+        false
+    }
+    fn maintenance_time(&self) -> Duration {
+        Duration::ZERO
+    }
+    fn apply_request(&mut self, _: Request) -> glider::Result<Outcome> {
+        self.0 += 1;
+        Ok(Outcome {
+            sequence: self.0,
+            conflict: None,
+        })
+    }
+    fn revision(&self, id: u64) -> Revision {
+        Revision {
+            id,
+            boundary: self.0,
+        }
+    }
+    fn request_id(&self) -> glider::Result<RequestId> {
+        Ok(RequestId {
+            boundary: self.0,
+            nonce: [0; 16],
+        })
+    }
+    fn lookup_request(&self, _: RequestId) -> glider::Result<Lookup> {
+        Ok(Lookup::Unknown)
+    }
+    fn get(&self, _: u64) -> glider::Result<Option<OwnedDocument>> {
+        unreachable!("reads run on snapshots")
+    }
+    fn query(&mut self, _: &[f32], _: usize, _: &[(&str, &str)]) -> glider::Result<Vec<Neighbor>> {
+        unreachable!("reads run on snapshots")
+    }
+    fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {
+        Some(Arc::new(Counted(self.0, self.1.clone())))
+    }
+    fn close(self) -> glider::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn snapshot_reads_observe_acknowledged_writes_and_a_reader_panic_fails_the_service() {
+    let service = Service::start(Counting(0, None), Limits::default()).unwrap();
+    let client = service.client();
+    for sequence in 1..=3 {
+        let written = client.write(request(1)).unwrap().wait().unwrap().value;
+        assert_eq!(written.sequence, sequence);
+        let read = client.query(vec![1.], 1, vec![]).unwrap().wait().unwrap();
+        assert_eq!(read.value.sequence, sequence);
+        assert_eq!(read.maintenance, Duration::ZERO);
+    }
+    assert!(client.get(1).unwrap().wait().unwrap().value.is_none());
+    let panicked = client.query(vec![-1.], 1, vec![]).unwrap();
+    assert!(matches!(panicked.wait(), Err(AdmissionError::WorkerFailed)));
+    assert!(matches!(
+        service.shutdown(Shutdown::Drain),
+        Err(AdmissionError::WorkerFailed)
+    ));
+    assert!(client.status().failed);
+    assert_eq!(client.status().commands, 0);
+    assert!(matches!(
+        client.query(vec![1.], 1, vec![]),
+        Err(AdmissionError::WorkerFailed)
+    ));
+}
+
+#[test]
+fn queries_run_up_to_the_configured_bound_and_writes_do_not_wait_for_them() {
+    let hold = Arc::new(Hold::default());
+    let limits = Limits {
+        queries: 2,
+        ..Limits::default()
+    };
+    let service = Service::start(Counting(0, Some(hold.clone())), limits).unwrap();
+    let client = service.client();
+    let queries: Vec<_> = (0..3)
+        .map(|_| client.query(vec![1.], 1, vec![]).unwrap())
+        .collect();
+    hold.wait_running(2);
+    // Both readers are busy and one query is queued; the committer still
+    // acknowledges a write.
+    let written = client.write(request(1)).unwrap().wait().unwrap();
+    assert_eq!(written.value.sequence, 1);
+    assert_eq!(hold.release(), 2);
+    // The queued query starts after the acknowledgement, so it observes it.
+    let sequences: Vec<_> = queries
+        .into_iter()
+        .map(|ticket| ticket.wait().unwrap().value.sequence)
+        .collect();
+    assert_eq!(sequences, [0, 0, 1]);
+    service.shutdown(Shutdown::Drain).unwrap();
 }

@@ -94,7 +94,7 @@ impl ObjectStore for Memory {
     fn list(&self) -> glider::Result<Vec<String>> {
         Ok(self.objects.lock().unwrap().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> glider::Result<()> {
         let mut objects = self.objects.lock().unwrap();
         if objects.contains_key(key) {
             return Err(Error::Exists(key.into()));
@@ -111,7 +111,7 @@ impl ObjectStore for Memory {
         }
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> glider::Result<()> {
+    fn remove(&self, key: &str) -> glider::Result<()> {
         self.objects.lock().unwrap().remove(key);
         if key.starts_with("owner-v1-") && self.lose_release_ack {
             return Err(std::io::Error::other("lost release acknowledgement").into());

@@ -74,7 +74,7 @@ fn local_namespace_keeps_original_inventory_and_removes_only_its_own_files() {
     std::fs::write(temp.path().join("unrelated"), b"keep").unwrap();
     {
         let namespace = LocalNamespace::new(temp.path(), "search").unwrap();
-        let mut store = namespace.open().unwrap();
+        let store = namespace.open().unwrap();
         store.create("object", b"payload").unwrap();
         assert_eq!(
             namespace.inventory().unwrap(),

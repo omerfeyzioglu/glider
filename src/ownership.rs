@@ -101,7 +101,7 @@ pub struct OwnedStore<S> {
 }
 
 impl<S: ObjectStore> OwnedStore<S> {
-    pub(crate) fn claim(mut inner: S) -> Result<Self> {
+    pub(crate) fn claim(inner: S) -> Result<Self> {
         match inner.get(ROOT)? {
             Some(_) => validate_root(&inner)?,
             None => inner.create(ROOT, ROOT_BYTES)?,
@@ -138,7 +138,7 @@ impl<S: ObjectStore> OwnedStore<S> {
         Ok(Self { inner, key })
     }
 
-    pub(crate) fn release(mut self) -> Result<()> {
+    pub(crate) fn release(self) -> Result<()> {
         self.inner.remove(&self.key)
     }
 }
@@ -171,13 +171,13 @@ impl<S: ObjectStore> ObjectStore for OwnedStore<S> {
             .filter(|key| !is_control_key(key))
             .collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         self.inner.create(key, value)
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.inner.remove(key)
     }
-    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+    fn remove_many(&self, keys: &[String]) -> Result<()> {
         self.inner.remove_many(keys)
     }
 }

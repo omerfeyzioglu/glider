@@ -1,7 +1,7 @@
-//! Experimental versioned segmented layout. This is not yet a serving engine.
+//! Versioned segmented layout: immutable logs, packs, run indexes and roots.
 use crate::{
-    decode, encode, matches_filter, retry, store::ObjectStore, streaming::OwnedDocument, Config,
-    Document, Error, Mutation, Neighbor, Result,
+    decode, encode, lease::is_lease_key, matches_filter, ownership, retry, store::ObjectStore,
+    streaming::OwnedDocument, Config, Document, Error, Mutation, Neighbor, Result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,10 +9,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     path::Path,
-    sync::{
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
-        Mutex,
-    },
+    sync::{Arc, Mutex, Weak},
 };
 
 mod cache;
@@ -332,6 +329,25 @@ pub(crate) struct RunRef {
     pub(crate) blocks: Vec<BlockRef>,
 }
 
+/// Keys of every takeover's fence objects: takeover records (log
+/// sequences) and fence markers (root generations). A deposed writer may
+/// resume at any time and its next log and root keys are exactly these, so
+/// they are never reclaimed.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Fences {
+    logs: BTreeSet<u64>,
+    roots: BTreeSet<u64>,
+}
+
+impl Fences {
+    fn is_empty(&self) -> bool {
+        self.logs.is_empty() && self.roots.is_empty()
+    }
+}
+
+/// Root version 1 has no fences; version 2 is identical plus a nonempty
+/// fence set, so namespaces without a fenced takeover keep version 1.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Root {
@@ -341,6 +357,65 @@ pub(crate) struct Root {
     config: Config,
     retry: retry::State,
     pub(crate) runs: Vec<RunRef>,
+    #[serde(default, skip_serializing_if = "Fences::is_empty")]
+    fences: Fences,
+}
+
+/// A fence marker: occupies one root generation so that a deposed writer's
+/// next root publication conflicts. It holds no state; root selection skips
+/// it. Version 3 shares the root keys' version field.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootFence {
+    version: u32,
+    generation: u64,
+}
+
+enum RootObject {
+    Root(Box<Root>),
+    Fence,
+}
+
+/// Decode an object at `root_key(generation)`.
+fn decode_root(bytes: &[u8], config: Config, generation: u64) -> Result<RootObject> {
+    let object = if decode::<MetadataVersion>(bytes)?.version == 3 {
+        let fence: RootFence = decode(bytes)?;
+        if fence.generation != generation {
+            return Err(Error::Corrupt("segmented fence generation mismatch".into()));
+        }
+        RootObject::Fence
+    } else {
+        let root: Root = decode(bytes)?;
+        root.validate(config)?;
+        if root.generation != generation {
+            return Err(Error::Corrupt("segmented root generation mismatch".into()));
+        }
+        RootObject::Root(Box::new(root))
+    };
+    Ok(object)
+}
+
+/// The newest root at or below the listed generations, skipping fence
+/// markers above it, which it returns. `Error::Exists` means a listed object
+/// vanished: only a newer root supersedes one, so the caller retries.
+fn select_root<S: ObjectStore>(
+    store: &S,
+    config: Config,
+    generations: &BTreeSet<u64>,
+) -> Result<(Root, Vec<u64>)> {
+    let mut markers = Vec::new();
+    for &generation in generations.iter().rev() {
+        let key = root_key(generation);
+        match decode_root(
+            &store.get(&key)?.ok_or(Error::Exists(key))?,
+            config,
+            generation,
+        )? {
+            RootObject::Root(root) => return Ok((*root, markers)),
+            RootObject::Fence => markers.push(generation),
+        }
+    }
+    Err(Error::Corrupt("no segmented root below the fences".into()))
 }
 
 impl Root {
@@ -352,11 +427,25 @@ impl Root {
             config,
             retry: retry::State::default(),
             runs: Vec::new(),
+            fences: Fences::default(),
         }
     }
 
     pub(crate) fn validate(&self, config: Config) -> Result<()> {
-        if self.version != 1 || self.config != config || self.runs.len() > 64 {
+        let fences_valid = match self.version {
+            1 => self.fences.is_empty(),
+            2 => {
+                !self.fences.is_empty()
+                    && !self.fences.logs.contains(&0)
+                    && self
+                        .fences
+                        .roots
+                        .iter()
+                        .all(|&generation| generation > 0 && generation < self.generation)
+            }
+            _ => false,
+        };
+        if !fences_valid || self.config != config || self.runs.len() > 64 {
             return Err(Error::Corrupt("invalid segmented root identity".into()));
         }
         self.retry.validate(self.sequence)?;
@@ -696,29 +785,188 @@ struct LogEntry {
     outcome: retry::Outcome,
 }
 
-/// Decode a log object of either version into its entries in order.
-fn decode_log(bytes: &[u8], first_sequence: u64) -> Result<Vec<LogRecordV1>> {
+/// Log version 3: a writer takeover record. It carries no request and
+/// changes no document; its sequence is the new writer's epoch. Occupying
+/// that key fences every earlier writer, whose next log key it is.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TakeoverRecord {
+    version: u32,
+    sequence: u64,
+}
+
+enum LogObject {
+    Requests(Vec<LogRecordV1>),
+    Takeover,
+}
+
+impl LogObject {
+    fn last_sequence(&self, first_sequence: u64) -> u64 {
+        match self {
+            LogObject::Requests(records) => first_sequence + records.len() as u64 - 1,
+            LogObject::Takeover => first_sequence,
+        }
+    }
+}
+
+/// Decode a log object of any version; request entries are in order.
+fn decode_log(bytes: &[u8], first_sequence: u64) -> Result<LogObject> {
     match decode::<MetadataVersion>(bytes)?.version {
-        1 => Ok(vec![decode(bytes)?]),
+        1 => Ok(LogObject::Requests(vec![decode(bytes)?])),
         2 => {
             let record: LogRecordV2 = decode(bytes)?;
             if record.first_sequence != first_sequence || record.entries.len() < 2 {
                 return Err(Error::Corrupt("invalid segmented log group".into()));
             }
-            Ok(record
-                .entries
-                .into_iter()
-                .enumerate()
-                .map(|(offset, entry)| LogRecordV1 {
-                    version: 1,
-                    sequence: first_sequence + offset as u64,
-                    request: entry.request,
-                    outcome: entry.outcome,
-                })
-                .collect())
+            Ok(LogObject::Requests(
+                record
+                    .entries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(offset, entry)| LogRecordV1 {
+                        version: 1,
+                        sequence: first_sequence + offset as u64,
+                        request: entry.request,
+                        outcome: entry.outcome,
+                    })
+                    .collect(),
+            ))
+        }
+        3 => {
+            let record: TakeoverRecord = decode(bytes)?;
+            if record.sequence != first_sequence {
+                return Err(Error::Corrupt("invalid segmented takeover record".into()));
+            }
+            Ok(LogObject::Takeover)
         }
         _ => Err(Error::Corrupt("unsupported segmented log version".into())),
     }
+}
+
+/// Keys that are not database state: lease objects and the claim objects of
+/// the earlier ownership protocol, which takeover fencing supersedes.
+fn is_control_key(key: &str) -> bool {
+    is_lease_key(key) || ownership::is_control_key(key)
+}
+
+/// Fence every earlier writer of an initialized namespace whose state keys
+/// are `keys`: publish a takeover record at the next log sequence, then a
+/// fence marker at the next root generation. A writer publishes logs and
+/// roots only at the key after its newest one, with a conditional create,
+/// so a deposed writer's next publication on either chain conflicts; both
+/// objects are permanent, so it conflicts however late it resumes.
+///
+/// `Error::Exists` means another writer published or superseded an object
+/// after the listing; retry with a fresh listing.
+fn fence<S: ObjectStore>(store: &S, config: Config, keys: &[String]) -> Result<()> {
+    let mut generations = BTreeSet::new();
+    let mut last_log = 0;
+    for key in keys {
+        if key.starts_with("sgroot-") {
+            generations.insert(numbered_key(key, "sgroot-")?);
+        } else if key.starts_with("sglog-") {
+            last_log = last_log.max(numbered_key(key, "sglog-")?);
+        }
+    }
+    let (root, _) = select_root(store, config, &generations)?;
+    let mut sequence = root.sequence;
+    if last_log > root.sequence {
+        // Like a root, a listed log vanishes only under a newer root.
+        let object = log_key(last_log);
+        let bytes = store.get(&object)?.ok_or(Error::Exists(object))?;
+        sequence = decode_log(&bytes, last_log)?.last_sequence(last_log);
+    }
+    let epoch = sequence
+        .checked_add(1)
+        .ok_or_else(|| Error::Invalid("sequence exhausted".into()))?;
+    store.create(
+        &log_key(epoch),
+        &encode(&TakeoverRecord {
+            version: 3,
+            sequence: epoch,
+        })?,
+    )?;
+    let generation = generations
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+    store.create(
+        &root_key(generation),
+        &encode(&RootFence {
+            version: 3,
+            generation,
+        })?,
+    )
+}
+
+/// Reject options a namespace cannot declare.
+fn validate_options(options: &SegmentedOptions) -> Result<()> {
+    if options
+        .resident_filter
+        .as_ref()
+        .is_some_and(|(key, _)| key.is_empty())
+    {
+        return Err(Error::Invalid(
+            "resident filter key must be nonempty".into(),
+        ));
+    }
+    if options.routed_keys.len() > 4
+        || options.routed_keys.iter().any(String::is_empty)
+        || options
+            .routed_keys
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(Error::Invalid(
+            "routed keys must be sorted, unique, nonempty and at most four".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// List the namespace's state keys, sorted, after creating metadata and
+/// root zero on a fresh (or interrupted first) open, and check the stored
+/// metadata against `config` and `options`.
+fn initialize<S: ObjectStore>(
+    store: &S,
+    config: Config,
+    options: &SegmentedOptions,
+) -> Result<Vec<String>> {
+    let mut keys: Vec<_> = store
+        .list()?
+        .into_iter()
+        .filter(|key| !is_control_key(key))
+        .collect();
+    keys.sort();
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::Corrupt("duplicate segmented object key".into()));
+    }
+    if keys.is_empty() {
+        store.create("metadata", &metadata_bytes(config, options)?)?;
+        store.create(&root_key(0), &encode(&Root::empty(config))?)?;
+        return Ok(vec!["metadata".into(), root_key(0)]);
+    }
+    if keys.iter().filter(|key| key.as_str() == "metadata").count() != 1 {
+        return Err(Error::Corrupt("segmented metadata missing".into()));
+    }
+    check_metadata(
+        &store
+            .get("metadata")?
+            .ok_or_else(|| Error::Corrupt("listed segmented metadata missing".into()))?,
+        config,
+        options,
+    )?;
+    if keys == ["metadata"] {
+        // An interrupted first open may have published metadata only.
+        store.create(&root_key(0), &encode(&Root::empty(config))?)?;
+        keys.push(root_key(0));
+    }
+    if !keys.contains(&root_key(0)) {
+        return Err(Error::Corrupt("segmented root zero missing".into()));
+    }
+    Ok(keys)
 }
 
 fn log_key(sequence: u64) -> String {
@@ -876,7 +1124,7 @@ struct SealState {
     /// Planned block membership by ID; records are materialized per pack.
     blocks: Vec<Vec<u64>>,
     /// Sealed versions a newer tail write displaced during this seal.
-    displaced: BTreeMap<u64, (u64, Option<Document>)>,
+    displaced: BTreeMap<u64, (u64, Option<Arc<Document>>)>,
     entries: Vec<IndexEntry>,
     references: Vec<BlockRef>,
     sketches: Vec<PackSketch>,
@@ -885,27 +1133,39 @@ struct SealState {
     index_published: bool,
 }
 
-/// Experimental segmented namespace. Vectors in committed runs are fetched by
-/// block. The caller must enforce one exclusive object-store owner and use a
-/// fresh namespace; the current serving API does not use this engine yet.
+/// Acknowledged log-tail versions by ID. Documents are shared, so copying the
+/// tail for a new view copies only its nodes.
+type Tail = BTreeMap<u64, (u64, Option<Arc<Document>>)>;
+
+/// Segmented namespace. Vectors in committed runs are fetched by block.
+/// [`SegmentedDatabase::take_over`] fences earlier writers before opening;
+/// a plain [`SegmentedDatabase::open`] leaves exclusivity to the caller.
+///
+/// The state queries read (root, directory, tail and sketches) is held in
+/// copy-on-write `Arc`s that `view` shares; a later mutation copies a part
+/// only while a view still holds it.
 pub struct SegmentedDatabase<S> {
-    store: S,
+    store: Arc<S>,
     config: Config,
-    root: Root,
+    root: Arc<Root>,
     sequence: u64,
+    /// Every known fence: the selected root's, markers above it and
+    /// takeover records in the tail. Carried into each published root.
+    fences: Fences,
     retry: retry::State,
-    latest: Directory,
-    tail: BTreeMap<u64, (u64, Option<Document>)>,
+    latest: Arc<Directory>,
+    tail: Arc<Tail>,
     tail_objects: usize,
     /// First sequence of each unsealed log object, in order.
     tail_logs: VecDeque<u64>,
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
-    cache: Option<Mutex<BlockCache>>,
-    uncached_reads: (AtomicU64, AtomicU64),
-    options: SegmentedOptions,
+    /// Replaced roots; one that a view still holds pins its packs.
+    retired: Vec<Weak<Root>>,
+    cache: Option<Arc<Mutex<BlockCache>>>,
+    options: Arc<SegmentedOptions>,
     options_digest: [u8; 32],
-    sketches: SketchSet,
+    sketches: Arc<SketchSet>,
     query_threads: usize,
     reclaim_min_garbage: usize,
     seal: Option<SealState>,
@@ -914,9 +1174,252 @@ pub struct SegmentedDatabase<S> {
     poisoned: bool,
 }
 
+/// One acknowledged state of a segmented namespace for queries that run
+/// beside the committer: the selected root with its directory and sketches,
+/// and the log tail through `sequence`. A view never changes; the committer
+/// publishes a new one after each change, so a query never observes a
+/// partially applied write or root switch.
+pub(crate) struct View<S> {
+    store: Arc<S>,
+    cache: Option<Arc<Mutex<BlockCache>>>,
+    config: Config,
+    options: Arc<SegmentedOptions>,
+    query_threads: usize,
+    sequence: u64,
+    root: Arc<Root>,
+    latest: Arc<Directory>,
+    tail: Arc<Tail>,
+    sketches: Arc<SketchSet>,
+}
+
+/// Remote range reads and payload bytes caused by one query.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RemoteReads {
+    pub(crate) requests: u64,
+    pub(crate) bytes: u64,
+}
+
+impl RemoteReads {
+    fn count(&mut self, bytes: usize) {
+        self.requests += 1;
+        self.bytes += bytes as u64;
+    }
+}
+
+fn lock_cache(cache: &Mutex<BlockCache>) -> Result<std::sync::MutexGuard<'_, BlockCache>> {
+    cache
+        .lock()
+        .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))
+}
+
+impl<S: ObjectStore> View<S> {
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Read and authenticate one block through the cache. Corrupt cached
+    /// bytes are discarded and read again. The cache lock is never held
+    /// across a remote read, so concurrent queries do not wait on it.
+    fn read_data_block(&self, reference: &BlockRef, reads: &mut RemoteReads) -> Result<Block> {
+        if let Some(cache) = &self.cache {
+            loop {
+                // A separate statement releases the lock before decoding.
+                let hit = lock_cache(cache)?.lookup(reference)?;
+                let Some((bytes, source)) = hit else {
+                    break;
+                };
+                match decode_block_bytes(self.config, reference, &bytes) {
+                    Ok(block) => {
+                        lock_cache(cache)?.accept(reference, source, &bytes);
+                        return Ok(block);
+                    }
+                    Err(_) => lock_cache(cache)?.reject(reference, source),
+                }
+            }
+        }
+        validate_block_ref(reference)?;
+        let bytes = self
+            .store
+            .get_range(
+                &reference.object,
+                reference.offset,
+                reference.length,
+                reference.payload_len,
+            )?
+            .ok_or_else(|| {
+                Error::Corrupt(format!("segmented pack missing: {}", reference.object))
+            })?;
+        reads.count(bytes.len());
+        let Some(cache) = &self.cache else {
+            return decode_block_bytes(self.config, reference, &bytes);
+        };
+        lock_cache(cache)?.count_remote(bytes.len());
+        let block = decode_block_bytes(self.config, reference, &bytes)?;
+        lock_cache(cache)?.accept(reference, cache::Source::Remote, &bytes);
+        Ok(block)
+    }
+
+    /// Fetch unauthenticated candidate bytes for the chosen blocks. Cache hits
+    /// are local; every coalesced `range` containing a miss is fetched whole
+    /// in one batched read the backend may issue concurrently, then split.
+    /// The caller authenticates each block against its reference, then
+    /// settles the cache with `accept` or `reject`.
+    fn fetch_blocks(
+        &self,
+        references: &[&BlockRef],
+        ranges: &[(&str, usize, usize, usize)],
+        reads: &mut RemoteReads,
+    ) -> Result<Vec<(Slice, cache::Source)>> {
+        let mut hits = Vec::with_capacity(references.len());
+        {
+            let mut cache = self.cache.as_deref().map(lock_cache).transpose()?;
+            for reference in references {
+                validate_block_ref(reference)?;
+                hits.push(match cache.as_mut() {
+                    Some(cache) => cache.lookup(reference)?,
+                    None => None,
+                });
+            }
+        }
+        let within = |reference: &BlockRef, range: &(&str, usize, usize, usize)| {
+            range.0 == reference.object
+                && range.1 <= reference.offset
+                && reference.offset + reference.length <= range.1 + range.2
+        };
+        let needed: Vec<_> = ranges
+            .iter()
+            .filter(|range| {
+                references
+                    .iter()
+                    .zip(&hits)
+                    .any(|(reference, hit)| hit.is_none() && within(reference, range))
+            })
+            .copied()
+            .collect();
+        let payloads: Vec<_> = if needed.is_empty() {
+            Vec::new()
+        } else {
+            self.store.get_ranges(&needed)?
+        }
+        .into_iter()
+        .map(|payload| payload.map(Arc::new))
+        .collect();
+        for payload in payloads.iter().flatten() {
+            reads.count(payload.len());
+        }
+        if let Some(cache) = &self.cache {
+            let mut cache = lock_cache(cache)?;
+            for payload in payloads.iter().flatten() {
+                cache.count_remote(payload.len());
+            }
+        }
+        references
+            .iter()
+            .zip(hits)
+            .map(|(reference, hit)| {
+                if let Some((bytes, source)) = hit {
+                    let end = bytes.len();
+                    return Ok((
+                        Slice {
+                            data: Arc::new(bytes),
+                            start: 0,
+                            end,
+                        },
+                        source,
+                    ));
+                }
+                let (range, payload) = needed
+                    .iter()
+                    .zip(&payloads)
+                    .find(|(range, _)| within(reference, range))
+                    .ok_or_else(|| Error::Invalid("chosen block outside its range".into()))?;
+                let payload = payload.as_ref().ok_or_else(|| {
+                    Error::Corrupt(format!("segmented pack missing: {}", reference.object))
+                })?;
+                // Blocks share their span's buffer instead of copying it.
+                let start = reference.offset - range.1;
+                Ok((
+                    Slice {
+                        data: payload.clone(),
+                        start,
+                        end: start + reference.length,
+                    },
+                    cache::Source::Remote,
+                ))
+            })
+            .collect()
+    }
+
+    /// Return the stored document; cosine vectors are normalized to unit length.
+    pub(crate) fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
+        self.document(id, &mut RemoteReads::default())
+    }
+
+    /// `get`, adding any remote block read to `reads`.
+    fn document(&self, id: u64, reads: &mut RemoteReads) -> Result<Option<OwnedDocument>> {
+        if let Some((_, document)) = self.tail.get(&id) {
+            return Ok(document.as_ref().map(|document| OwnedDocument {
+                vector: document.vector.clone(),
+                metadata: document.metadata.clone(),
+            }));
+        }
+        let Some(location) = self.latest.get(&id) else {
+            return Ok(None);
+        };
+        if location.entry.deleted {
+            return Ok(None);
+        }
+        let run = &self.root.runs[location.run];
+        let block = self.read_data_block(&run.blocks[location.entry.block as usize], reads)?;
+        let record = block
+            .records
+            .binary_search_by_key(&id, BlockRecord::id)
+            .ok()
+            .and_then(|index| block.records.get(index))
+            .ok_or_else(|| Error::Corrupt("segmented directory entry missing in block".into()))?;
+        if record.sequence != location.entry.sequence {
+            return Err(Error::Corrupt(
+                "segmented directory sequence mismatch".into(),
+            ));
+        }
+        match &record.mutation {
+            Mutation::Put {
+                vector, metadata, ..
+            } => Ok(Some(OwnedDocument {
+                vector: vector.clone(),
+                metadata: metadata.clone(),
+            })),
+            Mutation::Delete { .. } => Err(Error::Corrupt(
+                "segmented live directory points to tombstone".into(),
+            )),
+        }
+    }
+}
+
 impl<S: ObjectStore> SegmentedDatabase<S> {
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// The writer epoch: the sequence of the namespace's newest takeover
+    /// record, or 0 if it was never taken over. Every takeover increases it.
+    pub fn epoch(&self) -> u64 {
+        self.fences.logs.last().copied().unwrap_or(0)
+    }
+
+    /// A copy of the selected root at the next free generation (above every
+    /// fence marker) carrying the namespace's fences.
+    fn next_root(&self) -> Result<Root> {
+        let mut root = Root::clone(&self.root);
+        root.generation = self
+            .root
+            .generation
+            .max(self.fences.roots.last().copied().unwrap_or(0))
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        root.fences = self.fences.clone();
+        root.version = if root.fences.is_empty() { 1 } else { 2 };
+        Ok(root)
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -952,8 +1455,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(self.retry.lookup(id, self.sequence))
     }
 
-    pub(crate) fn into_store(self) -> S {
-        self.store
+    /// Share the current acknowledged state with a reader. Later mutations
+    /// do not change the returned view.
+    pub(crate) fn view(&self) -> View<S> {
+        View {
+            store: self.store.clone(),
+            cache: self.cache.clone(),
+            config: self.config,
+            options: self.options.clone(),
+            query_threads: self.query_threads,
+            sequence: self.sequence,
+            root: self.root.clone(),
+            latest: self.latest.clone(),
+            tail: self.tail.clone(),
+            sketches: self.sketches.clone(),
+        }
     }
 
     /// Reclaim a mostly dead pack only if it frees at least this many
@@ -995,11 +1511,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         ram_bytes: usize,
         nvme_bytes: usize,
     ) -> Result<Self> {
-        self.cache = Some(Mutex::new(BlockCache::open(
+        self.cache = Some(Arc::new(Mutex::new(BlockCache::open(
             directory.as_ref(),
             ram_bytes,
             nvme_bytes,
-        )));
+        ))));
         Ok(self)
     }
 
@@ -1015,213 +1531,84 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .transpose()
     }
 
-    fn query_remote_reads(&self) -> (u64, u64) {
-        self.cache_stats().ok().flatten().map_or_else(
-            || {
-                (
-                    self.uncached_reads.0.load(AtomicOrdering::Relaxed),
-                    self.uncached_reads.1.load(AtomicOrdering::Relaxed),
-                )
-            },
-            |stats| (stats.remote_fetches, stats.remote_payload_bytes),
-        )
-    }
-
     /// Copy part of the selected root's blocks into the NVMe cache tier: one
     /// authenticated range read of at most `unit_bytes` (at least one block).
     /// The pass fills only free space unless every block of the root fits
     /// the NVMe limit, and restarts after a root change or a lost entry.
     /// Returns false when there is nothing left to warm or no cache. Warm-up
-    /// reads are reported separately from query reads in `cache_stats`.
+    /// reads are reported separately from query reads in `cache_stats`. The
+    /// cache lock is not held across the range read, so queries running on
+    /// views never wait for it.
     pub fn warm_cache_step(&self, unit_bytes: usize) -> Result<bool> {
-        match self.lock_cache()? {
-            Some(mut cache) => cache.warm_step(&self.store, &self.root, unit_bytes),
-            None => Ok(false),
-        }
-    }
-
-    fn read_data_block(&self, reference: &BlockRef) -> Result<Block> {
-        match &self.cache {
-            Some(cache) => cache
-                .lock()
-                .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))?
-                .read_block(&self.store, self.config, reference),
-            None => {
-                let block = read_block(&self.store, self.config, reference)?;
-                self.uncached_reads.0.fetch_add(1, AtomicOrdering::Relaxed);
-                self.uncached_reads
-                    .1
-                    .fetch_add(reference.length as u64, AtomicOrdering::Relaxed);
-                Ok(block)
-            }
-        }
-    }
-
-    fn lock_cache(&self) -> Result<Option<std::sync::MutexGuard<'_, BlockCache>>> {
-        self.cache
-            .as_ref()
-            .map(|cache| {
-                cache
-                    .lock()
-                    .map_err(|_| Error::Corrupt("segmented cache lock poisoned".into()))
-            })
-            .transpose()
-    }
-
-    /// Fetch unauthenticated candidate bytes for the chosen blocks. Cache hits
-    /// are local; every coalesced `range` containing a miss is fetched whole
-    /// in one batched read the backend may issue concurrently, then split.
-    /// The caller authenticates each block against its reference, then
-    /// settles the cache with `accept` or `reject`.
-    fn fetch_blocks(
-        &self,
-        references: &[&BlockRef],
-        ranges: &[(&str, usize, usize, usize)],
-    ) -> Result<Vec<(Slice, cache::Source)>> {
-        let mut cache = self.lock_cache()?;
-        let mut hits = Vec::with_capacity(references.len());
-        for reference in references {
-            validate_block_ref(reference)?;
-            hits.push(match cache.as_mut() {
-                Some(cache) => cache.lookup(reference)?,
-                None => None,
-            });
-        }
-        let within = |reference: &BlockRef, range: &(&str, usize, usize, usize)| {
-            range.0 == reference.object
-                && range.1 <= reference.offset
-                && reference.offset + reference.length <= range.1 + range.2
+        let Some(cache) = &self.cache else {
+            return Ok(false);
         };
-        let needed: Vec<_> = ranges
-            .iter()
-            .filter(|range| {
-                references
-                    .iter()
-                    .zip(&hits)
-                    .any(|(reference, hit)| hit.is_none() && within(reference, range))
-            })
-            .copied()
-            .collect();
-        let payloads: Vec<_> = self
+        // A separate statement releases the lock before the remote read.
+        let unit = lock_cache(cache)?.warm_plan(&self.root, unit_bytes)?;
+        let read = match unit {
+            cache::WarmUnit::Done => return Ok(false),
+            cache::WarmUnit::Skipped => return Ok(true),
+            cache::WarmUnit::Read(read) => read,
+        };
+        let bytes = self
             .store
-            .get_ranges(&needed)?
-            .into_iter()
-            .map(|payload| payload.map(std::sync::Arc::new))
-            .collect();
-        if let Some(cache) = cache.as_mut() {
-            for payload in payloads.iter().flatten() {
-                cache.count_remote(payload.len());
-            }
-        } else {
-            for payload in payloads.iter().flatten() {
-                self.uncached_reads.0.fetch_add(1, AtomicOrdering::Relaxed);
-                self.uncached_reads
-                    .1
-                    .fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
-            }
-        }
-        references
-            .iter()
-            .zip(hits)
-            .map(|(reference, hit)| {
-                if let Some((bytes, source)) = hit {
-                    return Ok((Slice::from(bytes), source));
-                }
-                let (range, payload) = needed
-                    .iter()
-                    .zip(&payloads)
-                    .find(|(range, _)| within(reference, range))
-                    .ok_or_else(|| Error::Invalid("chosen block outside its range".into()))?;
-                let payload = payload.as_ref().ok_or_else(|| {
-                    Error::Corrupt(format!("segmented pack missing: {}", reference.object))
-                })?;
-                // Blocks share their span's buffer instead of copying it.
-                let start = reference.offset - range.1;
-                Ok((
-                    Slice {
-                        data: payload.clone(),
-                        start,
-                        end: start + reference.length,
-                    },
-                    cache::Source::Remote,
-                ))
-            })
-            .collect()
+            .get_range(&read.object, read.offset, read.length, read.payload_len)?
+            .ok_or_else(|| Error::Corrupt(format!("segmented pack missing: {}", read.object)))?;
+        lock_cache(cache)?.warm_admit(read, &bytes)
     }
 
     pub fn open(store: S, config: Config) -> Result<Self> {
         Self::open_with_options(store, config, SegmentedOptions::default())
     }
 
-    /// Open or create a namespace whose metadata declares `options`. Opening
-    /// with options different from the persisted declaration fails.
-    pub fn open_with_options(
-        mut store: S,
+    /// [`SegmentedDatabase::take_over_with_options`] with default options.
+    pub fn take_over(store: S, config: Config) -> Result<Self> {
+        Self::take_over_with_options(store, config, SegmentedOptions::default())
+    }
+
+    /// Become the namespace's only writer, creating it if absent, then open
+    /// it. Takeover publishes a takeover record at the next log sequence and
+    /// a fence marker at the next root generation, both permanent, so every
+    /// earlier writer (dead, paused or partitioned) fails its next log or
+    /// root publication at the object store, however late, and acknowledges
+    /// nothing more. The open lists after both fences, so it includes every
+    /// write an earlier writer acknowledged. Correctness needs no clocks; a
+    /// [`crate::lease::Lease`] only keeps processes from deposing a live
+    /// writer.
+    ///
+    /// Each takeover consumes one sequence and one root generation and
+    /// raises [`SegmentedDatabase::epoch`]. An error may leave either fence
+    /// published; both are valid state and the next takeover adds its own.
+    /// `Error::Exists` means another writer published concurrently; retry
+    /// with a fresh store handle.
+    pub fn take_over_with_options(
+        store: S,
         config: Config,
         options: SegmentedOptions,
     ) -> Result<Self> {
         config.validate()?;
-        if options
-            .resident_filter
-            .as_ref()
-            .is_some_and(|(key, _)| key.is_empty())
-        {
-            return Err(Error::Invalid(
-                "resident filter key must be nonempty".into(),
-            ));
-        }
-        if options.routed_keys.len() > 4
-            || options.routed_keys.iter().any(String::is_empty)
-            || options
-                .routed_keys
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
-        {
-            return Err(Error::Invalid(
-                "routed keys must be sorted, unique, nonempty and at most four".into(),
-            ));
-        }
-        let mut keys = store.list()?;
-        keys.sort();
-        if keys.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(Error::Corrupt("duplicate segmented object key".into()));
-        }
-        if keys.is_empty() {
-            store.create("metadata", &metadata_bytes(config, &options)?)?;
-            store.create(&root_key(0), &encode(&Root::empty(config))?)?;
-            keys = vec!["metadata".into(), root_key(0)];
-        } else if keys == ["metadata"] {
-            // An interrupted first open may have published metadata only.
-            let bytes = store
-                .get("metadata")?
-                .ok_or_else(|| Error::Corrupt("listed metadata missing".into()))?;
-            check_metadata(&bytes, config, &options)?;
-            store.create(&root_key(0), &encode(&Root::empty(config))?)?;
-            keys.push(root_key(0));
-        }
-        if keys.iter().filter(|key| key.as_str() == "metadata").count() != 1
-            || !keys.contains(&root_key(0))
-        {
-            return Err(Error::Corrupt(
-                "segmented metadata or root zero missing".into(),
-            ));
-        }
-        check_metadata(
-            &store
-                .get("metadata")?
-                .ok_or_else(|| Error::Corrupt("listed segmented metadata missing".into()))?,
-            config,
-            &options,
-        )?;
+        validate_options(&options)?;
+        let keys = initialize(&store, config, &options)?;
+        fence(&store, config, &keys)?;
+        Self::open_with_options(store, config, options)
+    }
+
+    /// Open or create a namespace whose metadata declares `options`. Opening
+    /// with options different from the persisted declaration fails. This
+    /// fences nothing: the caller must ensure no other writer is active.
+    pub fn open_with_options(store: S, config: Config, options: SegmentedOptions) -> Result<Self> {
+        config.validate()?;
+        validate_options(&options)?;
+        let keys = initialize(&store, config, &options)?;
         let listed: BTreeSet<_> = keys.iter().cloned().collect();
-        let mut latest_generation = 0;
+        let mut generations = BTreeSet::new();
         let mut logs = Vec::new();
         for key in &keys {
             if key == "metadata" {
                 continue;
             }
             if key.starts_with("sgroot-") {
-                latest_generation = latest_generation.max(numbered_key(key, "sgroot-")?);
+                generations.insert(numbered_key(key, "sgroot-")?);
             } else if key.starts_with("sglog-") {
                 let sequence = numbered_key(key, "sglog-")?;
                 if sequence == 0 {
@@ -1234,15 +1621,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 return Err(Error::Corrupt(format!("unexpected segmented key: {key}")));
             }
         }
-        let root: Root = decode(
-            &store
-                .get(&root_key(latest_generation))?
-                .ok_or_else(|| Error::Corrupt("selected segmented root missing".into()))?,
-        )?;
-        root.validate(config)?;
-        if root.generation != latest_generation {
-            return Err(Error::Corrupt("segmented root generation mismatch".into()));
-        }
+        let (root, markers) =
+            select_root(&store, config, &generations).map_err(|error| match error {
+                Error::Exists(_) => Error::Corrupt("selected segmented root missing".into()),
+                error => error,
+            })?;
+        let mut fences = root.fences.clone();
+        fences.roots.extend(markers);
         let mut latest = Directory::default();
         // Size the directory once from the index entry counts, so merging
         // runs does not reallocate it repeatedly.
@@ -1287,26 +1672,24 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .into_iter()
             .filter(|&sequence| sequence > root.sequence)
             .collect();
-        if tail_logs.len() > MAX_TAIL_OBJECTS {
-            return Err(Error::Corrupt("segmented replay tail exceeds bound".into()));
-        }
         let mut db = Self {
-            store,
+            store: Arc::new(store),
             config,
             sequence: root.sequence,
+            fences,
             retry: root.retry.clone(),
-            root,
-            latest,
-            tail: BTreeMap::new(),
+            root: Arc::new(root),
+            latest: Arc::new(latest),
+            tail: Arc::default(),
             tail_objects: 0,
             tail_logs: VecDeque::new(),
             known_keys: listed,
             obsolete: VecDeque::new(),
+            retired: Vec::new(),
             cache: None,
-            uncached_reads: (AtomicU64::new(0), AtomicU64::new(0)),
             options_digest: Sha256::digest(encode(&options)?).into(),
-            options,
-            sketches: SketchSet::default(),
+            options: Arc::new(options),
+            sketches: Arc::default(),
             query_threads: 1,
             reclaim_min_garbage: 64 * 1024,
             seal: None,
@@ -1314,19 +1697,38 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             prune: None,
             poisoned: false,
         };
+        // Takeover records hold no request, so only request objects count
+        // toward the replay bound; repeated takeovers cannot block opening.
+        let mut request_objects = 0;
         for chunk in tail_logs.chunks(8) {
             let keys: Vec<_> = chunk.iter().map(|&sequence| log_key(sequence)).collect();
-            for (&log_sequence, bytes) in chunk.iter().zip(db.store.get_many(&keys)?) {
+            let logs = db.store.get_many(&keys)?;
+            for (&log_sequence, bytes) in chunk.iter().zip(logs) {
                 if db.sequence.checked_add(1) != Some(log_sequence) {
                     return Err(Error::Corrupt("segmented mutation log gap".into()));
                 }
-                let records = decode_log(
+                let log = decode_log(
                     &bytes.ok_or_else(|| Error::Corrupt("listed segmented log missing".into()))?,
                     log_sequence,
                 )?;
-                for record in records {
-                    let expected = db.sequence + 1;
-                    db.replay(record, expected)?;
+                match log {
+                    LogObject::Requests(records) => {
+                        request_objects += 1;
+                        if request_objects > MAX_TAIL_OBJECTS {
+                            return Err(Error::Corrupt(
+                                "segmented replay tail exceeds bound".into(),
+                            ));
+                        }
+                        for record in records {
+                            let expected = db.sequence + 1;
+                            db.replay(record, expected)?;
+                        }
+                    }
+                    LogObject::Takeover => {
+                        db.retry.advance(log_sequence, &[]);
+                        db.sequence = log_sequence;
+                        db.fences.logs.insert(log_sequence);
+                    }
                 }
                 db.tail_logs.push_back(log_sequence);
                 db.tail_objects += 1;
@@ -1366,7 +1768,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .collect();
             // A store-reported corrupt range fails the batch; read that chunk
             // serially so each pack is judged on its own bytes.
-            let mut prefixes = match self.store.get_ranges(&requests) {
+            let batch = self.store.get_ranges(&requests);
+            let mut prefixes = match batch {
                 Ok(values) => values,
                 Err(Error::Corrupt(_)) => requests
                     .iter()
@@ -1420,25 +1823,25 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         references.sort_by_key(|reference| reference.offset);
                         let blocks = references
                             .iter()
-                            .map(|reference| read_block(&self.store, self.config, reference))
+                            .map(|reference| read_block(&*self.store, self.config, reference))
                             .collect::<Result<Vec<_>>>()?;
                         let pairs: Vec<_> = references.iter().zip(&blocks).collect();
-                        self.sketches.rebuilt += 1;
+                        Arc::make_mut(&mut self.sketches).rebuilt += 1;
                         PackSketch::build(self.config, &self.options, pack, &pairs)?
                     }
                 };
-                self.sketches.install(sketch);
+                Arc::make_mut(&mut self.sketches).install(sketch);
             }
         }
-        self.sketches.refresh(&self.root)?;
+        Arc::make_mut(&mut self.sketches).refresh(&self.root)?;
         self.activate_sketches(None);
-        self.sketches.compact_all();
+        Arc::make_mut(&mut self.sketches).compact_all();
         Ok(())
     }
 
     fn activate_sketches(&mut self, packs: Option<&BTreeSet<String>>) {
         let (latest, tail) = (&self.latest, &self.tail);
-        self.sketches.activate(packs, |id, run, block| {
+        Arc::make_mut(&mut self.sketches).activate(packs, |id, run, block| {
             !tail.contains_key(&id)
                 && latest.get(&id).is_some_and(|location| {
                     location.run == run
@@ -1460,10 +1863,23 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 retained.insert(block.object.clone());
             }
         }
-        for &sequence in &self.tail_logs {
+        for &sequence in self.tail_logs.iter().chain(&self.fences.logs) {
             retained.insert(log_key(sequence));
         }
+        retained.extend(
+            self.fences
+                .roots
+                .iter()
+                .map(|&generation| root_key(generation)),
+        );
         self.obsolete = self.known_keys.difference(&retained).cloned().collect();
+    }
+
+    /// Select a new root. A view holding the old one keeps its packs from
+    /// cleanup until the view is dropped.
+    fn replace_root(&mut self, root: Root) {
+        let old = std::mem::replace(&mut self.root, Arc::new(root));
+        self.retired.push(Arc::downgrade(&old));
     }
 
     fn create_staged(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
@@ -1524,6 +1940,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     }
 
     fn apply_tail(&mut self, sequence: u64, mutations: &[Mutation]) {
+        let tail = Arc::make_mut(&mut self.tail);
         for mutation in mutations {
             let (id, entry) = match mutation {
                 Mutation::Put {
@@ -1534,15 +1951,15 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     *id,
                     (
                         sequence,
-                        Some(Document {
+                        Some(Arc::new(Document {
                             vector: self.config.normalized(vector.clone()),
                             metadata: metadata.clone(),
-                        }),
+                        })),
                     ),
                 ),
                 Mutation::Delete { id } => (*id, (sequence, None)),
             };
-            let old = self.tail.insert(id, entry);
+            let old = tail.insert(id, entry);
             // A version an in-progress seal will publish must outlive its
             // replacement in the tail until that seal materializes it.
             if let (Some(seal), Some(old)) = (self.seal.as_mut(), old) {
@@ -1655,9 +2072,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = true;
         let object = log_key(first);
         if let Err(error) = self.store.create(&object, &bytes) {
+            // A conditional-create conflict proves these bytes were not
+            // written: a later writer took over and fenced this handle.
+            let fenced = matches!(error, Error::Exists(_));
             let message = error.to_string();
             for &index in &accepted {
-                results[index] = Some(Err(Error::Io(std::io::Error::other(message.clone()))));
+                results[index] = Some(Err(if fenced {
+                    Error::Busy(format!(
+                        "this writer was fenced by a takeover at {object}; not committed"
+                    ))
+                } else {
+                    Error::Io(std::io::Error::other(message.clone()))
+                }));
             }
             return results.into_iter().map(Option::unwrap).collect();
         }
@@ -1675,8 +2101,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             for mutation in applied {
                 let (Mutation::Put { id, .. } | Mutation::Delete { id }) = mutation;
                 if let Some(location) = self.latest.get(id) {
-                    self.sketches
-                        .mark(location.run, location.entry.block as usize, *id, false);
+                    Arc::make_mut(&mut self.sketches).mark(
+                        location.run,
+                        location.entry.block as usize,
+                        *id,
+                        false,
+                    );
                 }
             }
         }
@@ -1689,42 +2119,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 
     /// Return the stored document; cosine vectors are normalized to unit length.
     pub fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
-        if let Some((_, document)) = self.tail.get(&id) {
-            return Ok(document.as_ref().map(|document| OwnedDocument {
-                vector: document.vector.clone(),
-                metadata: document.metadata.clone(),
-            }));
-        }
-        let Some(location) = self.latest.get(&id) else {
-            return Ok(None);
-        };
-        if location.entry.deleted {
-            return Ok(None);
-        }
-        let run = &self.root.runs[location.run];
-        let block = self.read_data_block(&run.blocks[location.entry.block as usize])?;
-        let record = block
-            .records
-            .binary_search_by_key(&id, BlockRecord::id)
-            .ok()
-            .and_then(|index| block.records.get(index))
-            .ok_or_else(|| Error::Corrupt("segmented directory entry missing in block".into()))?;
-        if record.sequence != location.entry.sequence {
-            return Err(Error::Corrupt(
-                "segmented directory sequence mismatch".into(),
-            ));
-        }
-        match &record.mutation {
-            Mutation::Put {
-                vector, metadata, ..
-            } => Ok(Some(OwnedDocument {
-                vector: vector.clone(),
-                metadata: metadata.clone(),
-            })),
-            Mutation::Delete { .. } => Err(Error::Corrupt(
-                "segmented live directory points to tombstone".into(),
-            )),
-        }
+        self.view().get(id)
     }
 
     /// Exact correctness oracle. Reads committed blocks on demand without
@@ -1784,9 +2179,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .filter(|(id, _)| !self.tail.contains_key(id))
             .count();
         let mut seen = 0;
+        let view = self.view();
         for (run_ordinal, run) in self.root.runs.iter().enumerate() {
             for (block_ordinal, reference) in run.blocks.iter().enumerate() {
-                let block = self.read_data_block(reference)?;
+                let block = view.read_data_block(reference, &mut RemoteReads::default())?;
                 for record in block.records {
                     let id = record.id();
                     if self.tail.contains_key(&id) {
@@ -1822,7 +2218,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 "segmented directory entry missing from blocks".into(),
             ));
         }
-        for (&id, (_, document)) in &self.tail {
+        for (&id, (_, document)) in self.tail.iter() {
             if let Some(document) = document {
                 visit(id, &document.vector, &document.metadata)?;
             }
@@ -1846,7 +2242,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let boundary = self.sequence;
         let mut puts = Vec::new();
         let mut deletes = Vec::new();
-        for (&id, (sequence, document)) in &self.tail {
+        for (&id, (sequence, document)) in self.tail.iter() {
             match document {
                 Some(document) => puts.push((
                     id,
@@ -1975,12 +2371,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.seal = Some(seal);
             return Ok(true);
         }
-        let mut root = self.root.clone();
-        root.generation = self
-            .root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         root.sequence = seal.boundary;
         root.retry = seal.retry;
         if !seal.entries.is_empty() {
@@ -2004,20 +2395,19 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = false;
         if !seal.entries.is_empty() {
             let run = root.runs.len() - 1;
-            self.latest.merge_sorted(
+            Arc::make_mut(&mut self.latest).merge_sorted(
                 seal.entries
                     .into_iter()
                     .map(|entry| (entry.id, Location { run, entry })),
             );
         }
-        self.tail
-            .retain(|_, (sequence, _)| *sequence > seal.boundary);
+        Arc::make_mut(&mut self.tail).retain(|_, (sequence, _)| *sequence > seal.boundary);
         self.tail_logs.retain(|&first| first > seal.boundary);
         self.tail_objects = self.tail_logs.len();
-        self.root = root;
+        self.replace_root(root);
         let packs: BTreeSet<_> = seal.sketches.iter().map(|s| s.pack().to_owned()).collect();
         for sketch in seal.sketches {
-            self.sketches.install(sketch);
+            Arc::make_mut(&mut self.sketches).install(sketch);
         }
         self.refresh_sketches(Some(&packs))?;
         self.schedule_obsolete();
@@ -2061,8 +2451,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         };
         let first = &self.root.runs[pair];
         let second = &self.root.runs[pair + 1];
-        let left = read_run_index(&self.store, first)?;
-        let right = read_run_index(&self.store, second)?;
+        let left = read_run_index(&*self.store, first)?;
+        let right = read_run_index(&*self.store, second)?;
         // Both indexes are ID-sorted and an ID is current in at most one run,
         // so a linear merge yields the surviving entries in ID order.
         let latest = &self.latest;
@@ -2101,11 +2491,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             entries.push(entry);
         }
         drop((left, right));
-        let mut root = self.root.clone();
-        root.generation = root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         let attempt = attempt_id()?;
         let replacement = if entries.is_empty() {
             None
@@ -2144,7 +2530,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
         let replacement_count = usize::from(replacement.is_some());
-        self.latest.retain(|id, location| {
+        Arc::make_mut(&mut self.latest).retain(|id, location| {
             if location.run == pair || location.run == pair + 1 {
                 if let Ok(index) = entries.binary_search_by_key(&id, |entry| entry.id) {
                     location.run = pair;
@@ -2160,7 +2546,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 true
             }
         });
-        self.root = root;
+        self.replace_root(root);
         self.refresh_sketches(None)?;
         self.schedule_obsolete();
         Ok(true)
@@ -2169,7 +2555,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Rebind sketches after a root change. Liveness of retained rows does not
     /// change; only newly installed packs need activation.
     fn refresh_sketches(&mut self, new_packs: Option<&BTreeSet<String>>) -> Result<()> {
-        if let Err(error) = self.sketches.refresh(&self.root) {
+        if let Err(error) = Arc::make_mut(&mut self.sketches).refresh(&self.root) {
             self.poisoned = true;
             return Err(error);
         }
@@ -2237,11 +2623,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 entries.push(entry);
             }
         }
-        let mut root = self.root.clone();
-        root.generation = root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         let index = if entries.is_empty() {
             root.runs.remove(run);
             None
@@ -2292,7 +2674,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.create_staged(&root_key(state.root.generation), &encode(&state.root)?)?;
         self.poisoned = false;
         let removed = state.entries.is_empty();
-        self.latest.retain(|_, location| {
+        Arc::make_mut(&mut self.latest).retain(|_, location| {
             if location.run == state.run {
                 false
             } else {
@@ -2302,17 +2684,16 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 true
             }
         });
-        self.latest
-            .merge_sorted(state.entries.into_iter().map(|entry| {
-                (
-                    entry.id,
-                    Location {
-                        run: state.run,
-                        entry,
-                    },
-                )
-            }));
-        self.root = state.root;
+        Arc::make_mut(&mut self.latest).merge_sorted(state.entries.into_iter().map(|entry| {
+            (
+                entry.id,
+                Location {
+                    run: state.run,
+                    entry,
+                },
+            )
+        }));
+        self.replace_root(state.root);
         self.refresh_sketches(None)?;
         self.schedule_obsolete();
         Ok(true)
@@ -2467,7 +2848,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             let ordinal = state.blocks.len();
             let (run, block) = state.locations[ordinal];
             let reference = &self.root.runs[run].blocks[block];
-            let old = match read_block(&self.store, self.config, reference) {
+            let old = match read_block(&*self.store, self.config, reference) {
                 Ok(block) => block,
                 Err(error) => {
                     self.reclaim = Some(state);
@@ -2509,11 +2890,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.reclaim = Some(state);
             return Ok(true);
         }
-        let mut root = self.root.clone();
-        root.generation = root
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
+        let mut root = self.next_root()?;
         for (index, &(run, block)) in state.locations.iter().enumerate() {
             root.runs[run].blocks[block] = state.references.as_ref().unwrap()[index].clone();
         }
@@ -2522,10 +2899,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
-        self.root = root;
+        self.replace_root(root);
         let sketch = state.sketch.expect("reclaim sketch staged with its pack");
         let packs = BTreeSet::from([sketch.pack().to_owned()]);
-        self.sketches.install(sketch);
+        Arc::make_mut(&mut self.sketches).install(sketch);
         self.refresh_sketches(Some(&packs))?;
         self.schedule_obsolete();
         Ok(true)
@@ -2551,7 +2928,23 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if max_objects == 0 {
             return Err(Error::Invalid("cleanup step must allow an object".into()));
         }
-        let keys: Vec<_> = self.obsolete.iter().take(max_objects).cloned().collect();
+        // A query on an older view may still read a pack its root references.
+        self.retired.retain(|root| root.strong_count() > 0);
+        let pinned: Vec<_> = self.retired.iter().filter_map(Weak::upgrade).collect();
+        let keys: Vec<_> = self
+            .obsolete
+            .iter()
+            .filter(|key| {
+                !pinned.iter().any(|root| {
+                    root.runs
+                        .iter()
+                        .any(|run| run.blocks.iter().any(|block| &block.object == *key))
+                })
+            })
+            .take(max_objects)
+            .cloned()
+            .collect();
+        drop(pinned);
         if keys.is_empty() {
             return Ok(0);
         }
@@ -2559,8 +2952,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.store.remove_many(&keys)?;
         for key in &keys {
             self.known_keys.remove(key);
-            self.obsolete.pop_front();
         }
+        self.obsolete.retain(|key| !keys.contains(key));
         self.poisoned = false;
         Ok(keys.len())
     }
@@ -2834,7 +3227,7 @@ mod tests {
         .unwrap();
         let (payload, refs) = encode_pack("pack-1", config, &[block]).unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let mut store = LocalStore::open(temp.path().join("db")).unwrap();
+        let store = LocalStore::open(temp.path().join("db")).unwrap();
         store.create("pack-1", &payload).unwrap();
         let loaded = read_block(&store, config, &refs[0]).unwrap();
         assert_eq!(loaded.records[0].id(), 42);
@@ -3061,7 +3454,7 @@ mod tests {
         corrupt[44] = 2;
         assert!(RunIndex::decode(&corrupt, 1, 1, 1).is_err());
         let temp = tempfile::tempdir().unwrap();
-        let mut store = LocalStore::open(temp.path().join("db")).unwrap();
+        let store = LocalStore::open(temp.path().join("db")).unwrap();
         store.create("index-1", &bytes).unwrap();
         let run = RunRef {
             first_sequence: 1,
@@ -3229,7 +3622,7 @@ mod tests {
         assert_eq!(db.current_block_of(0), db.current_block_of(2));
         assert_eq!(db.current_block_of(1), db.current_block_of(3));
         for reference in &db.root.runs[0].blocks {
-            let block = read_block(&db.store, config, reference).unwrap();
+            let block = read_block(&*db.store, config, reference).unwrap();
             assert_eq!(block.records.len(), 170);
             assert!(block
                 .records
@@ -3755,8 +4148,8 @@ mod tests {
         struct UncertainCreate<S> {
             inner: S,
             fail_prefix: &'static str,
-            fired: bool,
-            fail_remove_once: bool,
+            fired: std::cell::Cell<bool>,
+            fail_remove_once: std::cell::Cell<bool>,
         }
         impl<S: ObjectStore> ObjectStore for UncertainCreate<S> {
             fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
@@ -3775,20 +4168,19 @@ mod tests {
             fn list(&self) -> Result<Vec<String>> {
                 self.inner.list()
             }
-            fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+            fn create(&self, key: &str, value: &[u8]) -> Result<()> {
                 self.inner.create(key, value)?;
-                if !self.fired && key.starts_with(self.fail_prefix) {
-                    self.fired = true;
+                if !self.fired.get() && key.starts_with(self.fail_prefix) {
+                    self.fired.set(true);
                     return Err(Error::Io(std::io::Error::other(
                         "simulated response loss after durable create",
                     )));
                 }
                 Ok(())
             }
-            fn remove(&mut self, key: &str) -> Result<()> {
+            fn remove(&self, key: &str) -> Result<()> {
                 self.inner.remove(key)?;
-                if self.fail_remove_once {
-                    self.fail_remove_once = false;
+                if self.fail_remove_once.take() {
                     return Err(Error::Io(std::io::Error::other(
                         "simulated response loss after durable delete",
                     )));
@@ -3833,8 +4225,8 @@ mod tests {
             UncertainCreate {
                 inner: open_log_store(),
                 fail_prefix: "sglog-",
-                fired: false,
-                fail_remove_once: false,
+                fired: Default::default(),
+                fail_remove_once: false.into(),
             },
             config,
         )
@@ -3873,8 +4265,8 @@ mod tests {
                 UncertainCreate {
                     inner: store(),
                     fail_prefix: prefix,
-                    fired: false,
-                    fail_remove_once: false,
+                    fired: Default::default(),
+                    fail_remove_once: false.into(),
                 },
                 config,
             )
@@ -3902,8 +4294,8 @@ mod tests {
                 UncertainCreate {
                     inner: store(),
                     fail_prefix: "never-match",
-                    fired: false,
-                    fail_remove_once: true,
+                    fired: Default::default(),
+                    fail_remove_once: true.into(),
                 },
                 config,
             )
@@ -3947,8 +4339,8 @@ mod tests {
                     UncertainCreate {
                         inner: store(),
                         fail_prefix: "sgroot-00000000000000000003",
-                        fired: false,
-                        fail_remove_once: false,
+                        fired: Default::default(),
+                        fail_remove_once: false.into(),
                     },
                     config,
                 )
@@ -3966,7 +4358,7 @@ mod tests {
             }
             let required_pack = reopened.root.runs[0].blocks[0].object.clone();
             drop(reopened);
-            let mut damaged = store();
+            let damaged = store();
             damaged.remove(&required_pack).unwrap();
             drop(damaged);
             assert!(matches!(
@@ -4021,8 +4413,8 @@ mod tests {
             UncertainCreate {
                 inner: reclaim_store(),
                 fail_prefix: "sgroot-00000000000000000002",
-                fired: false,
-                fail_remove_once: false,
+                fired: Default::default(),
+                fail_remove_once: false.into(),
             },
             vector_config,
         )
@@ -4108,7 +4500,7 @@ mod tests {
         assert_eq!(lost.cache_stats().unwrap().unwrap().remote_fetches, 1);
         let selected_pack = lost.root.runs[0].blocks[0].object.clone();
         drop(lost);
-        let mut damaged = reclaim_store();
+        let damaged = reclaim_store();
         damaged.remove(&selected_pack).unwrap();
         drop(damaged);
         assert!(matches!(
@@ -4160,8 +4552,8 @@ mod tests {
                 UncertainCreate {
                     inner: prune_store(),
                     fail_prefix,
-                    fired: false,
-                    fail_remove_once: false,
+                    fired: Default::default(),
+                    fail_remove_once: false.into(),
                 },
                 vector_config,
             )

@@ -76,7 +76,7 @@ impl<S: ObjectStore> ObjectStore for FaultStore<S> {
     fn list(&self) -> Result<Vec<String>> {
         self.inner.list()
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         match self.next() {
             Some(Fault::Before) => Err(injected()),
             Some(Fault::After) => {
@@ -86,7 +86,7 @@ impl<S: ObjectStore> ObjectStore for FaultStore<S> {
             None => self.inner.create(key, value),
         }
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         match self.next() {
             Some(Fault::Before) => Err(injected()),
             Some(Fault::After) => {
@@ -96,7 +96,7 @@ impl<S: ObjectStore> ObjectStore for FaultStore<S> {
             None => self.inner.remove(key),
         }
     }
-    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+    fn remove_many(&self, keys: &[String]) -> Result<()> {
         for key in keys {
             self.remove(key)?;
         }
@@ -312,7 +312,7 @@ impl ObjectStore for MemoryStore {
     fn list(&self) -> Result<Vec<String>> {
         Ok(self.0.lock().unwrap().keys().cloned().collect())
     }
-    fn create(&mut self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         let mut objects = self.0.lock().unwrap();
         if objects.contains_key(key) {
             return Err(Error::Exists(key.into()));
@@ -320,7 +320,7 @@ impl ObjectStore for MemoryStore {
         objects.insert(key.into(), value.to_vec());
         Ok(())
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.0.lock().unwrap().remove(key);
         Ok(())
     }

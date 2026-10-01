@@ -18,7 +18,7 @@ fn config() -> Config {
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_addressable_payload_range_checks_length_and_bounds() {
-    let mut store = minio("addressable-range");
+    let store = minio("addressable-range");
     let body: Vec<u8> = (0..1_048_576).map(|n| ((n * 17) % 251) as u8).collect();
     store.create("block-object", &body).unwrap();
     let metrics = store.metrics();
@@ -254,7 +254,7 @@ fn read_limits_reject_headers_and_actual_body_without_poisoning() {
         let error = store.get("object").unwrap_err();
         let expected = if dishonest_header { "body" } else { "header" };
         assert!(error.to_string().contains(expected), "{error}");
-        assert!(!store.poisoned);
+        assert!(!store.poisoned.load(Ordering::Acquire));
         assert_eq!(store.metrics().snapshot().get, 1);
     }
     assert!(scripted(vec![])
@@ -293,7 +293,7 @@ fn read_limits_stop_listing_without_partial_results_or_more_pages() {
         .unwrap();
         assert!(store.list().unwrap_err().to_string().contains(expected));
         assert_eq!(store.metrics().snapshot().list, 2);
-        assert!(!store.poisoned);
+        assert!(!store.poisoned.load(Ordering::Acquire));
     }
     let limits = ReadLimits {
         objects: 1,
@@ -319,7 +319,7 @@ fn read_limits_stop_listing_without_partial_results_or_more_pages() {
 #[test]
 fn conditional_create_errors_poison_without_retry() {
     for status in [403, 409, 412, 500, 501] {
-        let mut store = scripted(vec![response(
+        let store = scripted(vec![response(
             status,
             "<Error><Code>Failure</Code></Error>",
         )]);
@@ -394,7 +394,7 @@ fn invalid_names_fail_before_requests_and_spawn_blocking_is_supported() {
             Err(Error::Invalid(_))
         ));
     }
-    let mut store = scripted(vec![]);
+    let store = scripted(vec![]);
     for key in ["", "../escape", "nested/key"] {
         assert!(store.create(key, b"value").is_err());
     }
@@ -694,7 +694,7 @@ fn minio_replay_pagination_and_namespace_isolation() {
     assert_eq!(db.search(&[0., 0.], 10).unwrap(), expected);
     assert_eq!(metrics.snapshot(), before); // query is entirely in memory
     drop(db);
-    let mut adjacent = minio("replay-other");
+    let adjacent = minio("replay-other");
     adjacent.create("unrelated", b"value").unwrap();
     drop(adjacent);
     let store = minio("replay");
@@ -868,7 +868,7 @@ fn minio_batch_timeout_before_or_after_publication_is_atomic() {
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_immutability_and_corruption() {
-    let mut store = minio("immutable");
+    let store = minio("immutable");
     store.create("object", b"original").unwrap();
     assert!(matches!(
         store.create("object", b"replacement"),
@@ -918,7 +918,7 @@ fn minio_rejects_selected_root_chunk_and_tail_damage() {
     }
     db.compact_chunked(240).unwrap();
     drop(db);
-    let mut store = minio(namespace);
+    let store = minio(namespace);
     let chunk = store
         .list()
         .unwrap()
@@ -1296,7 +1296,7 @@ fn minio_compaction_preserves_results_with_uncertain_publication_and_deletion() 
         assert_eq!(db.get(3), Some([5., 6.].as_slice()));
         assert_eq!(db.sequence, 4);
     }
-    let mut store = minio("delete-idempotence");
+    let store = minio("delete-idempotence");
     let metrics = store.metrics();
     store.create("object", b"value").unwrap();
     store.remove("object").unwrap();
@@ -1505,7 +1505,7 @@ fn parallel_cleanup_bounds_in_flight_deletes_and_poisoning() {
     use std::{sync::mpsc, time::Duration};
     for fail in [false, true] {
         let (started, wait) = mpsc::channel();
-        let mut store = S3Store::with_connector(
+        let store = S3Store::with_connector(
             builder(),
             "test",
             DeleteGate {
@@ -1536,10 +1536,10 @@ fn parallel_cleanup_bounds_in_flight_deletes_and_poisoning() {
         for sender in first {
             sender.send(204).unwrap();
         }
-        let (mut store, result) = worker.join().unwrap();
+        let (store, result) = worker.join().unwrap();
         assert_eq!(result.is_err(), fail);
         assert_eq!(store.metrics().snapshot().delete, 9);
-        assert_eq!(store.poisoned, fail);
+        assert_eq!(store.poisoned.load(Ordering::Acquire), fail);
         if fail {
             assert!(matches!(
                 store.remove_many(&[]),
@@ -1549,10 +1549,10 @@ fn parallel_cleanup_bounds_in_flight_deletes_and_poisoning() {
             store.remove_many(&[]).unwrap();
         }
     }
-    let mut store = scripted(vec![]);
+    let store = scripted(vec![]);
     assert!(store
         .remove_many(&["valid".into(), "invalid/key".into()])
         .is_err());
     assert_eq!(store.metrics().snapshot().delete, 0);
-    assert!(!store.poisoned);
+    assert!(!store.poisoned.load(Ordering::Acquire));
 }

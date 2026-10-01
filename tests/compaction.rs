@@ -46,7 +46,7 @@ impl ObjectStore for Memory {
         s.event("list".into(), |_| {})?;
         Ok(s.objects.keys().rev().cloned().collect())
     }
-    fn create(&mut self, key: &str, bytes: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, bytes: &[u8]) -> Result<()> {
         let mut s = self.0.borrow_mut();
         if s.objects.contains_key(key) {
             return Err(Error::Exists(key.into()));
@@ -55,12 +55,12 @@ impl ObjectStore for Memory {
             s.objects.insert(key.into(), bytes.into());
         })
     }
-    fn remove(&mut self, key: &str) -> Result<()> {
+    fn remove(&self, key: &str) -> Result<()> {
         self.0.borrow_mut().event(format!("remove:{key}"), |s| {
             s.objects.remove(key);
         })
     }
-    fn remove_many(&mut self, keys: &[String]) -> Result<()> {
+    fn remove_many(&self, keys: &[String]) -> Result<()> {
         let partial = self.0.borrow_mut().partial_parallel_failure.take();
         if let Some(panic) = partial {
             for key in keys.iter().rev().step_by(2) {
