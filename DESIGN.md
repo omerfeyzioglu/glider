@@ -327,7 +327,10 @@ step materializes only its own pack's records. If a newer write replaces a
 tail version the seal still has to publish, that version moves into the
 seal's side map, so the seal publishes exactly its frozen prefix. Run
 consolidation merges two run indexes straight into the output entries only
-while their encoded sizes total at most 512 KiB, bounding its memory and time. `ObjectStore::get_many` and `get_ranges` batch independent reads; the
+while their encoded sizes total at most 2 MiB, bounding its memory and time.
+With 24-byte entries and size-tiered pairing, runs settle between about 44,000
+and 87,000 IDs, so the 64-run root limit leaves room beyond 1,000,000 rows (a
+512 KiB cap exceeded it near 800,000). `ObjectStore::get_many` and `get_ranges` batch independent reads; the
 S3 backend issues up to 16 concurrently, and other backends default to serial
 reads. Opening uses them for run indexes, the log tail and sketch frames.
 
@@ -402,7 +405,7 @@ still exist in physical blocks. New acknowledged logs may shadow retained
 records during staging, while seal and run consolidation wait for the root.
 The old pack remains authoritative until root publication; an interrupted
 attempt leaves an unreferenced pack for cleanup on reopen. For a run index no
-larger than 512 KiB, a separate staged pruning plan removes references to fully
+larger than 2 MiB, a separate staged pruning plan removes references to fully
 dead blocks, remaps surviving block ordinals in a new index, then publishes one
 root. A completely dead run disappears. Logs may grow during this plan, but
 seal, run consolidation and repacking wait for its root; uncertain index or

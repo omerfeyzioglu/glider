@@ -199,21 +199,36 @@ fn approximate(codes: &[u8], table: &[[f64; 32]]) -> f64 {
 /// Like `approximate`, but returns `None` once a prefix sum exceeds `limit`.
 fn approximate_within(codes: &[u8], table: &[[f64; 32]], limit: f64) -> Option<f64> {
     let mut sum = 0.;
-    let mut axis = 0;
-    for (group_index, group) in codes.chunks(BITS).enumerate() {
-        let mut word = 0_u64;
-        for (index, &byte) in group.iter().enumerate() {
-            word |= u64::from(byte) << (8 * index);
-        }
+    let full_groups = table.len() / 8;
+    for group_index in 0..full_groups {
+        let offset = group_index * BITS;
+        let word = u64::from_le_bytes([
+            codes[offset],
+            codes[offset + 1],
+            codes[offset + 2],
+            codes[offset + 3],
+            codes[offset + 4],
+            0,
+            0,
+            0,
+        ]);
+        let rows = &table[group_index * 8..group_index * 8 + 8];
         for slot in 0..8 {
-            let Some(row) = table.get(axis) else {
-                return Some(sum);
-            };
-            sum += row[((word >> (BITS * slot)) & 31) as usize];
-            axis += 1;
+            sum += rows[slot][((word >> (BITS * slot)) & 31) as usize];
         }
         if group_index % 2 == 1 && sum > limit {
             return None;
+        }
+    }
+    let remaining = table.len() % 8;
+    if remaining > 0 {
+        let offset = full_groups * BITS;
+        let mut word = 0_u64;
+        for (index, &byte) in codes[offset..].iter().enumerate() {
+            word |= u64::from(byte) << (8 * index);
+        }
+        for slot in 0..remaining {
+            sum += table[full_groups * 8 + slot][((word >> (BITS * slot)) & 31) as usize];
         }
     }
     (sum <= limit).then_some(sum)
@@ -1780,6 +1795,25 @@ mod tests {
             Some(expected)
         );
         assert_eq!(approximate_within(&bytes, &table, 1.), None);
+    }
+
+    #[test]
+    fn packed_distance_handles_partial_groups() {
+        for dimensions in 1..=33 {
+            let mut bytes = vec![0; code_bytes(dimensions)];
+            let mut table = vec![[0_f64; 32]; dimensions];
+            for (axis, row) in table.iter_mut().enumerate() {
+                let code = (axis * 7 + 3) % 32;
+                set_code(&mut bytes, axis, code as u8);
+                row[code] = (axis + 1) as f64;
+            }
+            let exact = approximate(&bytes, &table);
+            assert_eq!(
+                approximate_within(&bytes, &table, f64::INFINITY),
+                Some(exact)
+            );
+            assert_eq!(approximate_within(&bytes, &table, exact - 1.), None);
+        }
     }
 
     #[test]

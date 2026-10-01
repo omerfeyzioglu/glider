@@ -30,7 +30,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Rows in the namespace: the M21 250,000 unless `GLIDER_M24_ROWS` selects
-/// a reduced-scale check (a multiple of 400).
+/// another scale (a multiple of 400), such as the M31 1,000,000.
 fn rows() -> u64 {
     env::var("GLIDER_M24_ROWS")
         .ok()
@@ -208,7 +208,7 @@ impl Rows {
     }
 }
 
-/// Overwrite generation g of an ID uses base row (id + 137g) mod 250,000.
+/// Overwrite generation g of an ID uses base row (id + 137g) mod rows.
 fn vector(base: &Rows, id: u64, generation: u64) -> Result<Vec<f32>> {
     base.row((id + 137 * generation) % rows())
 }
@@ -267,7 +267,11 @@ fn stats(mut values: Vec<f64>) -> Value {
 }
 
 fn serving_options(cache: Option<PathBuf>) -> SegmentedServingOptions {
-    let mut options = SegmentedServingOptions::m21(PathBuf::new());
+    let mut options = if rows() > 250_000 {
+        SegmentedServingOptions::m31(PathBuf::new())
+    } else {
+        SegmentedServingOptions::m21(PathBuf::new())
+    };
     options.cache = cache.map(|directory| (directory, 0, 256 * 1024 * 1024));
     options
 }
@@ -387,12 +391,12 @@ type Profile = Arc<Mutex<BTreeMap<&'static str, (u64, f64, u64)>>>;
 
 /// Delegating engine that attributes peak-footprint increases and time to
 /// commands and maintenance-unit kinds.
-struct Profiled {
-    inner: SegmentedServing<Counted>,
+struct Profiled<S: ObjectStore> {
+    inner: SegmentedServing<S>,
     profile: Profile,
 }
 
-impl Engine for Profiled {
+impl<S: ObjectStore + Send + 'static> Engine for Profiled<S> {
     fn config(&self) -> Config {
         self.inner.config()
     }
@@ -422,6 +426,28 @@ impl Engine for Profiled {
         entry.1 = entry.1.max(elapsed);
         entry.2 += raised;
         result
+    }
+    fn apply_requests(
+        &mut self,
+        requests: Vec<Request>,
+    ) -> Vec<glider::Result<glider::retry::Outcome>> {
+        let count = requests.len() as u64;
+        let peak = peak_footprint().unwrap_or(0);
+        let started = Instant::now();
+        let results = self.inner.apply_requests(requests);
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            eprintln!("write failed: {error}");
+        }
+        let (elapsed, raised) = (
+            ms(started.elapsed()),
+            peak_footprint().unwrap_or(0).saturating_sub(peak),
+        );
+        let mut profile = self.profile.lock().unwrap();
+        let entry = profile.entry("write").or_default();
+        entry.0 += count;
+        entry.1 = entry.1.max(elapsed);
+        entry.2 += raised;
+        results
     }
     fn revision(&self, id: u64) -> glider::retry::Revision {
         self.inner.revision(id)
@@ -1047,14 +1073,144 @@ fn verify(args: &[String]) -> Result<Value> {
     )
 }
 
+/// Exact top-10 IDs of the first 200 queries over the unmodified corpus for
+/// the static-quality pass: an f64 scan with ties by ID, like `verify`.
+fn oracle(args: &[String]) -> Result<Value> {
+    let [queries, base] = args else {
+        return Err("usage: oracle QUERY BASE".into());
+    };
+    let (queries, base) = (Rows::open(queries)?, Rows::open(base)?);
+    let queries: Vec<Vec<f32>> = (0..200).map(|i| queries.row(i)).collect::<Result<_>>()?;
+    let started = Instant::now();
+    let threads = std::thread::available_parallelism()?.get();
+    type Heaps = Vec<[BinaryHeap<(u64, u64)>; 2]>;
+    let partial: Vec<Heaps> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|thread| {
+                let (base, queries) = (&base, &queries);
+                scope.spawn(move || -> Result<Heaps> {
+                    let mut heaps: Heaps = vec![Default::default(); queries.len()];
+                    for id in (thread as u64..rows()).step_by(threads) {
+                        let vector = base.row(id)?;
+                        for (query, heaps) in queries.iter().zip(&mut heaps) {
+                            let distance: f64 = query
+                                .iter()
+                                .zip(&vector)
+                                .map(|(a, b)| {
+                                    let d = f64::from(*a) - f64::from(*b);
+                                    d * d
+                                })
+                                .sum();
+                            let entry = (distance.to_bits(), id);
+                            let classes = 1 + usize::from(id.is_multiple_of(100));
+                            for heap in &mut heaps[..classes] {
+                                if heap.len() < 10 {
+                                    heap.push(entry);
+                                } else if entry < *heap.peek().unwrap() {
+                                    heap.pop();
+                                    heap.push(entry);
+                                }
+                            }
+                        }
+                    }
+                    Ok(heaps)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Result<_>>()
+    })?;
+    let ids = |class: usize| -> Vec<Vec<u64>> {
+        (0..queries.len())
+            .map(|query| {
+                let mut entries: Vec<_> = partial
+                    .iter()
+                    .flat_map(|heaps| heaps[query][class].iter().copied())
+                    .collect();
+                entries.sort_unstable();
+                entries.into_iter().take(10).map(|(_, id)| id).collect()
+            })
+            .collect()
+    };
+    Ok(json!({"rows":rows(),"oracle_ms":ms(started.elapsed()),
+        "unfiltered_exact_ids":ids(0),"filtered_exact_ids":ids(1)}))
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let result = match args.get(1).map(String::as_str) {
         Some("load") => load(&args[2..])?,
         Some("serve") => serve(&args[2..])?,
         Some("verify") => verify(&args[2..])?,
-        _ => return Err("usage: m24_acceptance load|serve|verify ...".into()),
+        Some("oracle") => oracle(&args[2..])?,
+        _ => return Err("usage: m24_acceptance load|serve|verify|oracle ...".into()),
     };
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Memory(Arc<Mutex<BTreeMap<String, Vec<u8>>>>);
+
+    impl ObjectStore for Memory {
+        fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        fn list(&self) -> glider::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().cloned().collect())
+        }
+        fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+            let mut objects = self.0.lock().unwrap();
+            if objects.contains_key(key) {
+                return Err(glider::Error::Exists(key.into()));
+            }
+            objects.insert(key.into(), value.to_vec());
+            Ok(())
+        }
+        fn remove(&mut self, key: &str) -> glider::Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn profiled_engine_forwards_group_commit() {
+        let store = Memory::default();
+        let view = store.clone();
+        let mut serving = SegmentedServingOptions::m21(PathBuf::new());
+        serving.cache = None;
+        let inner = SegmentedServing::open(store, config(), options(), serving).unwrap();
+        let mut engine = Profiled {
+            inner,
+            profile: Arc::new(Mutex::new(BTreeMap::new())),
+        };
+        let put = |id: u64| Mutation::Put {
+            id,
+            vector: vec![1.; DIMENSIONS],
+            metadata: BTreeMap::new(),
+        };
+        let results = engine.apply_requests(vec![
+            request(0, [1; 16], vec![put(1)]),
+            request(0, [2; 16], vec![put(2)]),
+        ]);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap().sequence, 1);
+        assert_eq!(results[1].as_ref().unwrap().sequence, 2);
+        assert_eq!(
+            view.list()
+                .unwrap()
+                .iter()
+                .filter(|key| key.starts_with("sglog-"))
+                .count(),
+            1
+        );
+        assert_eq!(engine.profile.lock().unwrap()["write"].0, 2);
+        engine.close().unwrap();
+    }
 }

@@ -168,7 +168,7 @@ impl ServerConfig {
                 endpoint: env("GLIDER_S3_ENDPOINT"),
             },
         };
-        let mut serving = SegmentedServingOptions::m21(
+        let mut serving = SegmentedServingOptions::m31(
             env("GLIDER_CACHE_DIR")
                 .unwrap_or("glider-cache".into())
                 .into(),
