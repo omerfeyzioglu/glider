@@ -10,8 +10,12 @@ fn config(directory: &std::path::Path) -> ServerConfig {
     std::env::set_var("GLIDER_RESIDENT_FILTER", "color=red");
     std::env::set_var("GLIDER_CACHE_DIR", directory.join("cache"));
     std::env::set_var("GLIDER_DATA_DIR", directory.join("data"));
+    std::env::set_var("GLIDER_CACHE_BYTES", "1048576");
+    std::env::set_var("GLIDER_LOCAL_BLOCKS", "32");
     let mut config = ServerConfig::from_env().unwrap();
     assert!(matches!(config.store, StoreConfig::Local(_)));
+    assert_eq!(config.serving.read_budget.local_blocks, 32);
+    assert_eq!(config.serving.cache.as_ref().unwrap().2, 1_048_576);
     config.token = Some("secret".into());
     config
 }
@@ -143,6 +147,14 @@ fn http_service_writes_queries_and_survives_restart() {
     );
     assert!(body.contains("glider_cache_nvme_entries "), "{body}");
     assert!(body.contains("glider_sketch_index_bytes "), "{body}");
+    assert!(body.contains("glider_cache_warm_complete "), "{body}");
+    assert!(
+        body.contains("glider_cache_nvme_limit_bytes 1048576\n"),
+        "{body}"
+    );
+    let (_, body) = call(address, "GET", "/v1/status", "", "secret");
+    assert!(body.contains(r#""nvme_limit_bytes":1048576"#), "{body}");
+    assert!(body.contains(r#""state":""#), "{body}");
     drop(runtime);
     service
         .shutdown(glider::admission::Shutdown::Drain)

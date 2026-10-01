@@ -1,5 +1,5 @@
 //! Disposable, bounded cache for root-authenticated immutable vector blocks.
-use super::{decode_block_bytes, validate_block_ref, Block, BlockRef};
+use super::{authenticate, decode_block_bytes, validate_block_ref, Block, BlockRef, Root};
 use crate::{store::ObjectStore, Config, Error, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -26,6 +26,18 @@ pub struct CacheStats {
     pub nvme_bytes: usize,
     pub ram_entries: usize,
     pub nvme_entries: usize,
+    pub nvme_limit: usize,
+    /// Cache charge of every block the selected root references, as of the
+    /// current warm-up pass (zero before the first warm-up unit).
+    pub namespace_bytes: usize,
+    /// Charge of those blocks the pass found in or added to the NVMe tier.
+    pub warm_bytes: usize,
+    /// The pass visited every pack, or stopped at the NVMe limit or after a
+    /// failed admission; `warm_bytes < namespace_bytes` then.
+    pub warm_complete: bool,
+    /// Range reads and payload bytes issued by warm-up, not by queries.
+    pub warm_fetches: u64,
+    pub warm_payload_bytes: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,6 +62,23 @@ pub(super) struct BlockCache {
     nvme_bytes: usize,
     tick: u64,
     stats: CacheStats,
+    /// Cached entries found missing or corrupt; a change restarts warm-up.
+    lost: u64,
+    warm: Option<WarmPass>,
+}
+
+/// One background pass copying the selected root's blocks into the NVMe tier.
+struct WarmPass {
+    generation: u64,
+    lost: u64,
+    /// Root `(run, block)` locations ordered by pack and offset.
+    blocks: Vec<(usize, usize)>,
+    /// Start of each pack in `blocks`, then `blocks.len()`.
+    packs: Vec<usize>,
+    next: usize,
+    /// The whole root fits the NVMe limit, so admission may evict entries
+    /// the pass has not touched; otherwise it only fills free space.
+    evict: bool,
 }
 
 type Key = [u8; 32];
@@ -69,7 +98,12 @@ impl BlockCache {
             nvme_order: BTreeMap::new(),
             nvme_bytes: 0,
             tick: 0,
-            stats: CacheStats::default(),
+            stats: CacheStats {
+                nvme_limit,
+                ..CacheStats::default()
+            },
+            lost: 0,
+            warm: None,
         };
         if cache.initialize_nvme().is_err() {
             cache.stats.cache_io_errors += 1;
@@ -190,6 +224,7 @@ impl BlockCache {
                 Ok(bytes) => return Ok(Some((bytes, Source::Nvme))),
                 Err(_) => {
                     self.stats.cache_io_errors += 1;
+                    self.lost += 1;
                     self.remove_nvme(&key);
                 }
             }
@@ -238,11 +273,169 @@ impl BlockCache {
     pub(super) fn reject(&mut self, reference: &BlockRef, source: Source) {
         let key = cache_key(reference);
         self.stats.corrupt_entries += 1;
+        self.lost += 1;
         match source {
             Source::Ram => self.remove_ram(&key),
             Source::Nvme => self.remove_nvme(&key),
             Source::Remote => {}
         }
+    }
+
+    /// One bounded warm-up unit: read one range of the next pack's uncached
+    /// blocks (at most `unit_bytes`, but at least one block), authenticate
+    /// each block against the root and admit it to the NVMe tier. Packs
+    /// already cached are skipped without I/O, at most 64 per unit. Returns
+    /// false once the pass has nothing left to do. A new root generation or
+    /// a lost cached entry starts a new pass.
+    pub(super) fn warm_step<S: ObjectStore>(
+        &mut self,
+        store: &S,
+        root: &Root,
+        unit_bytes: usize,
+    ) -> Result<bool> {
+        if !self.nvme_available || self.nvme_limit == 0 {
+            return Ok(false);
+        }
+        let mut pass = match self.warm.take() {
+            Some(pass) if pass.generation == root.generation && pass.lost == self.lost => pass,
+            _ => self.plan_warm(root),
+        };
+        let result = self.advance_warm(&mut pass, store, root, unit_bytes);
+        self.warm = Some(pass);
+        result
+    }
+
+    fn plan_warm(&mut self, root: &Root) -> WarmPass {
+        let mut blocks: Vec<_> = root
+            .runs
+            .iter()
+            .enumerate()
+            .flat_map(|(run, run_ref)| {
+                run_ref
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .map(move |(ordinal, block)| {
+                        (block.object.as_str(), block.offset, run, ordinal)
+                    })
+            })
+            .collect();
+        blocks.sort_unstable();
+        let mut packs: Vec<usize> = (0..blocks.len())
+            .filter(|&index| index == 0 || blocks[index - 1].0 != blocks[index].0)
+            .collect();
+        packs.push(blocks.len());
+        let namespace_bytes = blocks
+            .iter()
+            .map(|&(_, _, run, ordinal)| disk_charge(root.runs[run].blocks[ordinal].length))
+            .sum();
+        self.stats.namespace_bytes = namespace_bytes;
+        self.stats.warm_bytes = 0;
+        self.stats.warm_complete = false;
+        WarmPass {
+            generation: root.generation,
+            lost: self.lost,
+            blocks: blocks
+                .into_iter()
+                .map(|(_, _, run, ordinal)| (run, ordinal))
+                .collect(),
+            packs,
+            next: 0,
+            evict: namespace_bytes <= self.nvme_limit,
+        }
+    }
+
+    fn advance_warm<S: ObjectStore>(
+        &mut self,
+        pass: &mut WarmPass,
+        store: &S,
+        root: &Root,
+        unit_bytes: usize,
+    ) -> Result<bool> {
+        if self.stats.warm_complete {
+            return Ok(false);
+        }
+        for _ in 0..64 {
+            let Some(&[first, end]) = pass.packs.get(pass.next..pass.next + 2) else {
+                self.stats.warm_complete = true;
+                return Ok(false);
+            };
+            let blocks: Vec<&BlockRef> = pass.blocks[first..end]
+                .iter()
+                .map(|&(run, ordinal)| &root.runs[run].blocks[ordinal])
+                .collect();
+            let mut missing = Vec::new();
+            for &reference in &blocks {
+                validate_block_ref(reference)?;
+                if !self.hold_nvme(&cache_key(reference), pass.evict) {
+                    missing.push(reference);
+                }
+            }
+            if missing.is_empty() {
+                self.stats.warm_bytes += blocks
+                    .iter()
+                    .map(|reference| disk_charge(reference.length))
+                    .sum::<usize>();
+                pass.next += 1;
+                continue;
+            }
+            let start = missing[0].offset;
+            let take = 1 + missing[1..]
+                .iter()
+                .take_while(|reference| reference.offset + reference.length - start <= unit_bytes)
+                .count();
+            let missing = &missing[..take];
+            let charge: usize = missing
+                .iter()
+                .map(|reference| disk_charge(reference.length))
+                .sum();
+            if !pass.evict && self.nvme_bytes + charge > self.nvme_limit {
+                self.stats.warm_complete = true;
+                return Ok(false);
+            }
+            let last = missing[take - 1];
+            let length = last.offset + last.length - start;
+            let bytes = store
+                .get_range(&last.object, start, length, last.payload_len)?
+                .ok_or_else(|| {
+                    Error::Corrupt(format!("segmented pack missing: {}", last.object))
+                })?;
+            self.stats.warm_fetches += 1;
+            self.stats.warm_payload_bytes += bytes.len() as u64;
+            for reference in missing {
+                let at = reference.offset - start;
+                let block = bytes
+                    .get(at..at + reference.length)
+                    .ok_or_else(|| Error::Corrupt("segmented range read is short".into()))?;
+                authenticate(reference, block)?;
+                self.put_nvme(&cache_key(reference), block);
+            }
+            // A failed admission (for example a full disk) ends the pass
+            // instead of fetching the same blocks again.
+            if !missing
+                .iter()
+                .all(|reference| self.nvme.contains_key(&cache_key(reference)))
+            {
+                self.stats.warm_complete = true;
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        Ok(true)
+    }
+
+    /// Whether the NVMe tier holds `key`; if `touch`, mark it recently used.
+    fn hold_nvme(&mut self, key: &Key, touch: bool) -> bool {
+        let Some((_, tick)) = self.nvme.get_mut(key) else {
+            return false;
+        };
+        if touch {
+            self.tick += 1;
+            self.nvme_order.remove(tick);
+            *tick = self.tick;
+            self.nvme_order.insert(self.tick, *key);
+        }
+        true
     }
 
     fn remove_ram(&mut self, key: &Key) {

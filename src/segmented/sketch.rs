@@ -15,27 +15,39 @@ const LEVELS: f64 = 31.;
 const MAGIC: &[u8; 8] = b"GLSKT001";
 const ROUTED_MAGIC: &[u8; 8] = b"GLSKT002";
 
-/// Blocks an unfiltered selective query reads. Routing ranks `blocks`
-/// candidates. In rank order each candidate widens its pack's span, a single
-/// byte range from the first to the last chosen block of that pack, if all
-/// spans still total at most `bytes` and number at most `requests`. Every
-/// live block inside a span is reranked, since its bytes are read anyway.
-/// The choice never depends on cache contents, so each query issues at most
-/// `requests` range GETs and downloads at most `bytes` payload bytes.
+/// Blocks a routed selective query reads. Routing ranks
+/// `max(blocks, local_blocks)` candidates. In rank order, a candidate whose
+/// block is in the RAM or NVMe cache is read locally while fewer than
+/// `local_blocks` have been. Any other candidate among the first `blocks`
+/// widens its pack's span, a single byte range from the first to the last
+/// such block of that pack, if all spans still total at most `bytes` and
+/// number at most `requests`. Every live block inside a span is reranked,
+/// since its bytes are read anyway.
+///
+/// Remote limits therefore apply only to blocks that are not cached: each
+/// query issues at most `requests` range GETs and downloads at most `bytes`
+/// payload bytes, and with an empty cache (or `local_blocks == 0`) it reads
+/// exactly the spans that the first `blocks` candidates choose. With
+/// `local_blocks > 0` the result depends on cache contents: a warm cache
+/// reads up to `local_blocks` cached candidates in addition to the remote
+/// spans, while losing the cache returns queries to the cold choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadBudget {
     pub blocks: usize,
     pub requests: usize,
     pub bytes: usize,
+    pub local_blocks: usize,
 }
 
 impl ReadBudget {
-    /// Spans for the first `blocks` routed blocks, without a byte limit.
+    /// Spans for the first `blocks` routed blocks, without a byte limit or a
+    /// separate local limit, so the choice does not depend on the cache.
     pub fn uniform(blocks: usize) -> Self {
         Self {
             blocks,
             requests: blocks,
             bytes: usize::MAX,
+            local_blocks: 0,
         }
     }
 }
@@ -795,6 +807,14 @@ impl PackSketch {
         }
     }
 
+    /// Live rows of one block of this pack.
+    fn live_rows(&self, block: usize) -> usize {
+        let block = &self.blocks[block];
+        (block.start..block.end)
+            .filter(|&row| self.is_live(row))
+            .count()
+    }
+
     fn is_live(&self, row: usize) -> bool {
         self.live[row / 64] & (1 << (row % 64)) != 0
     }
@@ -1007,10 +1027,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.search_selective_within(query, k, ReadBudget::uniform(max_blocks), filter)
     }
 
-    /// `search_selective` with separate budgets for routed blocks and remote
-    /// fetches. Blocks are considered in routing order; a cached block is
-    /// always read, an uncached one only while the remote fetch and byte
-    /// budgets allow, otherwise it is skipped.
+    /// `search_selective` with separate limits for routed candidates, remote
+    /// range requests and bytes, and cached blocks read locally; see
+    /// [`ReadBudget`]. A nonzero `local_blocks` makes results depend on the
+    /// cache contents.
     pub fn search_selective_within(
         &self,
         query: &[f32],
@@ -1079,7 +1099,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 "selective search needs a block budget".into(),
             ));
         }
-        let ranked = self.route(query, budget.blocks, filter);
+        // Without a cache no candidate can be read locally.
+        let ranked = match self.cache {
+            Some(_) => self.route(query, budget.blocks.max(budget.local_blocks), filter),
+            None => self.route(query, budget.blocks, filter),
+        };
         self.rerank(query, k, &ranked, budget, filter, heap)
     }
 
@@ -1232,41 +1256,66 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         filter: &[(&str, &str)],
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<()> {
-        let candidates: Vec<_> = ranked
-            .iter()
-            .map(|&(_, slot, index)| {
-                let (run, ordinal) = self.sketches.packs[slot].blocks[index]
-                    .root
-                    .expect("routed blocks are rooted");
-                &self.root.runs[run].blocks[ordinal]
-            })
-            .collect();
-        let ranges = choose(&candidates, budget);
-        // Every rooted block inside a chosen span, in span and offset order.
+        // In rank order, cached candidates are read locally up to the local
+        // limit; the other candidates among the first `budget.blocks` are
+        // charged against the remote request and byte limits.
         let mut targets = Vec::new();
         let mut references = Vec::new();
+        let mut fetched = Vec::new();
+        let mut remote = Vec::new();
+        {
+            let mut cache = self.lock_cache()?;
+            for (rank, &(_, slot, index)) in ranked.iter().enumerate() {
+                let sketch = &self.sketches.packs[slot];
+                let (run, ordinal) = sketch.blocks[index].root.expect("routed blocks are rooted");
+                let reference = &self.root.runs[run].blocks[ordinal];
+                let hit = match cache.as_mut() {
+                    Some(cache) if fetched.len() < budget.local_blocks => {
+                        cache.lookup(reference)?
+                    }
+                    _ => None,
+                };
+                match hit {
+                    Some((bytes, source)) => {
+                        targets.push((run, ordinal, sketch.live_rows(index)));
+                        references.push(reference);
+                        fetched.push((super::Slice::from(bytes), source));
+                    }
+                    None if rank < budget.blocks => remote.push(reference),
+                    None => {}
+                }
+            }
+        }
+        let local = targets.len();
+        let ranges = choose(&remote, budget);
+        // Every rooted block inside a chosen span and not already read
+        // locally, in span and offset order.
         for &(object, offset, length, _) in &ranges {
             let slot = ranked
                 .iter()
-                .zip(&candidates)
-                .find(|(_, reference)| reference.object == object)
-                .map(|(&(_, slot, _), _)| slot)
+                .find(|&&(_, slot, _)| self.sketches.packs[slot].pack == object)
+                .map(|&(_, slot, _)| slot)
                 .expect("each span comes from a candidate");
             let sketch = &self.sketches.packs[slot];
             let mut inside: Vec<_> = sketch
                 .blocks
                 .iter()
-                .filter_map(|block| {
+                .enumerate()
+                .filter_map(|(index, block)| {
                     let (run, ordinal) = block.root?;
                     let reference = &self.root.runs[run].blocks[ordinal];
                     (reference.offset >= offset
-                        && reference.offset + reference.length <= offset + length)
-                        .then(|| {
-                            let live = (block.start..block.end)
-                                .filter(|&row| sketch.is_live(row))
-                                .count();
-                            (reference.offset, (run, ordinal, live), reference)
-                        })
+                        && reference.offset + reference.length <= offset + length
+                        && !targets[..local]
+                            .iter()
+                            .any(|&(r, o, _)| (r, o) == (run, ordinal)))
+                    .then(|| {
+                        (
+                            reference.offset,
+                            (run, ordinal, sketch.live_rows(index)),
+                            reference,
+                        )
+                    })
                 })
                 .collect();
             inside.sort_by_key(|&(at, _, _)| at);
@@ -1275,7 +1324,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 references.push(reference);
             }
         }
-        let fetched = self.fetch_blocks(&references, &ranges)?;
+        fetched.extend(self.fetch_blocks(&references[local..], &ranges)?);
         let (config, latest, tail) = (self.config, &self.latest, &self.tail);
         // Current records of one authenticated block, as a local top-k.
         let scan = |index: usize, block: Block| -> Result<Vec<Ranked>> {
@@ -1844,6 +1893,7 @@ mod tests {
             blocks: 6,
             requests: 2,
             bytes: 700,
+            local_blocks: 0,
         };
         assert_eq!(
             choose(&refs, budget),
