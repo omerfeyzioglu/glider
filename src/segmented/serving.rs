@@ -3,7 +3,7 @@
 //! that the admission worker runs only while no command is queued.
 use super::{root_key, ReadBudget, SegmentedDatabase, SegmentedOptions};
 use crate::{
-    admission::Engine,
+    admission::{Engine, EngineMetrics},
     ownership::OwnedStore,
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     store::ObjectStore,
@@ -364,6 +364,54 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
             .map_or((0, 0), |stats| {
                 (stats.remote_fetches, stats.remote_payload_bytes)
             })
+    }
+    fn metrics(&self) -> Result<EngineMetrics> {
+        let cache = self.db.cache_stats()?.unwrap_or_default();
+        let counters = self.counters;
+        Ok(EngineMetrics {
+            sequence: self.db.sequence,
+            samples: vec![
+                ("glider_segmented_seal_starts_total", counters.seal_starts),
+                ("glider_segmented_seal_steps_total", counters.seal_steps),
+                (
+                    "glider_segmented_consolidations_total",
+                    counters.consolidations,
+                ),
+                ("glider_segmented_prune_starts_total", counters.prune_starts),
+                ("glider_segmented_prune_steps_total", counters.prune_steps),
+                (
+                    "glider_segmented_reclaim_starts_total",
+                    counters.reclaim_starts,
+                ),
+                (
+                    "glider_segmented_reclaim_steps_total",
+                    counters.reclaim_steps,
+                ),
+                (
+                    "glider_segmented_removed_objects_total",
+                    counters.removed_objects,
+                ),
+                ("glider_segmented_forced_seals_total", counters.forced_seals),
+                (
+                    "glider_segmented_sketch_compactions_total",
+                    counters.sketch_compactions,
+                ),
+                ("glider_cache_ram_hits_total", cache.ram_hits),
+                ("glider_cache_nvme_hits_total", cache.nvme_hits),
+                ("glider_cache_remote_fetches_total", cache.remote_fetches),
+                (
+                    "glider_cache_remote_payload_bytes_total",
+                    cache.remote_payload_bytes,
+                ),
+                ("glider_cache_corrupt_entries_total", cache.corrupt_entries),
+                ("glider_cache_nvme_bytes", cache.nvme_bytes as u64),
+                ("glider_cache_nvme_entries", cache.nvme_entries as u64),
+                (
+                    "glider_sketch_index_bytes",
+                    self.db.selective_index_bytes() as u64,
+                ),
+            ],
+        })
     }
     /// A clean handle releases its claim; an uncertain one keeps it.
     fn close(self) -> Result<()> {

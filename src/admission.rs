@@ -44,6 +44,13 @@ pub trait Engine: Send + 'static {
     fn remote_reads(&self) -> (u64, u64) {
         (0, 0)
     }
+    /// Read-only values sampled on the owning worker thread.
+    fn metrics(&self) -> crate::Result<EngineMetrics> {
+        Ok(EngineMetrics {
+            sequence: self.sequence(),
+            samples: Vec::new(),
+        })
+    }
     fn close(self) -> crate::Result<()>;
 }
 
@@ -148,6 +155,13 @@ pub struct Status {
     pub failed: bool,
     /// Idle maintenance units that failed without poisoning the engine.
     pub maintenance_errors: u64,
+}
+/// Engine values returned through the admission queue. Sample names are fixed
+/// by the engine implementation, never supplied by a client.
+#[derive(Debug)]
+pub struct EngineMetrics {
+    pub sequence: u64,
+    pub samples: Vec<(&'static str, u64)>,
 }
 #[derive(Debug)]
 pub struct Timed<T> {
@@ -385,6 +399,9 @@ impl<E: Engine> Client<E> {
             failed: queue.failed,
             maintenance_errors: queue.maintenance_errors,
         }
+    }
+    pub fn metrics(&self) -> Result<Ticket<EngineMetrics>> {
+        self.submit(true, 16, || Ok(|db: &mut E| db.metrics()))
     }
     pub fn write(&self, request: Request) -> Result<Ticket<Outcome>> {
         request.validate(self.config)?;

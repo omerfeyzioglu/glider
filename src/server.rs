@@ -15,15 +15,26 @@ use crate::{
     Config, Error, Metric, Mutation,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Request as HttpRequest, State},
     http::{header, HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 /// The namespace's backing store: a local directory for development, or an
 /// S3-compatible bucket.
@@ -223,6 +234,90 @@ type Engine0 = SegmentedServing<Store>;
 struct AppState {
     client: Client<Engine0>,
     token: Option<Arc<str>>,
+    metrics: Arc<HttpMetrics>,
+}
+
+const ENDPOINTS: [&str; 8] = [
+    "/healthz",
+    "/metrics",
+    "/v1/status",
+    "/v1/write",
+    "/v1/query",
+    "/v1/points/{id}",
+    "/v1/requests/{boundary}/{nonce}",
+    "unmatched",
+];
+const BUCKETS: [f64; 11] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
+struct EndpointMetrics {
+    requests: [AtomicU64; 5],
+    buckets: [AtomicU64; 12],
+    latency_micros: AtomicU64,
+}
+
+impl EndpointMetrics {
+    fn new() -> Self {
+        Self {
+            requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            latency_micros: AtomicU64::new(0),
+        }
+    }
+}
+
+struct HttpMetrics {
+    endpoints: [EndpointMetrics; ENDPOINTS.len()],
+}
+
+impl HttpMetrics {
+    fn new() -> Self {
+        Self {
+            endpoints: std::array::from_fn(|_| EndpointMetrics::new()),
+        }
+    }
+}
+
+fn endpoint(path: &str) -> usize {
+    match path {
+        "/healthz" => 0,
+        "/metrics" => 1,
+        "/v1/status" => 2,
+        "/v1/write" => 3,
+        "/v1/query" => 4,
+        path if path.starts_with("/v1/points/") => 5,
+        path if path.starts_with("/v1/requests/") => 6,
+        _ => 7,
+    }
+}
+
+async fn record_metrics(
+    State(metrics): State<Arc<HttpMetrics>>,
+    request: HttpRequest,
+    next: Next,
+) -> Response {
+    let endpoint = endpoint(request.uri().path());
+    let start = Instant::now();
+    let response = next.run(request).await;
+    let elapsed = start.elapsed();
+    let counters = &metrics.endpoints[endpoint];
+    let class = usize::from(response.status().as_u16() / 100);
+    if (1..=5).contains(&class) {
+        counters.requests[class - 1].fetch_add(1, Ordering::Relaxed);
+    }
+    let seconds = elapsed.as_secs_f64();
+    for (index, bound) in BUCKETS.iter().enumerate() {
+        if seconds <= *bound {
+            counters.buckets[index].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    counters.buckets[BUCKETS.len()].fetch_add(1, Ordering::Relaxed);
+    counters.latency_micros.fetch_add(
+        elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+        Ordering::Relaxed,
+    );
+    response
 }
 
 /// JSON error with a status that tells clients whether to retry.
@@ -505,10 +600,92 @@ async fn health(State(state): State<AppState>) -> StatusCode {
     }
 }
 
+fn render_metrics(
+    http: &HttpMetrics,
+    queue: admission::Status,
+    engine: admission::EngineMetrics,
+) -> String {
+    let mut body = String::new();
+    body.push_str("# TYPE glider_http_requests_total counter\n");
+    for (name, metrics) in ENDPOINTS.iter().zip(&http.endpoints) {
+        for (index, count) in metrics.requests.iter().enumerate() {
+            writeln!(
+                body,
+                "glider_http_requests_total{{endpoint=\"{name}\",status_class=\"{}xx\"}} {}",
+                index + 1,
+                count.load(Ordering::Relaxed)
+            )
+            .unwrap();
+        }
+    }
+    body.push_str("# TYPE glider_http_request_duration_seconds histogram\n");
+    for (name, metrics) in ENDPOINTS.iter().zip(&http.endpoints) {
+        for (index, bound) in BUCKETS.iter().enumerate() {
+            writeln!(body, "glider_http_request_duration_seconds_bucket{{endpoint=\"{name}\",le=\"{bound}\"}} {}", metrics.buckets[index].load(Ordering::Relaxed)).unwrap();
+        }
+        writeln!(
+            body,
+            "glider_http_request_duration_seconds_bucket{{endpoint=\"{name}\",le=\"+Inf\"}} {}",
+            metrics.buckets[BUCKETS.len()].load(Ordering::Relaxed)
+        )
+        .unwrap();
+        writeln!(
+            body,
+            "glider_http_request_duration_seconds_sum{{endpoint=\"{name}\"}} {}",
+            metrics.latency_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0
+        )
+        .unwrap();
+        writeln!(
+            body,
+            "glider_http_request_duration_seconds_count{{endpoint=\"{name}\"}} {}",
+            metrics.buckets[BUCKETS.len()].load(Ordering::Relaxed)
+        )
+        .unwrap();
+    }
+    for (name, value, kind) in [
+        ("glider_admission_commands", queue.commands as u64, "gauge"),
+        ("glider_admission_bytes", queue.bytes as u64, "gauge"),
+        ("glider_worker_failed", u64::from(queue.failed), "gauge"),
+        ("glider_worker_closed", u64::from(queue.closed), "gauge"),
+        (
+            "glider_maintenance_errors_total",
+            queue.maintenance_errors,
+            "counter",
+        ),
+        ("glider_committed_sequence", engine.sequence, "gauge"),
+    ] {
+        writeln!(body, "# TYPE {name} {kind}\n{name} {value}").unwrap();
+    }
+    for (name, value) in engine.samples {
+        let kind = if name.ends_with("_total") {
+            "counter"
+        } else {
+            "gauge"
+        };
+        writeln!(body, "# TYPE {name} {kind}\n{name} {value}").unwrap();
+    }
+    body
+}
+
+/// `GET /metrics`: unauthenticated Prometheus text exposition.
+async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let client = state.client.clone();
+    let http = state.metrics.clone();
+    blocking(move || {
+        let engine = client.metrics()?.wait()?.value;
+        let queue = client.status();
+        let body = render_metrics(&http, queue, engine);
+        Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response())
+    })
+    .await
+}
+
 /// Routes for one collection served by `client`.
 pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
+    let http_metrics = Arc::new(HttpMetrics::new());
     Router::new()
         .route("/healthz", get(health))
+        .route("/metrics", get(metrics))
         .route("/v1/status", get(status))
         .route("/v1/write", post(write))
         .route("/v1/query", post(query))
@@ -517,7 +694,9 @@ pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
         .with_state(AppState {
             client,
             token: token.map(Arc::from),
+            metrics: http_metrics.clone(),
         })
+        .layer(middleware::from_fn_with_state(http_metrics, record_metrics))
 }
 
 /// Serve until SIGINT or SIGTERM, then drain queued work and release the

@@ -50,7 +50,7 @@ For S3 or MinIO, replace `GLIDER_DATA_DIR` with `GLIDER_S3_BUCKET`,
 `127.0.0.1:8080`), `GLIDER_METRIC`, `GLIDER_API_TOKEN` (bearer auth),
 `GLIDER_CACHE_DIR`, `GLIDER_CACHE_BYTES`.
 
-API (JSON):
+API (JSON except `/metrics`):
 
 | Endpoint | Purpose |
 |---|---|
@@ -59,6 +59,7 @@ API (JSON):
 | `GET /v1/points/{id}` | Current vector and metadata, or 404 |
 | `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
 | `GET /v1/status`, `GET /healthz` | Sequence and queue state; liveness |
+| `GET /metrics` | Prometheus text metrics for requests, admission, maintenance, cache and sketches; no bearer token required |
 
 A write is acknowledged only after durable publication; resend an uncertain
 write with the same `request_id` to get its original outcome. SIGINT/SIGTERM
