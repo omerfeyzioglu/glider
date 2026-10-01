@@ -747,16 +747,15 @@ larger-than-RAM requirement.
 
 ## M22 — Bound segment publication and maintenance work
 
-Status: in progress; M21 selected addressable base blocks and bounded sorted
-delta runs with vector-partition summaries, jointly with M23's selective-read
-and cache requirements. The range-read contract and experimental segmented
-publication protocol are in [benchmarks/M22.md](benchmarks/M22.md). Production
-serving, broader index-size reclamation and acceptance remain pending. The
-experimental seal now groups puts into bounded vector-local blocks, while the
-run index remains ID-sorted; its targeted MinIO evidence is in
-[benchmarks/M24.md](benchmarks/M24.md). Staged
-mixed-pack reclamation and fully dead block pruning probes are recorded in
-`benchmarks/M22.md`.
+Status: acceptance pending one final run. The 300-second
+[M24 acceptance run v2](benchmarks/M24.md#acceptance-runs) met M21's write
+(p95 38.1 ms), request (5.96 PUT/s, 5.90 DELETE/s), byte (1.07 MiB/s) and
+recovery (0 lost writes, 405 ms reopen) gates under `SegmentedServing`, with
+bounded seal, consolidation, pruning and multi-pack reclamation units. Local
+crash and interrupted-publication tests pass; the MinIO segmented fault suite
+(`python3 tools/test_s3.py --segmented-only`) must be rerun on the final
+revision, together with the remaining RSS gate. Pruning covers run indexes up
+to 512 KiB, which bounded consolidation keeps all runs within.
 
 Steps:
 - Compare incrementally reusable segments with bounded sorted delta segments;
@@ -776,10 +775,12 @@ rewrites. Report unavoidable compaction amplification rather than claiming none.
 
 ## M23 — Serve through bounded NVMe and RAM caches
 
-Status: in progress. The opt-in experimental block cache and targeted
-250,000-row cold/warm/pressure evidence are in [benchmarks/M23.md](benchmarks/M23.md).
-Exact full-scan latency and GET counts fail the declared query gates; M24's
-selective retrieval and independent-load acceptance remain pending.
+Status: one resource gate pending. Selective serving through the NVMe cache
+meets the latency, request and correctness gates in the
+[M24 acceptance run v2](benchmarks/M24.md#acceptance-runs); cache loss changes
+latency only, because block choice never depends on cache contents. Peak
+whole-process RSS (68.1 MB) still exceeds 64 MiB although peak physical
+footprint (65.2 MB) does not; later memory reductions await the final run.
 
 Steps:
 - Open/read without loading every vector into RAM. Fetch addressable data on
@@ -799,18 +800,16 @@ losing either cache changes performance only. No multi-node work is required.
 
 ## M24 — Selective retrieval and single-machine cost acceptance
 
-Status: in progress. The [M24 evidence](benchmarks/M24.md) rejects the original
-ID-sorted physical blocks for the eight-GET quality target. The current
-vector-local seal and opt-in packed-sketch reader measure 0.9255 unfiltered
-mean recall and 31.5 ms NVMe-warm p95 on local MinIO. Rebuilding the derived
-index needs 7.34 s/2,970 GET after open, every root publication invalidates it,
-and the 1% filtered eight-block ceiling is only 0.841. Persisted derived-index
-recovery, incremental visibility, filtered selective reads, independent-load
-traffic and cost acceptance remain pending. A targeted [codebook granularity
-probe](benchmarks/M24.md) found 0.9295 mean eight-block routing recall with
-run-local five-bit books and only 24,576 codebook bytes, versus 3,041,280
-bytes for block-local books. Immutable seal-group components are the next
-derived-index direction; their serving behavior is unmeasured.
+Status: acceptance pending the RSS gate and one bounded AWS check. Persisted
+per-pack sketches (no rebuild on open, no invalidation on root publication),
+an exact resident posting for the declared 1% predicate and deterministic
+span-budgeted reads are in `SegmentedServing`. The 300-second
+[acceptance run v2](benchmarks/M24.md#acceptance-runs) measured 0.9455 static
+and 0.912 update-wave unfiltered recall, exact filtered results, 36.2 ms warm
+and 42.1 ms cold unfiltered p95, at most 8 GET and 421,508 bytes per cold query,
+349 ms fresh open and a reproducible request/byte cost model (about USD 94 per
+30 days at the offered rate). Only peak RSS failed. The AWS check measures
+open and cold-query request latency on S3 Standard at reduced scale.
 
 Steps:
 - Evaluate selective filtering/ANN on addressable segments when required by the

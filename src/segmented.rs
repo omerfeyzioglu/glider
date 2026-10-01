@@ -496,6 +496,20 @@ fn encode_pack_with_sketch(
     Ok((bytes, references, sketch))
 }
 
+/// A block's bytes within a shared fetched buffer.
+pub(crate) struct Slice {
+    data: std::sync::Arc<Vec<u8>>,
+    start: usize,
+    end: usize,
+}
+
+impl std::ops::Deref for Slice {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.data[self.start..self.end]
+    }
+}
+
 /// A selected block is authenticated before its records can affect a result.
 pub(crate) fn read_block<S: ObjectStore>(
     store: &S,
@@ -881,7 +895,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         &self,
         references: &[&BlockRef],
         ranges: &[(&str, usize, usize, usize)],
-    ) -> Result<Vec<(Vec<u8>, cache::Source)>> {
+    ) -> Result<Vec<(Slice, cache::Source)>> {
         let mut cache = self.lock_cache()?;
         let mut hits = Vec::with_capacity(references.len());
         for reference in references {
@@ -906,7 +920,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             })
             .copied()
             .collect();
-        let payloads = self.store.get_ranges(&needed)?;
+        let payloads: Vec<_> = self
+            .store
+            .get_ranges(&needed)?
+            .into_iter()
+            .map(|payload| payload.map(std::sync::Arc::new))
+            .collect();
         if let Some(cache) = cache.as_mut() {
             for payload in payloads.iter().flatten() {
                 cache.count_remote(payload.len());
@@ -916,8 +935,16 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .iter()
             .zip(hits)
             .map(|(reference, hit)| {
-                if let Some(hit) = hit {
-                    return Ok(hit);
+                if let Some((bytes, source)) = hit {
+                    let end = bytes.len();
+                    return Ok((
+                        Slice {
+                            data: std::sync::Arc::new(bytes),
+                            start: 0,
+                            end,
+                        },
+                        source,
+                    ));
                 }
                 let (range, payload) = needed
                     .iter()
@@ -927,9 +954,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 let payload = payload.as_ref().ok_or_else(|| {
                     Error::Corrupt(format!("segmented pack missing: {}", reference.object))
                 })?;
+                // Blocks share their span's buffer instead of copying it.
                 let start = reference.offset - range.1;
                 Ok((
-                    payload[start..start + reference.length].to_vec(),
+                    Slice {
+                        data: payload.clone(),
+                        start,
+                        end: start + reference.length,
+                    },
                     cache::Source::Remote,
                 ))
             })

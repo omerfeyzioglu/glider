@@ -398,6 +398,9 @@ impl Engine for Profiled {
         let peak = peak_footprint().unwrap_or(0);
         let started = Instant::now();
         let result = self.inner.apply_request(request);
+        if let Err(error) = &result {
+            eprintln!("write failed: {error}");
+        }
         let (elapsed, raised) = (
             ms(started.elapsed()),
             peak_footprint().unwrap_or(0).saturating_sub(peak),
@@ -447,6 +450,12 @@ impl Engine for Profiled {
         let peak = peak_footprint().unwrap_or(0);
         let started = Instant::now();
         let result = self.inner.idle_step();
+        if let Err(error) = &result {
+            eprintln!(
+                "maintenance unit {} failed: {error}",
+                self.inner.last_unit()
+            );
+        }
         let (elapsed, raised) = (
             ms(started.elapsed()),
             peak_footprint().unwrap_or(0).saturating_sub(peak),
@@ -694,30 +703,8 @@ fn serve(args: &[String]) -> Result<Value> {
         let stop = sampler_stop.clone();
         std::thread::spawn(move || {
             let mut series = Vec::new();
-            let mut tick = 0_u64;
             while stop.load(Ordering::Acquire) == 0 {
-                if env::var("GLIDER_DEBUG_RSS").is_ok() {
-                    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
-                    unsafe {
-                        libc::proc_pid_rusage(
-                            std::process::id() as i32,
-                            libc::RUSAGE_INFO_V4,
-                            info.as_mut_ptr().cast(),
-                        )
-                    };
-                    let info = unsafe { info.assume_init() };
-                    eprintln!(
-                        "{} {} {}",
-                        tick, info.ri_resident_size, info.ri_phys_footprint
-                    );
-                    std::thread::sleep(Duration::from_millis(100));
-                    tick += 1;
-                    if tick % 10 != 0 {
-                        continue;
-                    }
-                } else {
-                    std::thread::sleep(Duration::from_secs(1));
-                }
+                std::thread::sleep(Duration::from_secs(1));
                 series.push(rss());
             }
             series

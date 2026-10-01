@@ -205,13 +205,24 @@ granularities. Embedding the sketch gives it exactly its pack's lifetime and
 costs no extra PUT or DELETE: consolidation and pruning reuse packs and their
 sketches unchanged, and reclamation writes a new pack with a new sketch. The
 root format is unchanged. Packs are at most 1 MiB of blocks plus a sketch of
-at most 1 MiB. Blocks are JSON block version 1 encoded with the compact
-integral-float formatter (exactly represented integers without a decimal
-suffix, negative zero and every other value unchanged); decoding yields the
-same f32 bits, so no block version change is needed.
+at most 1 MiB; a sealed pack holds at most 12 blocks, which bounds the region
+its codebook covers.
+
+New blocks use block format version 2: the magic `GLB2`, the raw length as
+u32, then a zstd frame of a binary layout (dimensions, metric, partition,
+record count; per record ID, sequence, kind, little-endian f32 components and
+length-prefixed UTF-8 metadata in key order). Raw layouts are at most 120 KiB
+so a compressed block stays within 128 KiB. Readers accept version 1 JSON
+blocks and version 2 by magic; both are authenticated by the root's block
+digest before decoding, and version 2 decoding validates configuration, ID
+order, sequences, finite components, metadata encoding and length. SIFT
+blocks compress about threefold, so the per-query byte budget covers more
+candidate rows, uploads and cache footprint shrink, and reranking scans
+records from a reused buffer without per-record allocation instead of parsing
+JSON floats. Logs, roots and indexes keep their formats.
 
 The sketch is derived, never authoritative. Opening reads a bounded prefix
-of each referenced pack through batched range reads (16 at a time), re-reads
+of each referenced pack through batched range reads (8 at a time), re-reads
 a longer prefix if the frame needs it, verifies the frame digest (range reads
 bypass the whole-object envelope) and decodes it, then binds each root block
 reference to a sketch block with the same digest. A pack without a valid
@@ -228,22 +239,25 @@ unit) drops shadowed rows and keeps resident routing state proportional to
 the live set; reopening reloads the full persisted sketches. Root
 publications do not invalidate the reader, and recovery reconstructs
 identical bits. A failure to bind after a root publication poisons the
-handle. The latest-ID directory is a sorted vector of 24-byte slots, merged
-in place.
+handle. The latest-ID directory is a sorted vector of 24-byte slots, sized
+once at open and merged in place. Sketch row IDs are stored as u32 offsets
+from the pack's smallest ID when its span allows, else as u64.
 
 `search_selective_within(query, k, budget, filter)` supports two modes. With
 no filter it scores live codes, visiting packs in order of a per-pack lower
 bound and abandoning a row once its prefix sum exceeds both its block's best
 and the current last kept candidate; sums of nonnegative terms never
 decrease, so the ranked blocks equal those of a full scan. It ranks
-`budget.blocks` candidates by minimum approximate row distance and chooses,
-in rank order, those fitting `budget.requests` coalesced ranges (adjacent
-blocks in one pack share a range) and `budget.bytes`. The choice never
-depends on cache contents, so each query issues at most that many range GETs
-and bytes, and losing a cache changes latency only. Chosen blocks are fetched
-through the cache (a range containing any miss is fetched whole, in one
-batched read), authenticated, checked against the sketch's live rows and
-exactly reranked with the live tail on scoped threads. The result is
+`budget.blocks` candidates by minimum approximate row distance. In rank order
+each candidate widens its pack's span, one byte range from the first to the
+last chosen block of that pack, while all spans total at most `budget.bytes`
+and number at most `budget.requests`; every live block inside a span is
+reranked because its bytes are read anyway. The choice never depends on cache
+contents, so each query issues at most that many range GETs and bytes, and
+losing a cache changes latency only. Blocks are looked up in the cache; a span
+containing any miss is fetched whole in one batched read and its blocks share
+that buffer. Blocks are authenticated, checked against the sketch's live rows
+and exactly reranked with the live tail on scoped threads. The result is
 approximate. With exactly the declared resident predicate the query scans the
 resident full-precision vectors and matching tail rows and is exact, with no
 block reads. Other filters return an explicit error; `search_exact` remains
@@ -257,9 +271,18 @@ second copy and the exact resident posting already meets the query gates.
 
 Reclamation freezes, together, the mostly dead packs with the most garbage
 whose estimated live bytes fit 7/8 of one pack (the margin covers estimation
-error), rewrites their live records into one new pack block for block, and
-publishes one root; this bounds reclamation PUTs, DELETEs and roots per dead
-byte. `ObjectStore::get_many` and `get_ranges` batch independent reads; the
+error) and whose live rows fit 12 blocks (decoded records are held until the
+new pack is written), rewrites their live records into one new pack block for
+block, and publishes one root; this bounds reclamation PUTs, DELETEs, roots
+and memory per dead byte. A pack is reclaimed only if it frees at least the
+configured minimum garbage (default 64 KiB).
+
+A seal plans block membership by ID from borrowed tail vectors, then each
+step materializes only its own pack's records. If a newer write replaces a
+tail version the seal still has to publish, that version moves into the
+seal's side map, so the seal publishes exactly its frozen prefix. Run
+consolidation merges two run indexes straight into the output entries only
+while their encoded sizes total at most 512 KiB, bounding its memory and time. `ObjectStore::get_many` and `get_ranges` batch independent reads; the
 S3 backend issues up to 16 concurrently, and other backends default to serial
 reads. Opening uses them for run indexes, the log tail and sketch frames.
 
@@ -317,14 +340,15 @@ still exist in physical blocks. New acknowledged logs may shadow retained
 records during staging, while seal and run consolidation wait for the root.
 The old pack remains authoritative until root publication; an interrupted
 attempt leaves an unreferenced pack for cleanup on reopen. For a run index no
-larger than 1 MiB, a separate staged pruning plan removes references to fully
+larger than 512 KiB, a separate staged pruning plan removes references to fully
 dead blocks, remaps surviving block ordinals in a new index, then publishes one
 root. A completely dead run disappears. Logs may grow during this plan, but
 seal, run consolidation and repacking wait for its root; uncertain index or
 root creation requires reopen. Indexes above this size are not pruned yet.
 The opt-in block cache reads through bounded RAM and a versioned local NVMe
-directory. Its key includes object, range, complete payload length and block
-digest; every hit is checked against the selected root before decoding.
+directory. Its key is a SHA-256 of object, range, complete payload length and
+block digest, kept as 32 bytes in memory with tick-ordered LRU; every hit is
+checked against the selected root before decoding.
 Missing or corrupt cache bytes trigger an authoritative range fetch. Opening
 rejects a missing selected pack, and corrupt bytes fetched from object storage
 fail closed. Cache bytes never acknowledge mutations or participate in root

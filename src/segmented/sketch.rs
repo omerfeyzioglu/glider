@@ -210,6 +210,80 @@ fn approximate_within(codes: &[u8], table: &[[f64; 32]], limit: f64) -> Option<f
     (sum <= limit).then_some(sum)
 }
 
+/// Row IDs, stored as u32 offsets from the smallest ID when the pack's ID
+/// span allows it.
+enum Ids {
+    Narrow { base: u64, offsets: Vec<u32> },
+    Wide(Vec<u64>),
+}
+
+impl Ids {
+    fn new(ids: Vec<u64>) -> Self {
+        let base = ids.iter().copied().min().unwrap_or(0);
+        if ids.iter().all(|&id| id - base <= u64::from(u32::MAX)) {
+            Self::Narrow {
+                base,
+                offsets: ids.iter().map(|&id| (id - base) as u32).collect(),
+            }
+        } else {
+            Self::Wide(ids)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Narrow { offsets, .. } => offsets.len(),
+            Self::Wide(ids) => ids.len(),
+        }
+    }
+
+    fn get(&self, row: usize) -> u64 {
+        match self {
+            Self::Narrow { base, offsets } => base + u64::from(offsets[row]),
+            Self::Wide(ids) => ids[row],
+        }
+    }
+
+    /// Row of `id` within `start..end`, whose IDs are strictly increasing.
+    fn find(&self, start: usize, end: usize, id: u64) -> Option<usize> {
+        match self {
+            Self::Narrow { base, offsets } => {
+                let offset = u32::try_from(id.checked_sub(*base)?).ok()?;
+                offsets[start..end].binary_search(&offset).ok()
+            }
+            Self::Wide(ids) => ids[start..end].binary_search(&id).ok(),
+        }
+        .map(|index| start + index)
+    }
+
+    fn copy(&mut self, from: usize, to: usize) {
+        match self {
+            Self::Narrow { offsets, .. } => offsets[to] = offsets[from],
+            Self::Wide(ids) => ids[to] = ids[from],
+        }
+    }
+
+    fn truncate(&mut self, length: usize) {
+        match self {
+            Self::Narrow { offsets, .. } => {
+                offsets.truncate(length);
+                offsets.shrink_to_fit();
+            }
+            Self::Wide(ids) => {
+                ids.truncate(length);
+                ids.shrink_to_fit();
+            }
+        }
+    }
+
+    fn charged_bytes(&self) -> usize {
+        match self {
+            Self::Narrow { offsets, .. } => offsets.capacity() * size_of::<u32>(),
+            Self::Wide(ids) => ids.capacity() * size_of::<u64>(),
+        }
+    }
+}
+
 struct SketchBlock {
     digest: [u8; 32],
     start: usize,
@@ -223,7 +297,7 @@ pub(super) struct PackSketch {
     blocks: Vec<SketchBlock>,
     minima: Vec<f32>,
     scales: Vec<f32>,
-    ids: Vec<u64>,
+    ids: Ids,
     codes: Vec<u8>,
     live: Vec<u64>,
     resident_rows: Vec<u32>,
@@ -312,14 +386,15 @@ impl PackSketch {
             blocks: Vec::with_capacity(blocks.len()),
             minima,
             scales,
-            ids: Vec::new(),
+            ids: Ids::Wide(Vec::new()),
             codes: Vec::new(),
             live: Vec::new(),
             resident_rows: Vec::new(),
             resident_vectors: Vec::new(),
         };
+        let mut ids = Vec::new();
         for (reference, block) in blocks {
-            let start = sketch.ids.len();
+            let start = ids.len();
             for record in &block.records {
                 let Mutation::Put {
                     id,
@@ -329,8 +404,8 @@ impl PackSketch {
                 else {
                     continue;
                 };
-                let row = sketch.ids.len();
-                sketch.ids.push(*id);
+                let row = ids.len();
+                ids.push(*id);
                 sketch.codes.resize(sketch.codes.len() + width, 0);
                 let bytes = &mut sketch.codes[row * width..];
                 for (axis, &value) in vector.iter().enumerate() {
@@ -355,11 +430,12 @@ impl PackSketch {
             sketch.blocks.push(SketchBlock {
                 digest: digest_bytes(&reference.sha256)?,
                 start,
-                end: sketch.ids.len(),
+                end: ids.len(),
                 root: None,
             });
         }
-        sketch.live = vec![0; sketch.ids.len().div_ceil(64)];
+        sketch.live = vec![0; ids.len().div_ceil(64)];
+        sketch.ids = Ids::new(ids);
         Ok(sketch)
     }
 
@@ -394,8 +470,8 @@ impl PackSketch {
         for value in self.minima.iter().chain(&self.scales) {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        for id in &self.ids {
-            bytes.extend_from_slice(&id.to_le_bytes());
+        for row in 0..self.ids.len() {
+            bytes.extend_from_slice(&self.ids.get(row).to_le_bytes());
         }
         bytes.extend_from_slice(&self.codes);
         for row in &self.resident_rows {
@@ -507,7 +583,7 @@ impl PackSketch {
             minima,
             scales,
             live: vec![0; rows.div_ceil(64)],
-            ids,
+            ids: Ids::new(ids),
             codes,
             resident_rows,
             resident_vectors,
@@ -523,7 +599,7 @@ impl PackSketch {
             + self.pack.capacity()
             + self.blocks.capacity() * size_of::<SketchBlock>()
             + (self.minima.capacity() + self.scales.capacity()) * size_of::<f32>()
-            + self.ids.capacity() * size_of::<u64>()
+            + self.ids.charged_bytes()
             + self.codes.capacity()
             + self.live.capacity() * size_of::<u64>()
             + self.resident_rows.capacity() * size_of::<u32>()
@@ -569,7 +645,7 @@ impl PackSketch {
                     );
                     kept_resident += 1;
                 }
-                self.ids[kept] = self.ids[row];
+                self.ids.copy(row, kept);
                 self.codes
                     .copy_within(row * width..(row + 1) * width, kept * width);
                 kept += 1;
@@ -578,7 +654,6 @@ impl PackSketch {
             block.end = kept;
         }
         self.ids.truncate(kept);
-        self.ids.shrink_to_fit();
         self.codes.truncate(kept * width);
         self.codes.shrink_to_fit();
         self.resident_rows.truncate(kept_resident);
@@ -724,8 +799,7 @@ impl SketchSet {
         };
         let sketch = &mut self.packs[slot];
         let range = &sketch.blocks[sketch_block];
-        if let Ok(offset) = sketch.ids[range.start..range.end].binary_search(&id) {
-            let row = range.start + offset;
+        if let Some(row) = sketch.ids.find(range.start, range.end, id) {
             sketch.set_live(row, live);
         }
     }
@@ -747,7 +821,7 @@ impl SketchSet {
                 };
                 for row in start..end {
                     let live =
-                        root.is_some_and(|(run, block)| current(sketch.ids[row], run, block));
+                        root.is_some_and(|(run, block)| current(sketch.ids.get(row), run, block));
                     sketch.set_live(row, live);
                 }
             }
@@ -831,7 +905,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                                 k,
                                 self.config,
                                 query,
-                                sketch.ids[row as usize],
+                                sketch.ids.get(row as usize),
                                 vector,
                             );
                         }
