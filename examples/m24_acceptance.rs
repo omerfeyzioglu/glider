@@ -50,6 +50,7 @@ fn config() -> Config {
 fn options() -> SegmentedOptions {
     SegmentedOptions {
         resident_filter: Some((FILTER.0.into(), FILTER.1.into())),
+        routed_keys: Vec::new(),
     }
 }
 

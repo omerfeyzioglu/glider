@@ -22,6 +22,7 @@ fn config() -> Config {
 fn options() -> SegmentedOptions {
     SegmentedOptions {
         resident_filter: Some(("tag".into(), "hot".into())),
+        routed_keys: vec!["route".into()],
     }
 }
 
@@ -147,6 +148,12 @@ fn check(db: &SegmentedDatabase<HookStore>, rng: &mut Rng, seed: u64, step: usiz
             .search_selective(&query, 10, db.block_count().max(1), &general)
             .unwrap();
         assert_eq!(ids(post), filtered, "seed {seed} step {step}");
+        let routed_filter = [("route", "yes")];
+        let exact_routed = ids(db.search_exact(&query, 10, &routed_filter).unwrap());
+        let selective_routed = ids(db
+            .search_selective(&query, 10, db.block_count().max(1), &routed_filter)
+            .unwrap());
+        assert_eq!(selective_routed, exact_routed, "seed {seed} step {step}");
         let partial = db.search_selective(&query, 10, 2, &[]).unwrap();
         assert!(
             partial.len() <= 10 && partial.windows(2).all(|p| p[0].distance <= p[1].distance),
@@ -179,6 +186,9 @@ fn persisted_sketches_follow_seal_maintenance_reopen_and_loss() {
                     let mut metadata = BTreeMap::new();
                     if rng.below(20) == 0 {
                         metadata.insert("tag".into(), "hot".into());
+                    }
+                    if rng.below(3) == 0 {
+                        metadata.insert("route".into(), "yes".into());
                     }
                     Mutation::Put {
                         id,
@@ -320,6 +330,18 @@ fn namespace_options_are_declared_once() {
         SegmentedDatabase::open_with_options(LocalStore::open(&path).unwrap(), config(), options())
             .unwrap(),
     );
+    let metadata = LocalStore::open(&path)
+        .unwrap()
+        .get("metadata")
+        .unwrap()
+        .unwrap();
+    assert!(std::str::from_utf8(&metadata)
+        .unwrap()
+        .contains("\"version\":4"));
+    assert!(matches!(SegmentedDatabase::open_with_options(
+        LocalStore::open(&path).unwrap(), config(),
+        SegmentedOptions { resident_filter: options().resident_filter, routed_keys: vec!["other".into()] }
+    ), Err(Error::Invalid(message)) if message.contains("routed_keys")));
     assert!(SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config()).is_err());
     let plain = temp.path().join("plain");
     let db = SegmentedDatabase::open(LocalStore::open(&plain).unwrap(), config()).unwrap();
@@ -335,6 +357,103 @@ fn namespace_options_are_declared_once() {
         options()
     )
     .is_err());
+    for routed_keys in [
+        vec!["".into()],
+        vec!["b".into(), "a".into()],
+        vec!["a".into(), "a".into()],
+        vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+    ] {
+        let invalid = temp.path().join("invalid");
+        assert!(matches!(
+            SegmentedDatabase::open_with_options(
+                LocalStore::open(&invalid).unwrap(),
+                config(),
+                SegmentedOptions {
+                    resident_filter: None,
+                    routed_keys
+                }
+            ),
+            Err(Error::Invalid(_))
+        ));
+    }
+}
+
+#[test]
+fn routed_dictionary_overflow_keeps_matches_after_reopen() {
+    let seed = 0x30_254_u64;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("overflow");
+    let open = || {
+        SegmentedDatabase::open_with_options(
+            LocalStore::open(&path).unwrap(),
+            config(),
+            SegmentedOptions {
+                resident_filter: None,
+                routed_keys: vec!["group".into(), "route".into()],
+            },
+        )
+    };
+    let mut db = open().unwrap();
+    for batch in 0..3_u64 {
+        db.apply_request(Request {
+            id: RequestId {
+                boundary: db.sequence(),
+                nonce: batch.to_le_bytes().repeat(2).try_into().unwrap(),
+            },
+            conditions: Vec::new(),
+            mutations: (batch * 100..batch * 100 + 100)
+                .map(|id| Mutation::Put {
+                    id,
+                    vector: vec![id as f32; DIMENSIONS],
+                    metadata: BTreeMap::from([
+                        (
+                            "group".into(),
+                            if id % 2 == 0 { "even" } else { "odd" }.into(),
+                        ),
+                        ("route".into(), format!("{id:03}")),
+                    ]),
+                })
+                .collect(),
+        })
+        .unwrap();
+    }
+    db.seal_delta().unwrap();
+    for id in [0, 253, 254, 299] {
+        let query = vec![id as f32; DIMENSIONS];
+        let value = format!("{id:03}");
+        let filter = [("route", value.as_str())];
+        assert_eq!(
+            ids(db
+                .search_selective(&query, 10, db.block_count(), &filter)
+                .unwrap()),
+            ids(db.search_exact(&query, 10, &filter).unwrap()),
+            "seed {seed} id {id}"
+        );
+    }
+    drop(db);
+    let db = open().unwrap();
+    assert_eq!(db.sketch_rebuilds(), 0, "seed {seed}");
+    let query = vec![299.; DIMENSIONS];
+    assert_eq!(
+        ids(db
+            .search_selective(&query, 10, db.block_count(), &[("route", "299")])
+            .unwrap()),
+        ids(db.search_exact(&query, 10, &[("route", "299")]).unwrap()),
+        "seed {seed}"
+    );
+    for filter in [
+        vec![("group", "odd"), ("route", "299")],
+        vec![("group", "even"), ("route", "299")],
+        vec![("route", "missing")],
+    ] {
+        assert_eq!(
+            ids(db
+                .search_selective(&query, 10, db.block_count(), &filter)
+                .unwrap()),
+            ids(db.search_exact(&query, 10, &filter).unwrap()),
+            "seed {seed} filter {filter:?}"
+        );
+    }
 }
 
 #[test]

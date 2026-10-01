@@ -124,7 +124,8 @@ impl ServerConfig {
     ///
     /// - `GLIDER_LISTEN` (default `127.0.0.1:8080`), `GLIDER_API_TOKEN`
     /// - `GLIDER_DIMENSIONS`, `GLIDER_METRIC` (`squared_euclidean`,
-    ///   `manhattan` or `cosine`), optional `GLIDER_RESIDENT_FILTER=key=value`
+    ///   `manhattan` or `cosine`), optional `GLIDER_RESIDENT_FILTER=key=value`,
+    ///   `GLIDER_ROUTED_KEYS=key1,key2` (at most four)
     /// - storage: `GLIDER_DATA_DIR` for a local directory, or
     ///   `GLIDER_S3_BUCKET`, `GLIDER_S3_NAMESPACE`, `GLIDER_S3_REGION`
     ///   (default `us-east-1`), optional `GLIDER_S3_ENDPOINT` and the usual
@@ -153,6 +154,11 @@ impl ServerConfig {
                     .ok_or_else(|| invalid("GLIDER_RESIDENT_FILTER"))
             })
             .transpose()?;
+        let mut routed_keys: Vec<String> = env("GLIDER_ROUTED_KEYS")
+            .map(|value| value.split(',').map(|key| key.trim().to_owned()).collect())
+            .unwrap_or_default();
+        routed_keys.sort();
+        routed_keys.dedup();
         let store = match env("GLIDER_DATA_DIR") {
             Some(directory) => StoreConfig::Local(directory.into()),
             None => StoreConfig::S3 {
@@ -180,7 +186,10 @@ impl ServerConfig {
                 .map_err(|_| invalid("GLIDER_LISTEN"))?,
             store,
             collection: Config { dimensions, metric },
-            options: SegmentedOptions { resident_filter },
+            options: SegmentedOptions {
+                resident_filter,
+                routed_keys,
+            },
             serving,
             limits: Limits {
                 read_priority: Some(std::time::Duration::from_millis(50)),

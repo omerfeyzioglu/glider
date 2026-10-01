@@ -17,6 +17,7 @@ fn config() -> Config {
 fn options() -> SegmentedOptions {
     SegmentedOptions {
         resident_filter: Some(("cohort".into(), "one-percent".into())),
+        routed_keys: Vec::new(),
     }
 }
 

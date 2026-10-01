@@ -20,7 +20,7 @@ disjoint namespace formats:
 - The resident engine (`Database`, `SingleMachine`) keeps every document in
   RAM. It is the small-collection library mode and the exact reference.
 
-The `metadata` object's version names the engine: 1 is resident, 2 and 3 are
+The `metadata` object's version names the engine: 1 is resident, 2, 3 and 4 are
 segmented. Opening a namespace with the other engine, or with a configuration
 or options different from the stored ones, is an `Invalid` error before any
 write; an unknown version is `Corrupt`. Each engine reads every version its
@@ -228,7 +228,18 @@ block order, packed five-bit codes (little-endian bit fields) and full f32
 vectors of rows matching the declared resident predicate. Cosine uses squared
 Euclidean sketch distances and lower bounds on stored unit vectors, preserving
 routing order and the nonnegative-prefix pruning proof. Tombstones have no
-row. A per-pack codebook is between the measured run-local and block-local
+row. When up to four sorted, unique, nonempty routed keys are declared, metadata
+version 4 stores them and packs use `GLSKT002`: the `GLSKT001` layout with
+the new magic followed,
+for each declared key in order, by a u32 dictionary length (at most 254),
+u32-length-prefixed sorted unique UTF-8 values, and one u8 code per put row.
+Codes 0 through 253 index the dictionary, 254 means absent, and 255 means a
+present value beyond the dictionary. Empty routed keys retain metadata versions
+2/3 and byte-identical `GLSKT001` sketches. A routed namespace rebuilds any
+legacy or invalid sketch from authenticated blocks. These fields are derived;
+the root and block records remain authoritative. Seal and reclamation publish
+the frame before the root; interruption leaves the prior root authoritative.
+A per-pack codebook is between the measured run-local and block-local
 granularities. Embedding the sketch gives it exactly its pack's lifetime and
 costs no extra PUT or DELETE: consolidation and pruning reuse packs and their
 sketches unchanged, and reclamation writes a new pack with a new sketch. The
@@ -290,14 +301,15 @@ that buffer. Blocks are authenticated, checked against the sketch's live rows
 and exactly reranked with the live tail on scoped threads. The result is
 approximate. With exactly the declared resident predicate the query scans the
 resident full-precision vectors and matching tail rows and is exact, with no
-block reads. Any other equality conjunction is applied while reranking the
-same routed blocks and the live tail: it reads no extra bytes and is
-approximate, possibly returning fewer than k matches when matches are sparse
-in the routed blocks; it gives no recall guarantee. `search_exact` remains
-the oracle. Segmented metadata version 3 declares
-`SegmentedOptions { resident_filter }` once at namespace creation; version 2
-namespaces have no resident predicate, and opening with different options
-fails. A resident predicate is justified only when its matching rows fit the
+block reads. For other conjunctions, routing considers only live rows whose
+codes match every predicate on a declared routed key or have overflow code
+255; a block with no candidate row is omitted. Unrouted predicates do not
+affect routing. Reranking still applies the full filter to authenticated
+blocks and the live tail, so results match but remain approximate at a bounded
+read budget. `search_exact` remains the oracle. Segmented metadata version 3
+declares the resident predicate, and version 4 additionally declares routed
+keys. Version 2 has neither declaration; opening with different options fails.
+A resident predicate is justified only when its matching rows fit the
 index budget: at M21's 1% cohort it adds about 1.3 MB. Filter-specific
 grouped block copies were rejected because each overwrite would publish a
 second copy and the exact resident posting already meets the query gates.
@@ -379,7 +391,7 @@ digest bind disposable RAM/NVMe cache entries to a pinned root in the
 segmented namespace; `SegmentedServing` serves it, and the declared M21
 250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
 measured 10,000-row independent-arrival boundary and alternatives are in
-`benchmarks/M21.md`. The segmented API defines metadata v2/v3,
+`benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4,
 root/index/log v1 and block v1/v2 in a fresh namespace. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication

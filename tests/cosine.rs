@@ -159,6 +159,7 @@ fn segmented_cosine_oracle_seal_selective_and_resident() {
     let path = temp.path().join("db");
     let options = SegmentedOptions {
         resident_filter: Some(("tag".into(), "hot".into())),
+        routed_keys: Vec::new(),
     };
     let mut rows = rows();
     let open = || {

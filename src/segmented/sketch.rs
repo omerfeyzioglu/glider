@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 const BITS: usize = 5;
 const LEVELS: f64 = 31.;
 const MAGIC: &[u8; 8] = b"GLSKT001";
+const ROUTED_MAGIC: &[u8; 8] = b"GLSKT002";
 
 /// Blocks an unfiltered selective query reads. Routing ranks `blocks`
 /// candidates. In rank order each candidate widens its pack's span, a single
@@ -78,13 +79,21 @@ fn choose<'a>(
 }
 
 /// Namespace-level derived-index declaration, persisted in segmented metadata
-/// version 3. `resident_filter` keeps full-precision vectors for one equality
-/// predicate inside every pack sketch, so that predicate is answered exactly
-/// without block reads. Other filters are post-filtered by the selective reader.
+/// version 3 or 4. `resident_filter` keeps full-precision vectors for one
+/// equality predicate; `routed_keys` selects keys whose values restrict sketch
+/// routing. All filters are checked again while reranking.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SegmentedOptions {
     pub resident_filter: Option<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routed_keys: Vec<String>,
+}
+
+struct RoutedKey {
+    key: String,
+    dictionary: Vec<String>,
+    codes: Vec<u8>,
 }
 
 /// Packs begin with a sketch frame: this versioned magic, the sketch length
@@ -320,6 +329,7 @@ pub(super) struct PackSketch {
     live: Vec<u64>,
     resident_rows: Vec<u32>,
     resident_vectors: Vec<f32>,
+    routed: Vec<RoutedKey>,
 }
 
 fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Result<&'a [u8]> {
@@ -410,7 +420,22 @@ impl PackSketch {
             live: Vec::new(),
             resident_rows: Vec::new(),
             resident_vectors: Vec::new(),
+            routed: options
+                .routed_keys
+                .iter()
+                .map(|key| RoutedKey {
+                    key: key.clone(),
+                    dictionary: Vec::new(),
+                    codes: Vec::new(),
+                })
+                .collect(),
         };
+        for routed in &mut sketch.routed {
+            let values: BTreeSet<_> = puts()
+                .filter_map(|(_, _, metadata)| metadata.get(&routed.key).cloned())
+                .collect();
+            routed.dictionary = values.into_iter().take(254).collect();
+        }
         let mut ids = Vec::new();
         for (reference, block) in blocks {
             let start = ids.len();
@@ -425,6 +450,17 @@ impl PackSketch {
                 };
                 let row = ids.len();
                 ids.push(*id);
+                for routed in &mut sketch.routed {
+                    let code = match metadata.get(&routed.key) {
+                        None => 254,
+                        Some(value) => routed
+                            .dictionary
+                            .binary_search(value)
+                            .map(|index| index as u8)
+                            .unwrap_or(255),
+                    };
+                    routed.codes.push(code);
+                }
                 sketch.codes.resize(sketch.codes.len() + width, 0);
                 let bytes = &mut sketch.codes[row * width..];
                 for (axis, &value) in vector.iter().enumerate() {
@@ -464,7 +500,11 @@ impl PackSketch {
     /// minima/scales f32, ids u64, packed codes, resident rows u32 and vectors.
     pub(super) fn encode(&self, config: Config, options_digest: &[u8; 32]) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(if self.routed.is_empty() {
+            MAGIC
+        } else {
+            ROUTED_MAGIC
+        });
         bytes.extend_from_slice(&(config.dimensions as u32).to_le_bytes());
         bytes.push(match config.metric {
             Metric::SquaredEuclidean => 0,
@@ -500,6 +540,16 @@ impl PackSketch {
         for value in &self.resident_vectors {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        if !self.routed.is_empty() {
+            for routed in &self.routed {
+                bytes.extend_from_slice(&(routed.dictionary.len() as u32).to_le_bytes());
+                for value in &routed.dictionary {
+                    bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                    bytes.extend_from_slice(value.as_bytes());
+                }
+                bytes.extend_from_slice(&routed.codes);
+            }
+        }
         bytes
     }
 
@@ -508,10 +558,16 @@ impl PackSketch {
         config: Config,
         options_digest: &[u8; 32],
         pack: &str,
+        routed_keys: &[String],
     ) -> Result<Self> {
         let invalid = || Error::Corrupt(format!("invalid segmented sketch for {pack}"));
         let input = &mut bytes;
-        if take(input, 8)? != MAGIC
+        if take(input, 8)?
+            != (if routed_keys.is_empty() {
+                MAGIC
+            } else {
+                ROUTED_MAGIC
+            })
             || take_u32(input)? as usize != config.dimensions
             || take(input, 4)?
                 != [
@@ -595,6 +651,38 @@ impl PackSketch {
                 .checked_mul(config.dimensions)
                 .ok_or_else(invalid)?,
         )?;
+        let mut routed = Vec::with_capacity(routed_keys.len());
+        for key in routed_keys {
+            let length = take_u32(input)? as usize;
+            if length > 254 {
+                return Err(invalid());
+            }
+            let mut dictionary: Vec<String> = Vec::with_capacity(length);
+            for _ in 0..length {
+                let value_len = take_u32(input)? as usize;
+                let value = std::str::from_utf8(take(input, value_len)?)
+                    .map_err(|_| Error::Corrupt("invalid routed sketch UTF-8".into()))?;
+                if dictionary
+                    .last()
+                    .is_some_and(|prior| prior.as_str() >= value)
+                {
+                    return Err(invalid());
+                }
+                dictionary.push(value.to_owned());
+            }
+            let codes = take(input, rows)?.to_vec();
+            if codes
+                .iter()
+                .any(|&code| code < 254 && code as usize >= length)
+            {
+                return Err(invalid());
+            }
+            routed.push(RoutedKey {
+                key: key.clone(),
+                dictionary,
+                codes,
+            });
+        }
         if !input.is_empty() {
             return Err(invalid());
         }
@@ -609,6 +697,7 @@ impl PackSketch {
             codes,
             resident_rows,
             resident_vectors,
+            routed,
         })
     }
 
@@ -626,6 +715,17 @@ impl PackSketch {
             + self.live.capacity() * size_of::<u64>()
             + self.resident_rows.capacity() * size_of::<u32>()
             + self.resident_vectors.capacity() * size_of::<f32>()
+            + self.routed.capacity() * size_of::<RoutedKey>()
+            + self
+                .routed
+                .iter()
+                .map(|key| {
+                    key.key.capacity()
+                        + key.codes.capacity()
+                        + key.dictionary.capacity() * size_of::<String>()
+                        + key.dictionary.iter().map(String::capacity).sum::<usize>()
+                })
+                .sum::<usize>()
     }
 
     fn dead_rows(&self) -> usize {
@@ -668,6 +768,9 @@ impl PackSketch {
                     kept_resident += 1;
                 }
                 self.ids.copy(row, kept);
+                for routed in &mut self.routed {
+                    routed.codes[kept] = routed.codes[row];
+                }
                 self.codes
                     .copy_within(row * width..(row + 1) * width, kept * width);
                 kept += 1;
@@ -678,6 +781,10 @@ impl PackSketch {
         self.ids.truncate(kept);
         self.codes.truncate(kept * width);
         self.codes.shrink_to_fit();
+        for routed in &mut self.routed {
+            routed.codes.truncate(kept);
+            routed.codes.shrink_to_fit();
+        }
         self.resident_rows.truncate(kept_resident);
         self.resident_rows.shrink_to_fit();
         self.resident_vectors.truncate(kept_resident * dimensions);
@@ -972,13 +1079,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 "selective search needs a block budget".into(),
             ));
         }
-        let ranked = self.route(query, budget.blocks);
+        let ranked = self.route(query, budget.blocks, filter);
         self.rerank(query, k, &ranked, budget, filter, heap)
     }
 
     /// The `max_blocks` rooted blocks with the smallest minimum approximate
     /// live-row distance, ordered by (distance, pack slot, block).
-    fn route(&self, query: &[f32], max_blocks: usize) -> Vec<(f64, usize, usize)> {
+    fn route(
+        &self,
+        query: &[f32],
+        max_blocks: usize,
+        filter: &[(&str, &str)],
+    ) -> Vec<(f64, usize, usize)> {
         let packs = &self.sketches.packs;
         let (config, query) = (self.config, query);
         let level = |minimum: f32, scale: f32, axis: usize, code: usize| {
@@ -1037,6 +1149,24 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     continue;
                 }
                 let sketch = &packs[slot];
+                let predicates: Vec<_> = sketch
+                    .routed
+                    .iter()
+                    .flat_map(|routed| {
+                        filter.iter().filter(|(key, _)| *key == routed.key).map(
+                            move |(_, value)| {
+                                (
+                                    routed,
+                                    routed
+                                        .dictionary
+                                        .binary_search_by(|item| item.as_str().cmp(value))
+                                        .ok()
+                                        .map(|index| index as u8),
+                                )
+                            },
+                        )
+                    })
+                    .collect();
                 for (axis, row) in table.iter_mut().enumerate() {
                     for (code, distance) in row.iter_mut().enumerate() {
                         *distance = level(sketch.minima[axis], sketch.scales[axis], axis, code);
@@ -1049,7 +1179,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     let limit = threshold(&top);
                     let mut best = f64::INFINITY;
                     for row in block.start..block.end {
-                        if sketch.is_live(row) {
+                        if sketch.is_live(row)
+                            && predicates.iter().all(|(key, wanted)| {
+                                key.codes[row] == 255 || Some(key.codes[row]) == *wanted
+                            })
+                        {
                             if let Some(distance) = approximate_within(
                                 &sketch.codes[row * width..(row + 1) * width],
                                 &table,
@@ -1346,6 +1480,11 @@ mod tests {
             };
             let options = SegmentedOptions {
                 resident_filter: Some(("kind".into(), "resident".into())),
+                routed_keys: if case % 2 == 0 {
+                    Vec::new()
+                } else {
+                    vec!["kind".into()]
+                },
             };
             let pack = format!("pack-property-{case}");
             let blocks: Vec<_> = (0..1 + rng.next() % 3)
@@ -1381,7 +1520,17 @@ mod tests {
             let digest = [case as u8; 32];
             let sketch = PackSketch::build(config, &options, &pack, &pairs).unwrap();
             let bytes = sketch.encode(config, &digest);
-            let decoded = PackSketch::decode(&bytes, config, &digest, &pack).unwrap();
+            assert_eq!(
+                &bytes[..8],
+                if options.routed_keys.is_empty() {
+                    MAGIC
+                } else {
+                    ROUTED_MAGIC
+                },
+                "seed {seed:#x}, case {case}"
+            );
+            let decoded =
+                PackSketch::decode(&bytes, config, &digest, &pack, &options.routed_keys).unwrap();
             assert_eq!(
                 decoded.encode(config, &digest),
                 bytes,
@@ -1399,7 +1548,7 @@ mod tests {
 
             let check_sketch = |candidate: &[u8], mutation: &str| {
                 let outcome = std::panic::catch_unwind(|| {
-                    PackSketch::decode(candidate, config, &digest, &pack)
+                    PackSketch::decode(candidate, config, &digest, &pack, &options.routed_keys)
                 });
                 let decoded = outcome.unwrap_or_else(|_| {
                     panic!("sketch panicked: seed {seed:#x}, case {case}, {mutation}")
@@ -1416,6 +1565,24 @@ mod tests {
                 check_sketch(&bytes[..length], &format!("truncate {length}"));
             }
             check_sketch(&bytes[..bytes.len() - 1], "truncate final byte");
+            if !options.routed_keys.is_empty() {
+                let mut changed = bytes.clone();
+                *changed.last_mut().unwrap() = 253;
+                assert!(
+                    matches!(
+                        PackSketch::decode(&changed, config, &digest, &pack, &options.routed_keys),
+                        Err(Error::Corrupt(_))
+                    ),
+                    "seed {seed:#x}, case {case}"
+                );
+                assert!(
+                    matches!(
+                        PackSketch::decode(&bytes, config, &digest, &pack, &[]),
+                        Err(Error::Corrupt(_))
+                    ),
+                    "seed {seed:#x}, case {case}"
+                );
+            }
             for flip in 0..24 {
                 let mut changed = bytes.clone();
                 let offset = rng.next() as usize % changed.len();
@@ -1469,6 +1636,146 @@ mod tests {
                 "seed {seed:#x}, case {case}"
             );
         }
+    }
+
+    #[test]
+    fn routed_decoder_rejects_dictionary_and_code_damage() {
+        let seed = 0x30_02_u64;
+        let config = Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        };
+        let options = SegmentedOptions {
+            resident_filter: None,
+            routed_keys: vec!["route".into()],
+        };
+        let block = Block::new(
+            config,
+            0,
+            ["a", "b"]
+                .into_iter()
+                .enumerate()
+                .map(|(id, value)| BlockRecord {
+                    sequence: 1,
+                    mutation: Mutation::Put {
+                        id: id as u64,
+                        vector: vec![id as f32, 1.],
+                        metadata: BTreeMap::from([("route".into(), value.into())]),
+                    },
+                })
+                .collect(),
+        )
+        .unwrap();
+        let pack = "routed-damage";
+        let (_, refs) = encode_pack(pack, config, std::slice::from_ref(&block)).unwrap();
+        let digest = [3; 32];
+        let sketch = PackSketch::build(config, &options, pack, &[(&refs[0], &block)]).unwrap();
+        let bytes = sketch.encode(config, &digest);
+        let start = bytes.len() - 16;
+        assert_eq!(
+            &bytes[start..],
+            &[2, 0, 0, 0, 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'b', 0, 1],
+            "seed {seed}"
+        );
+        let mut damaged = bytes.clone();
+        damaged[start + 13] = b'a'; // duplicate dictionary value
+        assert!(
+            matches!(
+                PackSketch::decode(&damaged, config, &digest, pack, &options.routed_keys),
+                Err(Error::Corrupt(_))
+            ),
+            "seed {seed}"
+        );
+        let mut damaged = bytes.clone();
+        damaged[start + 8] = 0xff; // invalid UTF-8
+        assert!(
+            matches!(
+                PackSketch::decode(&damaged, config, &digest, pack, &options.routed_keys),
+                Err(Error::Corrupt(_))
+            ),
+            "seed {seed}"
+        );
+        let mut damaged = bytes.clone();
+        damaged[start + 15] = 2; // invalid dictionary index
+        assert!(
+            matches!(
+                PackSketch::decode(&damaged, config, &digest, pack, &options.routed_keys),
+                Err(Error::Corrupt(_))
+            ),
+            "seed {seed}"
+        );
+        let mut damaged = bytes.clone();
+        damaged[start..start + 4].copy_from_slice(&255_u32.to_le_bytes());
+        assert!(
+            matches!(
+                PackSketch::decode(&damaged, config, &digest, pack, &options.routed_keys),
+                Err(Error::Corrupt(_))
+            ),
+            "seed {seed}"
+        );
+        for length in start..bytes.len() {
+            assert!(
+                matches!(
+                    PackSketch::decode(
+                        &bytes[..length],
+                        config,
+                        &digest,
+                        pack,
+                        &options.routed_keys
+                    ),
+                    Err(Error::Corrupt(_))
+                ),
+                "seed {seed} length {length}"
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_options_keep_legacy_encoded_bytes() {
+        let options = SegmentedOptions {
+            resident_filter: Some(("tag".into(), "hot".into())),
+            routed_keys: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_vec(&options).unwrap(),
+            br#"{"resident_filter":["tag","hot"]}"#
+        );
+        let config = Config {
+            dimensions: 1,
+            metric: Metric::SquaredEuclidean,
+        };
+        let block = Block::new(
+            config,
+            0,
+            vec![BlockRecord {
+                sequence: 1,
+                mutation: Mutation::Put {
+                    id: 7,
+                    vector: vec![2.],
+                    metadata: BTreeMap::new(),
+                },
+            }],
+        )
+        .unwrap();
+        let (_, refs) = encode_pack("legacy", config, std::slice::from_ref(&block)).unwrap();
+        let sketch = PackSketch::build(config, &options, "legacy", &[(&refs[0], &block)]).unwrap();
+        let bytes = sketch.encode(config, &[0; 32]);
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(MAGIC);
+        legacy.extend_from_slice(&1_u32.to_le_bytes()); // dimensions
+        legacy.extend_from_slice(&[0, 5, 0, 0]); // metric, bits, reserved
+        legacy.extend_from_slice(&[0; 32]); // options digest
+        for count in [1_u32, 1, 0, 6] {
+            legacy.extend_from_slice(&count.to_le_bytes());
+        }
+        legacy.extend_from_slice(b"legacy");
+        legacy.extend_from_slice(&digest_bytes(&refs[0].sha256).unwrap());
+        legacy.extend_from_slice(&1_u32.to_le_bytes()); // block row count
+        legacy.extend_from_slice(&2_f32.to_le_bytes()); // minimum
+        legacy.extend_from_slice(&1_f32.to_le_bytes()); // scale
+        legacy.extend_from_slice(&7_u64.to_le_bytes()); // ID
+        legacy.push(0); // five-bit code
+        assert_eq!(bytes, legacy, "GLSKT001 bytes changed");
     }
 
     #[test]
@@ -1637,7 +1944,7 @@ mod tests {
                     brute.sort_by(|a, b| a.0.total_cmp(&b.0).then((a.1, a.2).cmp(&(b.1, b.2))));
                     for blocks in [1, 3, 8] {
                         let expected: Vec<_> = brute.iter().copied().take(blocks).collect();
-                        assert_eq!(db.route(&query, blocks), expected, "seed {seed}");
+                        assert_eq!(db.route(&query, blocks, &[]), expected, "seed {seed}");
                     }
                 }
             }

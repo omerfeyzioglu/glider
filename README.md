@@ -48,14 +48,15 @@ For S3 or MinIO, replace `GLIDER_DATA_DIR` with `GLIDER_S3_BUCKET`,
 `GLIDER_S3_NAMESPACE`, optional `GLIDER_S3_REGION`/`GLIDER_S3_ENDPOINT` and the
 `AWS_*` credentials. Other settings: `GLIDER_LISTEN` (default
 `127.0.0.1:8080`), `GLIDER_METRIC`, `GLIDER_API_TOKEN` (bearer auth),
-`GLIDER_CACHE_DIR`, `GLIDER_CACHE_BYTES`.
+`GLIDER_CACHE_DIR`, `GLIDER_CACHE_BYTES`, and `GLIDER_ROUTED_KEYS` (up to four
+sorted, unique, nonempty comma-separated equality-filter keys, fixed at namespace creation).
 
 API (JSON except `/metrics`):
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /v1/write` | Atomic batch `{"upsert":[…],"delete":[ids],"request_id":{…}?}`; returns `sequence` and the `request_id` to retry with |
-| `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?}`; unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, other equality filters are applied to the routed blocks (approximate, may return fewer than k) |
+| `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?}`; unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, keys in `GLIDER_ROUTED_KEYS` restrict sketch routing, and all other equality predicates are checked during reranking (approximate, may return fewer than k) |
 | `GET /v1/points/{id}` | Current vector and metadata, or 404 |
 | `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
 | `GET /v1/status`, `GET /healthz` | Sequence and queue state; liveness |
@@ -376,7 +377,7 @@ immutable object-storage packs read through a bounded RAM/NVMe block cache.
 Unfiltered queries are approximate: they read a fixed number of routed blocks
 and rerank them exactly. The one equality predicate declared at namespace
 creation is answered exactly from full-precision vectors kept in the sketches;
-other equality filters are applied to the routed blocks (approximate, possibly fewer than k results), and `search_exact` remains the oracle. Run it
+declared routed keys restrict candidate rows before block ranking; all filters are checked during reranking (approximate, possibly fewer than k results), and `search_exact` remains the oracle. Run it
 behind `admission::Service`, which executes seal, consolidation, reclamation
 and cleanup in bounded units while no command is queued.
 
@@ -386,6 +387,7 @@ use glider::segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOpti
 let config = Config { dimensions: 128, metric: Metric::SquaredEuclidean };
 let declared = SegmentedOptions {
     resident_filter: Some(("cohort".into(), "one-percent".into())),
+    routed_keys: vec!["half".into(), "pct".into()],
 };
 let engine = SegmentedServing::open(
     store, config, declared, SegmentedServingOptions::m21("block-cache".into()))?;
