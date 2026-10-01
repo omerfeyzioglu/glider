@@ -657,6 +657,9 @@ struct Location {
 
 struct PackStats {
     payload_len: usize,
+    /// Smallest referenced block offset: the pack's data region starts no
+    /// earlier, after the embedded sketch frame.
+    data_start: usize,
     estimated_live_bytes: usize,
     live_rows: usize,
     locations: Vec<(usize, usize)>,
@@ -2029,6 +2032,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 }
                 let entry = packs.entry(reference.object.clone()).or_insert(PackStats {
                     payload_len: reference.payload_len,
+                    data_start: reference.offset,
                     estimated_live_bytes: 0,
                     live_rows: 0,
                     locations: Vec::new(),
@@ -2042,6 +2046,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 entry.estimated_live_bytes +=
                     ((reference.length as u128 * live as u128) / reference.rows as u128) as usize;
                 entry.live_rows += live;
+                entry.data_start = entry.data_start.min(reference.offset);
                 entry.locations.push((run, block));
                 entry.has_empty_block |= live == 0;
             }
@@ -2052,17 +2057,20 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let mut candidates: Vec<_> = packs
             .into_iter()
             .filter(|(_, pack)| {
+                // Garbage is measured over block data only; the sketch frame
+                // is not garbage, or a fully live pack could be reclaimed
+                // forever.
+                let data = pack.payload_len - pack.data_start;
                 !pack.has_empty_block
-                    && pack.estimated_live_bytes <= pack.payload_len / 2
-                    && pack.payload_len.saturating_sub(pack.estimated_live_bytes)
-                        >= self.reclaim_min_garbage
+                    && pack.estimated_live_bytes <= data / 2
+                    && data.saturating_sub(pack.estimated_live_bytes) >= self.reclaim_min_garbage
             })
             .collect();
+        let garbage = |pack: &PackStats| {
+            (pack.payload_len - pack.data_start).saturating_sub(pack.estimated_live_bytes)
+        };
         candidates.sort_by(|(a_key, a), (b_key, b)| {
-            b.payload_len
-                .saturating_sub(b.estimated_live_bytes)
-                .cmp(&a.payload_len.saturating_sub(a.estimated_live_bytes))
-                .then_with(|| a_key.cmp(b_key))
+            garbage(b).cmp(&garbage(a)).then_with(|| a_key.cmp(b_key))
         });
         // Live rows are capped too: reclaimed blocks are decoded in memory
         // until the new pack is written.
@@ -2087,6 +2095,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         let pack = PackStats {
             payload_len: 0,
+            data_start: 0,
             estimated_live_bytes: live,
             live_rows: rows,
             locations,
