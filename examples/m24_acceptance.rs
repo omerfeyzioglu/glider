@@ -266,7 +266,11 @@ fn stats(mut values: Vec<f64>) -> Value {
 }
 
 fn serving_options(cache: Option<PathBuf>) -> SegmentedServingOptions {
-    let mut options = SegmentedServingOptions::m21(PathBuf::new());
+    let mut options = if rows() > 250_000 {
+        SegmentedServingOptions::m31(PathBuf::new())
+    } else {
+        SegmentedServingOptions::m21(PathBuf::new())
+    };
     options.cache = cache.map(|directory| (directory, 0, 256 * 1024 * 1024));
     options
 }

@@ -32,7 +32,7 @@ const MAX_PACK_BLOCKS: usize = 12;
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
 /// Two run indexes are merged only while their sum stays within this bound,
 /// which caps a consolidation unit's transient memory and time.
-const MAX_CONSOLIDATION_INDEX_BYTES: usize = 512 * 1024;
+const MAX_CONSOLIDATION_INDEX_BYTES: usize = 2 * 1024 * 1024;
 const INDEX_MAGIC: &[u8; 8] = b"GLRIDX01";
 const MAX_TAIL_OBJECTS: usize = 64;
 
@@ -1883,7 +1883,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// larger than the newer index's size tier. The new index
     /// reuses authenticated immutable blocks and drops block references with
     /// no surviving ID. Physical packs with mixed live/stale rows remain.
-    /// The <=1 MiB index cap bounds this synchronous maintenance step; larger
+    /// The <=2 MiB index cap bounds this synchronous maintenance step; larger
     /// data reclamation needs a separate staged protocol.
     pub fn consolidate_runs_step(&mut self) -> Result<bool> {
         if self.poisoned {

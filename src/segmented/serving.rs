@@ -50,6 +50,15 @@ impl SegmentedServingOptions {
             query_threads: 4,
         }
     }
+
+    /// The M31 1,000,000-row envelope: the M21 profile with a sketch budget
+    /// for about 90 bytes of resident routing state per row (192 MiB RSS).
+    pub fn m31(cache_directory: PathBuf) -> Self {
+        Self {
+            max_index_bytes: 128 * 1024 * 1024,
+            ..Self::m21(cache_directory)
+        }
+    }
 }
 
 /// Completed maintenance units, per handle.
