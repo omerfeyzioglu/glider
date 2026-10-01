@@ -873,6 +873,22 @@ batches to amortize maintenance; small batches, larger rows or other arrival
 rates require new capacity and write-amplification measurements. Operator steps
 are in `docs/SERVING.md` and `docs/RECOVERY.md`.
 
+### HTTP service
+
+`glider-server` (feature `server`) exposes one segmented collection over
+HTTP/JSON through an axum router in front of `admission::Service`; blocking
+ticket waits run on Tokio's blocking pool. Every write carries a request ID:
+a client-supplied ID makes the request safely retryable, otherwise the server
+issues one at the current sequence and returns it, so an uncertain response
+can be resolved through the request lookup. HTTP adds no durability step:
+the response is sent only after the admission worker reports durable
+publication. Overload maps to 429, invalid input to 400, request-ID misuse to
+409, corruption to 500 and an unavailable or poisoned engine to 503.
+SIGINT/SIGTERM stops accepting connections, drains queued commands and
+releases the ownership claim; a failed worker keeps the claim for the
+documented recovery procedure. An optional static bearer token guards every
+endpoint except `/healthz`.
+
 ## Bounded concurrent admission (M16)
 
 `admission::Service` moves one engine (`SingleMachine` or `SegmentedServing`,

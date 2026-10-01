@@ -18,6 +18,8 @@ pub trait Engine: Send + 'static {
     fn revision(&self, id: u64) -> Revision;
     fn request_id(&self) -> crate::Result<RequestId>;
     fn lookup_request(&self, id: RequestId) -> crate::Result<Lookup>;
+    /// Current document for an ID, or `None` if absent or deleted.
+    fn get(&self, id: u64) -> crate::Result<Option<crate::streaming::OwnedDocument>>;
     fn query(
         &mut self,
         query: &[f32],
@@ -60,6 +62,16 @@ impl<S: ObjectStore + Send + 'static> Engine for SingleMachine<S> {
     }
     fn lookup_request(&self, id: RequestId) -> crate::Result<Lookup> {
         SingleMachine::lookup_request(self, id)
+    }
+    fn get(&self, id: u64) -> crate::Result<Option<crate::streaming::OwnedDocument>> {
+        Ok(
+            SingleMachine::get(self, id).map(|(vector, metadata)| {
+                crate::streaming::OwnedDocument {
+                    vector: vector.to_vec(),
+                    metadata: metadata.clone(),
+                }
+            }),
+        )
     }
     fn query(
         &mut self,
@@ -355,6 +367,9 @@ impl<E: Engine> Client<E> {
                 })
             })
         })
+    }
+    pub fn get(&self, id: u64) -> Result<Ticket<Option<crate::streaming::OwnedDocument>>> {
+        self.submit(true, 16, move || Ok(move |db: &mut E| db.get(id)))
     }
     pub fn lookup(&self, id: RequestId) -> Result<Ticket<Lookup>> {
         self.submit(false, 24, move || {

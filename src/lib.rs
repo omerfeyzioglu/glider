@@ -23,6 +23,10 @@ pub mod recovery;
 pub mod retry;
 #[cfg(any(test, feature = "experimental-segmented"))]
 pub mod segmented;
+// Unit-test builds give `LocalStore` a non-`Send` fault hook; the server
+// is exercised by its integration test instead.
+#[cfg(all(feature = "server", not(test)))]
+pub mod server;
 pub mod serving;
 pub mod store;
 pub mod streaming;

@@ -9,8 +9,49 @@ optional experimental search path; supported serving defaults to exact search.
 
 Authoritative data uses versioned logs and snapshots. In-memory state and derived
 indexes are rebuildable; performance changes must preserve durability and recovery.
-The next target is larger-than-RAM collections on one machine with bounded NVMe
-and RAM caches. That cache architecture is planned, not yet implemented.
+Collections larger than RAM are served from S3 through bounded RAM and NVMe
+caches; the 250,000-vector envelope is accepted (see `benchmarks/M24.md`).
+
+## Quickstart: HTTP server
+
+`glider-server` serves one collection. Try it on a local directory:
+
+```sh
+cargo build --release --features server --bin glider-server
+GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
+  target/release/glider-server
+```
+
+```sh
+curl -XPOST localhost:8080/v1/write -H 'content-type: application/json' \
+  -d '{"upsert":[{"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},{"id":2,"vector":[1,1,1]}]}'
+curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
+  -d '{"vector":[1,1,0.9],"k":2}'
+curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
+  -d '{"vector":[0,0,0],"k":5,"filter":{"color":"red"}}'
+curl localhost:8080/v1/points/1
+```
+
+For S3 or MinIO, replace `GLIDER_DATA_DIR` with `GLIDER_S3_BUCKET`,
+`GLIDER_S3_NAMESPACE`, optional `GLIDER_S3_REGION`/`GLIDER_S3_ENDPOINT` and the
+`AWS_*` credentials. Other settings: `GLIDER_LISTEN` (default
+`127.0.0.1:8080`), `GLIDER_METRIC`, `GLIDER_API_TOKEN` (bearer auth),
+`GLIDER_CACHE_DIR`, `GLIDER_CACHE_BYTES`.
+
+API (JSON):
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/write` | Atomic batch `{"upsert":[…],"delete":[ids],"request_id":{…}?}`; returns `sequence` and the `request_id` to retry with |
+| `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?}`; unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, other filters are rejected |
+| `GET /v1/points/{id}` | Current vector and metadata, or 404 |
+| `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
+| `GET /v1/status`, `GET /healthz` | Sequence and queue state; liveness |
+
+A write is acknowledged only after durable publication; resend an uncertain
+write with the same `request_id` to get its original outcome. SIGINT/SIGTERM
+drains queued work and releases the collection's ownership claim; after a
+crash, follow [the recovery procedure](docs/RECOVERY.md) before restarting.
 
 - [Design](DESIGN.md): current architecture, guarantees and target direction.
 - [Roadmap](ROADMAP.md): milestone status, acceptance criteria and next work.
