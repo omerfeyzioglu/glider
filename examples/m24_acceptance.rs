@@ -431,6 +431,9 @@ impl Engine for Profiled {
     fn lookup_request(&self, id: RequestId) -> glider::Result<glider::retry::Lookup> {
         self.inner.lookup_request(id)
     }
+    fn get(&self, id: u64) -> glider::Result<Option<glider::streaming::OwnedDocument>> {
+        self.inner.get(id)
+    }
     fn query(
         &mut self,
         query: &[f32],

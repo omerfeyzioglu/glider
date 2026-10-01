@@ -328,6 +328,9 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
     fn lookup_request(&self, id: RequestId) -> Result<Lookup> {
         self.db.lookup_request(id)
     }
+    fn get(&self, id: u64) -> Result<Option<crate::streaming::OwnedDocument>> {
+        self.db.get(id)
+    }
     /// Unfiltered queries are approximate within the sketch/block budget; the
     /// declared resident predicate is exact. Other filters are rejected.
     fn query(&mut self, query: &[f32], k: usize, filter: &[(&str, &str)]) -> Result<Vec<Neighbor>> {
