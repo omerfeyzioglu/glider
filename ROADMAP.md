@@ -852,8 +852,8 @@ exact search as the quality oracle.
 Status: next.
 
 Steps:
-- Run the segmented MinIO fault suite (`tools/test_s3.py --segmented-only`)
-  in CI; it currently runs only by hand.
+- Extend the segmented MinIO fault test, which CI runs but which covers only
+  seal publication, to consolidation, pruning, reclamation and cleanup.
 - Add a seeded crash-point test: inject an uncertain or failed create/remove
   at every publication step of seal, consolidation, pruning, reclamation and
   cleanup, reopen, and compare against an in-memory model and exact search.
@@ -863,8 +863,8 @@ Steps:
 - Split CI into a fast required job (format, Clippy, unit/integration tests)
   and a MinIO job; keep runtime within the current ~6 minutes.
 
-Done when: CI runs the fault suite, crash-point matrix and decoder tests on
-every PR, and each injected failure either recovers the acknowledged state
+Done when: CI runs the extended fault test, crash-point matrix and decoder
+tests on every PR, and each injected failure either recovers the acknowledged state
 exactly or fails closed.
 
 ## M26 — One engine and a stable library API
