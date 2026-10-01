@@ -140,7 +140,10 @@ impl ServerConfig {
     ///   (default `us-east-1`), optional `GLIDER_S3_ENDPOINT` and the usual
     ///   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`
     /// - `GLIDER_CACHE_DIR` (default `glider-cache`), `GLIDER_CACHE_BYTES`
-    ///   (NVMe cache, default 256 MiB)
+    ///   (NVMe cache, default 256 MiB, which idle warm-up fills with the
+    ///   namespace), `GLIDER_LOCAL_BLOCKS` (cached blocks a query may rerank
+    ///   locally beyond its remote budget, default 24; 0 makes results
+    ///   independent of cache contents)
     /// - `GLIDER_LEASE_SECONDS` (default 10): writer lease duration
     pub fn from_env() -> crate::Result<Self> {
         let invalid = |name: &str| Error::Invalid(format!("invalid {name}"));
@@ -188,6 +191,10 @@ impl ServerConfig {
             if let Some(cache) = serving.cache.as_mut() {
                 cache.2 = bytes;
             }
+        }
+        if let Some(blocks) = env("GLIDER_LOCAL_BLOCKS") {
+            serving.read_budget.local_blocks =
+                blocks.parse().map_err(|_| invalid("GLIDER_LOCAL_BLOCKS"))?;
         }
         Ok(Self {
             listen: env("GLIDER_LISTEN")
@@ -752,18 +759,53 @@ async fn status(
     authorize(&state, &headers)?;
     let client = state.client.clone();
     blocking(move || {
-        let sequence = client.observe(0)?.wait()?.value.revision.boundary;
+        let engine = client.metrics()?.wait()?.value;
         let queue = client.status();
         Ok(Json(json!({
-            "sequence": sequence,
+            "sequence": engine.sequence,
             "queued_commands": queue.commands,
             "queued_bytes": queue.bytes,
             "closed": queue.closed,
             "failed": queue.failed,
             "maintenance_errors": queue.maintenance_errors,
+            "cache": cache_status(&engine),
         })))
     })
     .await
+}
+
+/// NVMe warm-up state from the engine's cache samples: `disabled` without an
+/// NVMe tier, `cold` before the first warm-up unit, `warming` during a pass,
+/// `warm` when the tier holds every block of the selected root, and
+/// `partial` when a pass ended with part of the root uncached (the limit is
+/// below `namespace_bytes`). Queries never depend on it for correctness.
+fn cache_status(engine: &admission::EngineMetrics) -> Value {
+    let sample = |name: &str| {
+        engine
+            .samples
+            .iter()
+            .find(|(sample, _)| *sample == name)
+            .map_or(0, |&(_, value)| value)
+    };
+    let (limit, namespace, warm) = (
+        sample("glider_cache_nvme_limit_bytes"),
+        sample("glider_cache_namespace_bytes"),
+        sample("glider_cache_warm_bytes"),
+    );
+    let state = match (limit, sample("glider_cache_warm_complete"), namespace) {
+        (0, _, _) => "disabled",
+        (_, 0, 0) => "cold",
+        (_, 0, _) => "warming",
+        _ if warm >= namespace => "warm",
+        _ => "partial",
+    };
+    json!({
+        "state": state,
+        "nvme_bytes": sample("glider_cache_nvme_bytes"),
+        "nvme_limit_bytes": limit,
+        "namespace_bytes": namespace,
+        "warm_bytes": warm,
+    })
 }
 
 async fn health(State(state): State<AppState>) -> StatusCode {

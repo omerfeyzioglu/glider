@@ -1021,8 +1021,11 @@ and the M31 load meets warm p95 <=50 ms.
 
 ## M35 — Local SSD as a namespace cache
 
-Status: planned. The NVMe cache holds only blocks queries already read
-(45 MiB of 256 MiB at 1M), and the read budget charges cached blocks too.
+Status: implemented, not yet measured. The NVMe cache held only blocks
+queries already read (45 MiB of 256 MiB at 1M), and the read budget charged
+cached blocks too. Cached candidates are now reranked under a separate local
+block limit (`GLIDER_LOCAL_BLOCKS`, default 24), idle warm-up fills the cache,
+and status/metrics report warm state; the warm 1M acceptance run remains.
 
 Steps:
 - Charge the read budget only for remote reads; cached blocks are free.

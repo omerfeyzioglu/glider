@@ -256,6 +256,20 @@ at 5.30 PUT/s because maintenance published fewer packs and roots; the M27
 target of 4 PUT/s needs batching by clients or a different arrival pattern,
 not more committer work. [Evidence](../benchmarks/M27.md).
 
+## 2026-10-01 — Remote read budget charges only uncached blocks
+
+At 1,000,000 SIFT rows the 8-request budget limited update-wave recall to
+0.876 while 12 uniformly chosen blocks reached 0.990, and the 256 MiB NVMe
+cache held only the 45 MiB that queries had read. The read budget therefore
+stopped being independent of cache contents: cached candidates are reranked
+locally under a separate local block limit, the remote request and byte
+limits apply only to uncached blocks, and an empty cache keeps the previous
+cold choice exactly. An idle warm-up unit copies the selected root into the
+NVMe tier, one authenticated range read at a time, without exceeding the
+cache limit. Warm quality now depends on the cache; correctness does not.
+The warm 1M recall and latency gates are not yet measured.
+[Evidence](../benchmarks/M31.md).
+
 ## 2026-10-01 — Automatic takeover with permanent fences
 
 A killed `glider-server` left its permanent ownership claim, so every crash

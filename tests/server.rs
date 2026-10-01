@@ -2,10 +2,7 @@
 //! End to end over HTTP: write, query, get, delete, then a restart on the
 //! same directory after graceful shutdown released the writer lease.
 
-use glider::{
-    segmented::SegmentedServingOptions,
-    server::{router, ServerConfig, StoreConfig},
-};
+use glider::server::{router, ServerConfig, StoreConfig};
 use std::io::{Read, Write};
 
 fn config(directory: &std::path::Path) -> ServerConfig {
@@ -13,10 +10,14 @@ fn config(directory: &std::path::Path) -> ServerConfig {
     std::env::set_var("GLIDER_DIMENSIONS", "3");
     std::env::set_var("GLIDER_RESIDENT_FILTER", "color=red");
     std::env::set_var("GLIDER_DATA_DIR", "unused");
+    std::env::set_var("GLIDER_CACHE_BYTES", "1048576");
+    std::env::set_var("GLIDER_LOCAL_BLOCKS", "32");
     let mut config = ServerConfig::from_env().unwrap();
     assert!(matches!(config.store, StoreConfig::Local(_)));
+    assert_eq!(config.serving.read_budget.local_blocks, 32);
+    assert_eq!(config.serving.cache.as_ref().unwrap().2, 1_048_576);
     config.store = StoreConfig::Local(directory.join("data"));
-    config.serving = SegmentedServingOptions::m31(directory.join("cache"));
+    config.serving.cache = Some((directory.join("cache"), 0, 1_048_576));
     config.token = Some("secret".into());
     config.lease = std::time::Duration::from_secs(60);
     config
@@ -150,6 +151,14 @@ fn http_service_writes_queries_and_survives_restart() {
     );
     assert!(body.contains("glider_cache_nvme_entries "), "{body}");
     assert!(body.contains("glider_sketch_index_bytes "), "{body}");
+    assert!(body.contains("glider_cache_warm_complete "), "{body}");
+    assert!(
+        body.contains("glider_cache_nvme_limit_bytes 1048576\n"),
+        "{body}"
+    );
+    let (_, body) = call(address, "GET", "/v1/status", "", "secret");
+    assert!(body.contains(r#""nvme_limit_bytes":1048576"#), "{body}");
+    assert!(body.contains(r#""state":""#), "{body}");
     drop(runtime);
     service
         .shutdown(glider::admission::Shutdown::Drain)

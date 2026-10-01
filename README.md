@@ -48,9 +48,21 @@ For S3 or MinIO, replace `GLIDER_DATA_DIR` with `GLIDER_S3_BUCKET`,
 `GLIDER_S3_NAMESPACE`, optional `GLIDER_S3_REGION`/`GLIDER_S3_ENDPOINT` and the
 `AWS_*` credentials. Other settings: `GLIDER_LISTEN` (default
 `127.0.0.1:8080`), `GLIDER_METRIC`, `GLIDER_API_TOKEN` (bearer auth),
-`GLIDER_CACHE_DIR`, `GLIDER_CACHE_BYTES`, `GLIDER_LEASE_SECONDS` (writer lease,
-default 10) and `GLIDER_ROUTED_KEYS` (up to four sorted, unique, nonempty
-comma-separated equality-filter keys, fixed at namespace creation).
+`GLIDER_LEASE_SECONDS` (writer lease, default 10), `GLIDER_ROUTED_KEYS` (up to four sorted, unique, nonempty comma-separated
+equality-filter keys, fixed at namespace creation), and the local cache:
+
+- `GLIDER_CACHE_DIR` (default `glider-cache`) and `GLIDER_CACHE_BYTES`
+  (default 256 MiB): a disposable block cache on any local disk
+  (instance-store NVMe, EBS or a container volume). While idle the server
+  copies the namespace into it, without exceeding the limit. Set the limit
+  above `cache.namespace_bytes` from `/v1/status` to keep the whole namespace
+  local.
+- `GLIDER_LOCAL_BLOCKS` (default 24): cached blocks a query may rerank
+  locally in addition to its remote budget (12 candidates, 8 range requests,
+  1 MiB), which is charged only for uncached blocks. A warm cache therefore
+  raises recall and avoids remote reads; with an empty or lost cache queries
+  use the remote budget alone. `0` makes results independent of cache
+  contents. The cache is never needed for correctness.
 
 API (JSON except `/metrics`):
 
@@ -60,7 +72,7 @@ API (JSON except `/metrics`):
 | `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?}`; unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, keys in `GLIDER_ROUTED_KEYS` restrict sketch routing, and all other equality predicates are checked during reranking (approximate, may return fewer than k) |
 | `GET /v1/points/{id}` | Current vector and metadata, or 404 |
 | `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
-| `GET /v1/status`, `GET /healthz` | Sequence and queue state; liveness |
+| `GET /v1/status`, `GET /healthz` | Sequence, queue state and cache warm-up (`cache.state`: `disabled`, `cold`, `warming`, `warm` or `partial`, with cached and namespace bytes); liveness |
 | `GET /metrics` | Prometheus text metrics for requests, admission, maintenance, cache and sketches; no bearer token required |
 
 A write is acknowledged only after durable publication; resend an uncertain

@@ -149,6 +149,7 @@ fn run(args: &[String], routed: bool) -> Result<Value> {
                 blocks: serving_budget.blocks * 2,
                 requests: serving_budget.requests * 2,
                 bytes: serving_budget.bytes * 2,
+                local_blocks: serving_budget.local_blocks * 2,
             },
         ),
         (
@@ -157,6 +158,7 @@ fn run(args: &[String], routed: bool) -> Result<Value> {
                 blocks: serving_budget.blocks * 4,
                 requests: serving_budget.requests * 4,
                 bytes: serving_budget.bytes * 4,
+                local_blocks: serving_budget.local_blocks * 4,
             },
         ),
     ];
