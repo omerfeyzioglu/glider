@@ -232,6 +232,9 @@ pub(super) fn metadata_matches(entries: u32, mut bytes: &[u8], filter: &[(&str, 
     if filter.is_empty() {
         return true;
     }
+    let mut distinct: Vec<_> = filter.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
     let mut matched = 0;
     for _ in 0..entries {
         let mut text = || {
@@ -241,16 +244,13 @@ pub(super) fn metadata_matches(entries: u32, mut bytes: &[u8], filter: &[(&str, 
             value
         };
         let (key, value) = (text(), text());
-        matched += filter
+        matched += distinct
             .iter()
             .filter(|(k, v)| k.as_bytes() == key && v.as_bytes() == value)
             .count();
     }
-    // Keys are unique in a record, so every predicate matched exactly once
-    // only if the count equals the number of distinct predicates.
-    let mut distinct: Vec<_> = filter.to_vec();
-    distinct.sort_unstable();
-    distinct.dedup();
+    // Keys are unique in a record, so every distinct predicate matched
+    // exactly once only if the count equals their number.
     matched == distinct.len()
 }
 
