@@ -66,6 +66,35 @@ write with the same `request_id` to get its original outcome. SIGINT/SIGTERM
 drains queued work and releases the collection's ownership claim; after a
 crash, follow [the recovery procedure](docs/RECOVERY.md) before restarting.
 
+## Operations
+
+`glider-admin` uses the server's `GLIDER_*` storage, collection and cache
+settings. Stop the server cleanly before running `status` or `backup` against
+its namespace; the ownership claim makes a concurrent command fail with an
+"already has an owner" error. Each command prints one JSON object. Backup destinations must be
+empty and separate from the source. Local paths and `s3://bucket/prefix`
+locations are accepted; S3 uses the configured region, endpoint and AWS
+credentials.
+
+```sh
+cargo build --release --features server --bin glider-admin
+GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
+  target/release/glider-admin status
+GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
+  target/release/glider-admin backup ./backup
+GLIDER_DATA_DIR=./restored GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
+  target/release/glider-admin restore ./backup
+python3 tools/drills.py --seed 29
+```
+
+`restore` copies a backup or stopped crashed namespace into a fresh empty
+destination, validates it, and releases its ownership claim. Never reuse a
+failed destination. After a crash, keep the old namespace quarantined and
+follow [the recovery procedure](docs/RECOVERY.md) before directing clients to
+the restored one. The local drill builds release binaries offline, kills the
+server during writes, tests cache loss, then backs up and restores the
+acknowledged state; it reports PASS/FAIL with its seed.
+
 - [Design](DESIGN.md): current architecture, guarantees and target direction.
 - [Roadmap](ROADMAP.md): milestone status, acceptance criteria and next work.
 - [Serving guide](docs/SERVING.md): validated workloads and operating procedures.

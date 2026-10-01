@@ -1,0 +1,172 @@
+//! Offline administration for one segmented collection.
+use glider::{
+    segmented::SegmentedServing,
+    server::{stage_segmented_namespace, ServerConfig, StoreConfig},
+    store::ObjectStore,
+    Error, Result,
+};
+use serde_json::{json, Value};
+use std::{env, path::Path};
+
+fn location(value: &str, config: &ServerConfig) -> Result<StoreConfig> {
+    if let Some(remote) = value.strip_prefix("s3://") {
+        let (bucket, namespace) = remote
+            .split_once('/')
+            .ok_or_else(|| Error::Invalid("S3 location must be s3://bucket/prefix".into()))?;
+        if bucket.is_empty() || namespace.is_empty() {
+            return Err(Error::Invalid(
+                "S3 bucket and prefix must be nonempty".into(),
+            ));
+        }
+        let (region, endpoint) = match &config.store {
+            StoreConfig::S3 {
+                region, endpoint, ..
+            } => (region.clone(), endpoint.clone()),
+            _ => (
+                env::var("GLIDER_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
+                env::var("GLIDER_S3_ENDPOINT").ok(),
+            ),
+        };
+        Ok(StoreConfig::S3 {
+            bucket: bucket.into(),
+            namespace: namespace.into(),
+            region,
+            endpoint,
+        })
+    } else {
+        Ok(StoreConfig::Local(value.into()))
+    }
+}
+
+fn disjoint(a: &StoreConfig, b: &StoreConfig) -> Result<()> {
+    let overlaps = match (a, b) {
+        (StoreConfig::Local(a), StoreConfig::Local(b)) => {
+            let a = std::path::absolute(a)?;
+            let b = std::path::absolute(b)?;
+            a.starts_with(&b) || b.starts_with(&a)
+        }
+        (
+            StoreConfig::S3 {
+                bucket: a,
+                namespace: x,
+                ..
+            },
+            StoreConfig::S3 {
+                bucket: b,
+                namespace: y,
+                ..
+            },
+        ) => {
+            a == b && (x == y || x.starts_with(&format!("{y}/")) || y.starts_with(&format!("{x}/")))
+        }
+        _ => false,
+    };
+    if overlaps {
+        Err(Error::Invalid(
+            "source and destination namespaces overlap".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn run() -> Result<Value> {
+    let mut args = env::args().skip(1);
+    let command = args.next().ok_or_else(|| {
+        Error::Invalid("usage: glider-admin status|backup <destination>|restore <backup>".into())
+    })?;
+    let argument = args.next();
+    if args.next().is_some() || (command == "status" && argument.is_some()) {
+        return Err(Error::Invalid("unexpected arguments".into()));
+    }
+    let config = ServerConfig::from_env()?;
+    match command.as_str() {
+        "status" => {
+            let engine = config.open_engine()?;
+            let db = engine.database();
+            let output = json!({
+                "command": "status",
+                "sequence": db.sequence(),
+                "revision": { "id": 0, "boundary": db.revision(0).boundary },
+                "configuration": {
+                    "dimensions": config.collection.dimensions,
+                    "metric": config.collection.metric,
+                    "resident_filter": config.options.resident_filter,
+                },
+                "runs": db.run_count(),
+                "blocks": db.block_count(),
+                "tail_objects": db.tail_objects(),
+            });
+            engine.close()?;
+            Ok(output)
+        }
+        "backup" => {
+            let target =
+                argument.ok_or_else(|| Error::Invalid("backup needs a destination".into()))?;
+            let destination = location(&target, &config)?;
+            disjoint(&config.store, &destination)?;
+            let destination_store = destination.open()?;
+            let mut engine: SegmentedServing<_> = config.open_engine()?;
+            let sequence = engine.database().sequence();
+            let result = engine.backup_to(destination_store);
+            let close = engine.close();
+            result?;
+            close?;
+            let store = destination.open()?;
+            let keys = store.list()?;
+            let mut bytes = 0u64;
+            for key in &keys {
+                bytes += store
+                    .get(key)?
+                    .ok_or_else(|| Error::Corrupt(format!("backup object missing: {key}")))?
+                    .len() as u64;
+            }
+            Ok(
+                json!({"command":"backup", "destination":target, "sequence":sequence,
+                "objects_copied":keys.len(), "bytes_copied":bytes}),
+            )
+        }
+        "restore" => {
+            let backup = argument.ok_or_else(|| Error::Invalid("restore needs a backup".into()))?;
+            let source = location(&backup, &config)?;
+            disjoint(&source, &config.store)?;
+            if let StoreConfig::Local(path) = &source {
+                if !Path::new(path).is_dir() {
+                    return Err(Error::Invalid("backup directory does not exist".into()));
+                }
+            }
+            let (sequence, objects, bytes) = stage_segmented_namespace(
+                &source.open()?,
+                config.open_store()?,
+                config.collection,
+                config.options.clone(),
+            )?;
+            let engine = config.open_engine()?;
+            let matches = engine.database().sequence() == sequence;
+            engine.close()?;
+            if !matches {
+                return Err(Error::Corrupt(
+                    "restored sequence changed on owned open".into(),
+                ));
+            }
+            Ok(
+                json!({"command":"restore", "backup":backup, "sequence":sequence,
+                "objects_copied":objects, "bytes_copied":bytes}),
+            )
+        }
+        _ => Err(Error::Invalid(
+            "usage: glider-admin status|backup <destination>|restore <backup>".into(),
+        )),
+    }
+}
+
+fn main() {
+    match run() {
+        Ok(output) => println!("{output}"),
+        Err(error) => {
+            eprintln!("glider-admin: {error}");
+            println!("{}", json!({"error":error.to_string()}));
+            std::process::exit(1);
+        }
+    }
+}

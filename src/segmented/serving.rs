@@ -127,6 +127,11 @@ impl<S: ObjectStore> SegmentedServing<S> {
         self.counters
     }
 
+    /// Release the namespace claim after serial administrative work.
+    pub fn close(self) -> Result<()> {
+        self.db.into_store().release()
+    }
+
     /// Kind of the most recent maintenance unit, for diagnostics.
     pub fn last_unit(&self) -> &'static str {
         self.last_unit

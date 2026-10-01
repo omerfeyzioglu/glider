@@ -64,3 +64,7 @@ required-features = ["s3"]
 [[bin]]
 name = "glider-server"
 required-features = ["server"]
+
+[[bin]]
+name = "glider-admin"
+required-features = ["server"]

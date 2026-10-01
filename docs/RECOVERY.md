@@ -27,6 +27,17 @@ diagnosing failure.
    no database write could have been acknowledged there; initialize a fresh
    empty prefix instead. If any data object exists without `metadata`, treat it
    as corruption, not an empty database.
+
+   For a segmented `glider-server` collection, set the same
+   `GLIDER_DIMENSIONS`, `GLIDER_METRIC` and `GLIDER_RESIDENT_FILTER` as the old
+   server, set `GLIDER_DATA_DIR` (or `GLIDER_S3_NAMESPACE`) to the fresh
+   destination, then run `glider-admin restore <old-directory-or-s3-prefix>`.
+   This is the segmented equivalent of staging: it excludes ownership controls,
+   publishes metadata last, validates the segmented root and log tail, briefly
+   claims the destination, and releases that claim. Check acknowledged IDs and
+   query results before starting the server there. `glider-admin backup
+   <empty-destination>` creates a validated backup after clean server shutdown;
+   the same restore command accepts that backup as its source.
 4. **Handle interruption.** If staging errors or stops before validation, never
    point clients at that destination and never reuse it. Reserve another empty
    prefix for the next attempt. A nonempty partial copy without metadata fails
