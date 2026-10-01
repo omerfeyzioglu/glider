@@ -390,12 +390,12 @@ type Profile = Arc<Mutex<BTreeMap<&'static str, (u64, f64, u64)>>>;
 
 /// Delegating engine that attributes peak-footprint increases and time to
 /// commands and maintenance-unit kinds.
-struct Profiled {
-    inner: SegmentedServing<Counted>,
+struct Profiled<S: ObjectStore> {
+    inner: SegmentedServing<S>,
     profile: Profile,
 }
 
-impl Engine for Profiled {
+impl<S: ObjectStore + Send + 'static> Engine for Profiled<S> {
     fn config(&self) -> Config {
         self.inner.config()
     }
@@ -425,6 +425,28 @@ impl Engine for Profiled {
         entry.1 = entry.1.max(elapsed);
         entry.2 += raised;
         result
+    }
+    fn apply_requests(
+        &mut self,
+        requests: Vec<Request>,
+    ) -> Vec<glider::Result<glider::retry::Outcome>> {
+        let count = requests.len() as u64;
+        let peak = peak_footprint().unwrap_or(0);
+        let started = Instant::now();
+        let results = self.inner.apply_requests(requests);
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            eprintln!("write failed: {error}");
+        }
+        let (elapsed, raised) = (
+            ms(started.elapsed()),
+            peak_footprint().unwrap_or(0).saturating_sub(peak),
+        );
+        let mut profile = self.profile.lock().unwrap();
+        let entry = profile.entry("write").or_default();
+        entry.0 += count;
+        entry.1 = entry.1.max(elapsed);
+        entry.2 += raised;
+        results
     }
     fn revision(&self, id: u64) -> glider::retry::Revision {
         self.inner.revision(id)
@@ -1126,4 +1148,68 @@ fn main() -> Result<()> {
     };
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Memory(Arc<Mutex<BTreeMap<String, Vec<u8>>>>);
+
+    impl ObjectStore for Memory {
+        fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        fn list(&self) -> glider::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().cloned().collect())
+        }
+        fn create(&mut self, key: &str, value: &[u8]) -> glider::Result<()> {
+            let mut objects = self.0.lock().unwrap();
+            if objects.contains_key(key) {
+                return Err(glider::Error::Exists(key.into()));
+            }
+            objects.insert(key.into(), value.to_vec());
+            Ok(())
+        }
+        fn remove(&mut self, key: &str) -> glider::Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn profiled_engine_forwards_group_commit() {
+        let store = Memory::default();
+        let view = store.clone();
+        let mut serving = SegmentedServingOptions::m21(PathBuf::new());
+        serving.cache = None;
+        let inner = SegmentedServing::open(store, config(), options(), serving).unwrap();
+        let mut engine = Profiled {
+            inner,
+            profile: Arc::new(Mutex::new(BTreeMap::new())),
+        };
+        let put = |id: u64| Mutation::Put {
+            id,
+            vector: vec![1.; DIMENSIONS],
+            metadata: BTreeMap::new(),
+        };
+        let results = engine.apply_requests(vec![
+            request(0, [1; 16], vec![put(1)]),
+            request(0, [2; 16], vec![put(2)]),
+        ]);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap().sequence, 1);
+        assert_eq!(results[1].as_ref().unwrap().sequence, 2);
+        assert_eq!(
+            view.list()
+                .unwrap()
+                .iter()
+                .filter(|key| key.starts_with("sglog-"))
+                .count(),
+            1
+        );
+        assert_eq!(engine.profile.lock().unwrap()["write"].0, 2);
+        engine.close().unwrap();
+    }
 }
