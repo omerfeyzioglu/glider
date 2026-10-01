@@ -80,7 +80,7 @@ fn choose<'a>(
 /// Namespace-level derived-index declaration, persisted in segmented metadata
 /// version 3. `resident_filter` keeps full-precision vectors for one equality
 /// predicate inside every pack sketch, so that predicate is answered exactly
-/// without block reads. Other filters are rejected by the selective reader.
+/// without block reads. Other filters are post-filtered by the selective reader.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SegmentedOptions {
@@ -873,7 +873,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// predicate. Unfiltered queries score every live packed code, read at most
     /// `max_blocks` selected blocks and rerank their current records plus the
     /// acknowledged log tail exactly. The resident predicate reads no blocks.
-    /// Any other filter is rejected; use `search_exact` for it.
+    /// Any other filter is applied to the routed blocks' records and the
+    /// tail: approximate, possibly fewer than k; `search_exact` is exact.
     pub fn search_selective(
         &self,
         query: &[f32],
@@ -901,7 +902,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         let mut heap = BinaryHeap::new();
         match filter {
-            [] => self.route_and_rerank(&query, k, budget, &mut heap)?,
+            [] => self.route_and_rerank(&query, k, budget, &[], &mut heap)?,
             [(key, value)]
                 if self
                     .options
@@ -927,11 +928,9 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     }
                 }
             }
-            _ => {
-                return Err(Error::Invalid(
-                    "selective search supports no filter or the declared resident filter".into(),
-                ))
-            }
+            // Other predicates: read the same routed blocks and keep only
+            // matching records. Approximate, and may return fewer than k.
+            _ => self.route_and_rerank(&query, k, budget, filter, &mut heap)?,
         }
         for (&id, (_, document)) in &self.tail {
             if let Some(document) = document {
@@ -950,6 +949,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         query: &[f32],
         k: usize,
         budget: ReadBudget,
+        filter: &[(&str, &str)],
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<()> {
         if budget.blocks == 0 || budget.requests == 0 {
@@ -958,7 +958,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             ));
         }
         let ranked = self.route(query, budget.blocks);
-        self.rerank(query, k, &ranked, budget, heap)
+        self.rerank(query, k, &ranked, budget, filter, heap)
     }
 
     /// The `max_blocks` rooted blocks with the smallest minimum approximate
@@ -1080,6 +1080,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         k: usize,
         ranked: &[(f64, usize, usize)],
         budget: ReadBudget,
+        filter: &[(&str, &str)],
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<()> {
         let candidates: Vec<_> = ranked
@@ -1147,9 +1148,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     continue;
                 }
                 match record.mutation {
-                    Mutation::Put { vector, .. } if !location.entry.deleted => {
+                    Mutation::Put {
+                        vector, metadata, ..
+                    } if !location.entry.deleted => {
                         seen += 1;
-                        consider(&mut local, k, config, query, id, &vector);
+                        if crate::matches_filter(&metadata, filter) {
+                            consider(&mut local, k, config, query, id, &vector);
+                        }
                     }
                     Mutation::Delete { .. } if location.entry.deleted => {}
                     _ => {
@@ -1190,10 +1195,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     return Ok(());
                 }
                 match view.put {
-                    Some((components, _, _)) if !location.entry.deleted => {
+                    Some((components, entries, metadata)) if !location.entry.deleted => {
                         seen += 1;
-                        codec::components(components, &mut vector);
-                        consider(&mut local, k, config, query, view.id, &vector);
+                        if codec::metadata_matches(entries, metadata, filter) {
+                            codec::components(components, &mut vector);
+                            consider(&mut local, k, config, query, view.id, &vector);
+                        }
                     }
                     None if location.entry.deleted => {}
                     _ => {

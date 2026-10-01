@@ -227,6 +227,33 @@ pub(super) fn components(bytes: &[u8], vector: &mut Vec<f32>) {
     );
 }
 
+/// Whether validated raw metadata satisfies every `(key, value)` equality.
+pub(super) fn metadata_matches(entries: u32, mut bytes: &[u8], filter: &[(&str, &str)]) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let mut distinct: Vec<_> = filter.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let mut matched = 0;
+    for _ in 0..entries {
+        let mut text = || {
+            let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            let value = &bytes[4..4 + length];
+            bytes = &bytes[4 + length..];
+            value
+        };
+        let (key, value) = (text(), text());
+        matched += distinct
+            .iter()
+            .filter(|(k, v)| k.as_bytes() == key && v.as_bytes() == value)
+            .count();
+    }
+    // Keys are unique in a record, so every distinct predicate matched
+    // exactly once only if the count equals their number.
+    matched == distinct.len()
+}
+
 fn metadata(entries: u32, mut bytes: &[u8]) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for _ in 0..entries {

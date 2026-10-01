@@ -94,11 +94,15 @@ fn service_interleaves_maintenance_and_backup_restores_the_committed_view() {
             .wait()
             .unwrap();
         assert!(!result.value.neighbors.is_empty());
+        // Undeclared filters are post-filtered: no record has `other`.
         assert!(client
             .query(vector(round, 0), 10, vec![("other".into(), "x".into())])
             .unwrap()
             .wait()
-            .is_err());
+            .unwrap()
+            .value
+            .neighbors
+            .is_empty());
     }
     assert_eq!(client.status().maintenance_errors, 0);
     service.shutdown(Shutdown::Drain).unwrap();

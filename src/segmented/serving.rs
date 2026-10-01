@@ -348,7 +348,8 @@ impl<S: ObjectStore + Send + 'static> Engine for SegmentedServing<S> {
         self.db.get(id)
     }
     /// Unfiltered queries are approximate within the sketch/block budget; the
-    /// declared resident predicate is exact. Other filters are rejected.
+    /// declared resident predicate is exact; other filters are applied to the
+    /// routed blocks (approximate, possibly fewer than k).
     fn query(&mut self, query: &[f32], k: usize, filter: &[(&str, &str)]) -> Result<Vec<Neighbor>> {
         self.db
             .search_selective_within(query, k, self.options.read_budget, filter)
