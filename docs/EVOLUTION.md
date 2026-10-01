@@ -255,3 +255,19 @@ independent arrivals 250 ms apart never queue together. The envelope passed
 at 5.30 PUT/s because maintenance published fewer packs and roots; the M27
 target of 4 PUT/s needs batching by clients or a different arrival pattern,
 not more committer work. [Evidence](../benchmarks/M27.md).
+
+## 2026-10-01 — Automatic takeover with permanent fences
+
+A killed `glider-server` left its permanent ownership claim, so every crash
+needed an operator to restore into a fresh prefix. A lease alone cannot fence
+a paused writer whose clock is wrong, and the object contract has no
+compare-and-swap. A writer's next log and root keys are deterministic, so a
+taker now occupies exactly those keys with permanent conditional creates (a
+takeover record and a root fence marker): a resumed writer's next publication
+fails at the store, at no per-write cost, for two small objects per process
+start. A renewed lease only paces takeovers. Lease and database handles, and
+old and new servers, now share a local directory, where create was
+check-then-write and a reopen could reclaim another handle's in-progress
+publication; `LocalStore` now serializes mutation under a directory lock.
+Drills restart a killed server on the same directory and show that a frozen,
+resumed server cannot write.

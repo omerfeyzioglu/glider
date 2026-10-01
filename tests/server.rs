@@ -1,18 +1,24 @@
 #![cfg(feature = "server")]
 //! End to end over HTTP: write, query, get, delete, then a restart on the
-//! same directory after graceful shutdown released ownership.
+//! same directory after graceful shutdown released the writer lease.
 
-use glider::server::{router, ServerConfig, StoreConfig};
+use glider::{
+    segmented::SegmentedServingOptions,
+    server::{router, ServerConfig, StoreConfig},
+};
 use std::io::{Read, Write};
 
 fn config(directory: &std::path::Path) -> ServerConfig {
+    // Tests run in parallel: the shared environment holds only common values.
     std::env::set_var("GLIDER_DIMENSIONS", "3");
     std::env::set_var("GLIDER_RESIDENT_FILTER", "color=red");
-    std::env::set_var("GLIDER_CACHE_DIR", directory.join("cache"));
-    std::env::set_var("GLIDER_DATA_DIR", directory.join("data"));
+    std::env::set_var("GLIDER_DATA_DIR", "unused");
     let mut config = ServerConfig::from_env().unwrap();
     assert!(matches!(config.store, StoreConfig::Local(_)));
+    config.store = StoreConfig::Local(directory.join("data"));
+    config.serving = SegmentedServingOptions::m31(directory.join("cache"));
     config.token = Some("secret".into());
+    config.lease = std::time::Duration::from_secs(60);
     config
 }
 
@@ -41,7 +47,7 @@ fn call(
 fn serve(
     config: &ServerConfig,
 ) -> (
-    glider::admission::Service<glider::segmented::SegmentedServing<glider::server::Store>>,
+    glider::server::Running,
     std::net::SocketAddr,
     tokio::runtime::Runtime,
 ) {
@@ -70,7 +76,8 @@ fn http_service_writes_queries_and_survives_restart() {
         "secret",
     );
     assert_eq!(status, 200, "{body}");
-    assert!(body.contains(r#""sequence":1"#), "{body}");
+    // Sequence 1 is the first start's takeover record.
+    assert!(body.contains(r#""sequence":2"#), "{body}");
     let (status, body) = call(
         address,
         "POST",
@@ -118,7 +125,7 @@ fn http_service_writes_queries_and_survives_restart() {
     assert!(body.contains("retained"), "{body}");
     let (status, body) = call(address, "GET", "/metrics", "", "wrong");
     assert_eq!(status, 200, "{body}");
-    assert!(body.contains("glider_committed_sequence 2\n"), "{body}");
+    assert!(body.contains("glider_committed_sequence 3\n"), "{body}");
     assert!(
         body.contains(
             "glider_http_requests_total{endpoint=\"/v1/write\",status_class=\"2xx\"} 3\n"
@@ -148,13 +155,55 @@ fn http_service_writes_queries_and_survives_restart() {
         .shutdown(glider::admission::Shutdown::Drain)
         .unwrap();
 
+    // Graceful shutdown released the lease: the restart does not wait for
+    // it to expire. The takeover record is sequence 4 and the new epoch.
+    let restarted = std::time::Instant::now();
     let (service, address, runtime) = serve(&config);
+    assert!(restarted.elapsed() < config.lease / 2);
     let (status, body) = call(address, "GET", "/v1/points/3", "", "secret");
     assert_eq!(status, 200);
     assert!(body.contains(r#""color":"red""#), "{body}");
     assert!(call(address, "GET", "/v1/status", "", "secret")
         .1
-        .contains(r#""sequence":2"#));
+        .contains(r#""sequence":4"#));
+    assert!(call(address, "GET", "/metrics", "", "secret")
+        .1
+        .contains("glider_writer_epoch 4\n"));
+    drop(runtime);
+    service
+        .shutdown(glider::admission::Shutdown::Drain)
+        .unwrap();
+}
+
+#[test]
+fn killed_server_restarts_on_the_same_directory_without_an_operator() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path());
+    config.lease = std::time::Duration::from_millis(300);
+    let (service, address, runtime) = serve(&config);
+    let (status, body) = call(
+        address,
+        "POST",
+        "/v1/write",
+        r#"{"upsert":[{"id":4,"vector":[4,4,4],"metadata":{"color":"red"}}]}"#,
+        "secret",
+    );
+    assert_eq!(status, 200, "{body}");
+    // A second process finds the lease renewed and refuses to depose it.
+    assert!(matches!(config.start(), Err(glider::Error::Busy(_))));
+    // Killed: no drain and no lease release.
+    drop(runtime);
+    drop(service);
+
+    let restarted = std::time::Instant::now();
+    let (service, address, runtime) = serve(&config);
+    assert!(restarted.elapsed() >= config.lease, "waited out the lease");
+    let (status, body) = call(address, "GET", "/v1/points/4", "", "secret");
+    assert_eq!(status, 200, "{body}");
+    // Sequence 1 and 2 are the first takeover and the write.
+    assert!(call(address, "GET", "/metrics", "", "secret")
+        .1
+        .contains("glider_writer_epoch 3\n"));
     drop(runtime);
     service
         .shutdown(glider::admission::Shutdown::Drain)

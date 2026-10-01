@@ -1,6 +1,9 @@
-//! Offline administration for one segmented collection.
+//! Administration for one segmented collection.
+//!
+//! Commands that open the collection acquire its writer lease and take over
+//! with fencing, exactly like a server start: they wait out a dead writer's
+//! lease and fail busy while a live server renews it.
 use glider::{
-    segmented::SegmentedServing,
     server::{stage_segmented_namespace, ServerConfig, StoreConfig},
     store::ObjectStore,
     Error, Result,
@@ -81,12 +84,12 @@ fn run() -> Result<Value> {
     }
     let config = ServerConfig::from_env()?;
     match command.as_str() {
-        "status" => {
-            let engine = config.open_engine()?;
+        "status" => config.with_engine(|engine| {
             let db = engine.database();
-            let output = json!({
+            Ok(json!({
                 "command": "status",
                 "sequence": db.sequence(),
+                "epoch": db.epoch(),
                 "revision": { "id": 0, "boundary": db.revision(0).boundary },
                 "configuration": {
                     "dimensions": config.collection.dimensions,
@@ -96,22 +99,18 @@ fn run() -> Result<Value> {
                 "runs": db.run_count(),
                 "blocks": db.block_count(),
                 "tail_objects": db.tail_objects(),
-            });
-            engine.close()?;
-            Ok(output)
-        }
+            }))
+        }),
         "backup" => {
             let target =
                 argument.ok_or_else(|| Error::Invalid("backup needs a destination".into()))?;
             let destination = location(&target, &config)?;
             disjoint(&config.store, &destination)?;
             let destination_store = destination.open()?;
-            let mut engine: SegmentedServing<_> = config.open_engine()?;
-            let sequence = engine.database().sequence();
-            let result = engine.backup_to(destination_store);
-            let close = engine.close();
-            result?;
-            close?;
+            let sequence = config.with_engine(|engine| {
+                engine.backup_to(destination_store)?;
+                Ok(engine.database().sequence())
+            })?;
             let store = destination.open()?;
             let keys = store.list()?;
             let mut bytes = 0u64;
@@ -135,20 +134,14 @@ fn run() -> Result<Value> {
                     return Err(Error::Invalid("backup directory does not exist".into()));
                 }
             }
+            // Staging validates the copy by opening it; the first server
+            // start then takes it over.
             let (sequence, objects, bytes) = stage_segmented_namespace(
                 &source.open()?,
                 config.open_store()?,
                 config.collection,
                 config.options.clone(),
             )?;
-            let engine = config.open_engine()?;
-            let matches = engine.database().sequence() == sequence;
-            engine.close()?;
-            if !matches {
-                return Err(Error::Corrupt(
-                    "restored sequence changed on owned open".into(),
-                ));
-            }
             Ok(
                 json!({"command":"restore", "backup":backup, "sequence":sequence,
                 "objects_copied":objects, "bytes_copied":bytes}),

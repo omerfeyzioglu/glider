@@ -41,9 +41,10 @@ For version 3/5 chunked snapshots, a separate read-only `StreamingDatabase` path
 keeps the selected manifest and newer mutations in memory and scans validated
 data chunks directly from the object store for exact queries.
 
-One mutable database handle exclusively owns a storage namespace. For a
-single-writer deployment, `OwnedDatabase` establishes an object-store claim
-before opening the database. Legacy `Database::open` on an unclaimed namespace
+One mutable database handle exclusively owns a storage namespace. A segmented
+writer takes the namespace over and fences every earlier writer ("Segmented
+writer takeover" below). For a resident single-writer deployment,
+`OwnedDatabase` establishes an object-store claim before opening the database. Legacy `Database::open` on an unclaimed namespace
 still requires the caller to ensure exclusive ownership; a namespace enrolled
 in owned mode rejects raw opens. No multi-writer protocol is provided. An owned
 object-store handle isolates the engine from filesystem operations. The newest complete checkpoint and newer
@@ -352,7 +353,7 @@ log-object, tail and backup bookkeeping count objects, not sequences.
 
 ### Segmented serving
 
-`SegmentedServing` claims the namespace with the owned-store protocol, opens
+`SegmentedServing` takes the namespace over with fencing (below), opens
 it with a sketch byte budget and an optional block cache, and implements the
 `admission::Engine` trait, so `admission::Service` runs it on the single
 committer thread. Queries use `search_selective_within` with a fixed read
@@ -391,8 +392,8 @@ digest bind disposable RAM/NVMe cache entries to a pinned root in the
 segmented namespace; `SegmentedServing` serves it, and the declared M21
 250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
 measured 10,000-row independent-arrival boundary and alternatives are in
-`benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4,
-root/index/log v1 and block v1/v2 in a fresh namespace. It acknowledges
+`benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4, index v1,
+root v1/v2 (plus v3 fence markers), log v1/v2/v3 and block v1/v2. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
 requires reopen. It can coalesce adjacent small ID indexes through another root
@@ -590,8 +591,8 @@ prefix and `stage_isolated_namespace` for takeover unless the chosen service can
 prove every old request has quiesced. The old prefix remains quarantined. A
 graceful successful `close` permits same-prefix reopen. Claims may be inspected
 and explicitly cleared for a verified stopped process, but a claim alone does
-not fence its earlier in-flight requests. There is no timed lease or automatic
-takeover. Existing namespaces can enroll only after all legacy writer processes
+not fence its earlier in-flight requests. The resident engine has no timed
+lease or automatic takeover; the segmented engine's takeover is below. Existing namespaces can enroll only after all legacy writer processes
 are stopped: an already-open older binary cannot be fenced retroactively. Older
 binaries reject the new key kinds. The wrapper hides ownership keys from
 database recovery and compaction; raw `Database::open` rejects an enrolled
@@ -614,11 +615,98 @@ frozen listing. This does not repair loss of an acknowledged source object and
 does not replace a backup. The exact operating procedure is in
 `docs/RECOVERY.md`.
 
-This chooses immutable claims over a mutable lease: lease expiry cannot safely
+This chooses immutable claims over a mutable lease: lease expiry alone cannot
 fence a delayed writer with the current object-store operations. A process-only
 singleton without a storage witness cannot detect a second opener on another
 host. The claim protocol uses conditional create, strongly consistent list and
 durable remove, without filesystem locking or in-place mutation.
+
+### Segmented writer takeover (M36)
+
+A segmented writer publishes logs only at `sglog-{s+1}` after its newest
+sequence `s`, and roots only at the generation after the highest it knows,
+each with one conditional create. `SegmentedDatabase::take_over`, used by
+`SegmentedServing::open`, therefore fences every earlier writer by occupying
+exactly those keys. It lists the namespace (creating metadata and root zero
+if it is empty, and checking the stored configuration first), reads the
+newest root and log, then creates:
+
+1. a takeover record at `sglog-{e}`, `e` = last sequence + 1: log version 3,
+   `{"version":3,"sequence":e}`. It changes no document, consumes one
+   sequence and defines the new writer epoch `e`;
+2. a fence marker at `sgroot-{g}`, `g` = highest listed generation + 1:
+   `{"version":3,"generation":g}`. It holds no state; root selection skips
+   markers and takes the newest root below them.
+
+It then lists again and opens normally. An earlier writer that resumes,
+however late and whatever its clock, finds its next log or root key taken:
+the conditional create fails with `Exists`, which proves non-publication, so
+it answers those requests `Busy` (fenced, not committed) and poisons. Its
+in-flight create to one of those keys either lands first, making the
+takeover's create fail so the caller relists and retries, or fails. Logs are
+contiguous and acknowledged only after their create, so every write an
+earlier writer acknowledged precedes `e` and is in the new writer's
+post-fence listing. Root version 2 adds `fences: {logs, roots}`, the keys of
+every takeover record and marker; every later root carries them, cleanup
+retains them and they are never reclaimed, because a deposed writer may
+resume at any time and its next keys are exactly these. A deposed writer can
+still create unreferenced packs and indexes (removed by a later open's
+cleanup) and delete objects obsolete under its own newest root; the new
+writer selected that root or a newer one and keys are never reused, so those
+deletes remove nothing it needs. Deposed writers' reads are not fenced: a
+paused server can answer reads from its old view until it learns of the
+takeover at its next renewal or write. Plain `SegmentedDatabase::open`
+fences nothing and requires external exclusivity.
+
+Semantics: a successful takeover acknowledges that both fences are durable
+and that the handle includes every write any earlier writer acknowledged.
+Authoritative state is unchanged: the selected root and the contiguous log
+tail, which now includes takeover records (counted as unsealed log objects
+but not toward the 64-object replay bound). A crash or error during takeover
+may leave the takeover record without the marker, or both; either is valid
+state, and the next takeover adds its own pair. `Exists` from a takeover means
+an earlier writer published concurrently; `glider-server` makes up to four
+attempts, each with a fresh listing. Each takeover permanently adds two small objects
+and two integers to every later root, linear in process starts (1,000 starts
+add about 16 KiB of root JSON).
+
+Takeover never depends on time; `lease::Lease` only decides when a process
+should attempt it, so a live writer is not deposed. The holder publishes
+immutable `sglease-{n:020}` objects (version 1 JSON: 32-hex holder token,
+declared `duration_ms` of at most one hour, `released` flag) every third of
+its duration, then lists: a higher number means it was deposed (a resumed
+holder may publish into a number its successor already removed); otherwise
+it removes lower numbers. A taker reads the newest lease; unless it is a
+release marker, it sleeps that lease's declared duration on its own monotonic
+clock and lists again. If no newer number appeared it creates the next number;
+the conditional create admits one of several concurrent takers and the
+others fail `Busy`. Skew, pauses or slow renewal only make a takeover early
+(fencing keeps it safe) or late (unavailability). `glider-server` acquires the
+lease (`GLIDER_LEASE_SECONDS`, default 10), takes over, renews in the
+background, shuts down when a renewal finds it deposed, and releases with a
+marker on graceful shutdown so the next start need not wait. `glider-admin`
+commands acquire and release the lease the same way. Renewal costs one PUT,
+one LIST and one DELETE per third of the duration.
+
+Namespaces written before M36 (version 1 roots, no takeover records, claim
+objects) open; claims are ignored and left in place. Pre-M36 binaries reject a
+namespace after its first takeover (log version 3, root version 2 or 3).
+Stop older servers before upgrading: they hold no lease, so a new server
+deposes and fences them at once.
+
+Alternatives: (a) the permanent claim plus an operator restore to a fresh
+prefix (the M9 procedure) is safe but needs a manual step and a full copy;
+(b) lease expiry alone cannot stop a paused writer with a slow clock; (c) a
+conditional mutable head or compare-and-swap is outside the object contract;
+(d) write-then-verify an epoch object before every acknowledgement avoids
+permanent per-takeover objects, but adds a request to every write's
+acknowledgement path and still needs separate fencing of roots and deletes;
+(e) skipping fences after a clean release needs proof, atomic with the data
+listing, that the previous holder stopped; a release marker is not atomic
+with it, because a process can acquire after the release, pause, and open
+after another takeover. Permanent fences at the deposed writer's next keys
+cost nothing per write, use only conditional create and complete listings,
+and keep one takeover path.
 
 ### Bounded retries and conditional batches (M15)
 
@@ -1038,8 +1126,17 @@ with a deleted body. Reopen reclaims unsealed debris; failure during cleanup or
 synchronization fails open. Filesystem synchronization stays inside LocalStore.
 
 The namespace's parent directory must already exist. Initialization syncs both
-namespace and parent. Local durability requires exclusive access and a
-filesystem/device honoring file and directory synchronization. These operations
+namespace and parent. Local durability requires a filesystem/device honoring
+file and directory synchronization. Several handles, in one or several
+processes, may share a namespace: a lease keeper and its database, or an old
+and a new server during takeover. Each create (existence check, body, seal),
+removal and reopen reclamation holds an exclusive `flock` on the namespace
+directory, so create-if-absent is atomic across handles and reclamation never
+removes another live handle's in-progress publication; the OS releases a dead
+process's lock, and a process paused while holding it stalls other writers
+(liveness only). Readers take no lock: a read that finds a seal whose body was
+then removed reports the object absent only if the seal is gone too.
+Network filesystems without `flock` semantics are unsupported. These operations
 implement the object contract locally; they are not engine-level storage APIs.
 
 ## S3-compatible backend

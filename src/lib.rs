@@ -18,6 +18,7 @@
 //! ```
 pub mod admission;
 pub mod ivf;
+pub mod lease;
 pub mod ownership;
 pub mod recovery;
 pub mod retry;

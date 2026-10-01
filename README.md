@@ -48,8 +48,9 @@ For S3 or MinIO, replace `GLIDER_DATA_DIR` with `GLIDER_S3_BUCKET`,
 `GLIDER_S3_NAMESPACE`, optional `GLIDER_S3_REGION`/`GLIDER_S3_ENDPOINT` and the
 `AWS_*` credentials. Other settings: `GLIDER_LISTEN` (default
 `127.0.0.1:8080`), `GLIDER_METRIC`, `GLIDER_API_TOKEN` (bearer auth),
-`GLIDER_CACHE_DIR`, `GLIDER_CACHE_BYTES`, and `GLIDER_ROUTED_KEYS` (up to four
-sorted, unique, nonempty comma-separated equality-filter keys, fixed at namespace creation).
+`GLIDER_CACHE_DIR`, `GLIDER_CACHE_BYTES`, `GLIDER_LEASE_SECONDS` (writer lease,
+default 10) and `GLIDER_ROUTED_KEYS` (up to four sorted, unique, nonempty
+comma-separated equality-filter keys, fixed at namespace creation).
 
 API (JSON except `/metrics`):
 
@@ -64,15 +65,19 @@ API (JSON except `/metrics`):
 
 A write is acknowledged only after durable publication; resend an uncertain
 write with the same `request_id` to get its original outcome. SIGINT/SIGTERM
-drains queued work and releases the collection's ownership claim; after a
-crash, follow [the recovery procedure](docs/RECOVERY.md) before restarting.
+drains queued work and releases the writer lease. After a crash or kill, just
+start the server again on the same prefix: it waits out the dead process's
+lease (at most `GLIDER_LEASE_SECONDS`), then takes over and fences the old
+writer at the object store, so a paused old process can never commit again
+(see [recovery](docs/RECOVERY.md)).
 
 ## Operations
 
 `glider-admin` uses the server's `GLIDER_*` storage, collection and cache
-settings. Stop the server cleanly before running `status` or `backup` against
-its namespace; the ownership claim makes a concurrent command fail with an
-"already has an owner" error. Each command prints one JSON object. Backup destinations must be
+settings. Stop the server before running `status` or `backup` against its
+namespace: each command acquires the writer lease and takes the collection
+over like a server start, so while a server renews the lease it waits one
+lease duration and then fails with a lease error. Each command prints one JSON object. Backup destinations must be
 empty and separate from the source. Local paths and `s3://bucket/prefix`
 locations are accepted; S3 uses the configured region, endpoint and AWS
 credentials.
@@ -88,12 +93,12 @@ GLIDER_DATA_DIR=./restored GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red 
 python3 tools/drills.py --seed 29
 ```
 
-`restore` copies a backup or stopped crashed namespace into a fresh empty
-destination, validates it, and releases its ownership claim. Never reuse a
-failed destination. After a crash, keep the old namespace quarantined and
-follow [the recovery procedure](docs/RECOVERY.md) before directing clients to
-the restored one. The local drill builds release binaries offline, kills the
-server during writes, tests cache loss, then backs up and restores the
+`restore` copies a backup or stopped namespace into a fresh empty destination
+and validates it; the first server start there takes it over. Never reuse a
+failed destination. A crash needs no restore. The local drill builds release
+binaries offline, kills the server during writes and restarts it on the same
+directory, freezes a server while a second one takes over and checks the
+resumed one cannot write, tests cache loss, then backs up and restores the
 acknowledged state; it reports PASS/FAIL with its seed.
 
 - [Design](DESIGN.md): current architecture, guarantees and target direction.
@@ -380,6 +385,9 @@ creation is answered exactly from full-precision vectors kept in the sketches;
 declared routed keys restrict candidate rows before block ranking; all filters are checked during reranking (approximate, possibly fewer than k results), and `search_exact` remains the oracle. Run it
 behind `admission::Service`, which executes seal, consolidation, reclamation
 and cleanup in bounded units while no command is queued.
+`SegmentedServing::open` takes the namespace over, fencing every earlier
+writer at the object store; hold a `lease::Lease` (as `glider-server` does)
+so a live writer is not deposed.
 
 ```rust
 use glider::{admission::{Limits, Service, Shutdown}, Config, Metric};
