@@ -107,7 +107,7 @@ fn closest(metric: Metric, vector: &[f32], centers: &[Vec<f32>]) -> usize {
     centers
         .iter()
         .enumerate()
-        .map(|(i, center)| (i, metric.score(vector, center)))
+        .map(|(i, center)| (i, metric.routing_score(vector, center)))
         .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
         .unwrap()
         .0
@@ -181,7 +181,7 @@ impl<S: ObjectStore> Database<S> {
                     nearest[i] = nearest[i].min(
                         self.config
                             .metric
-                            .score(&point.vector, &centers[centers.len() - 1]),
+                            .routing_score(&point.vector, &centers[centers.len() - 1]),
                     );
                 }
                 selected = (0..points.len())
@@ -205,7 +205,7 @@ impl<S: ObjectStore> Database<S> {
                 }
                 for (d, component) in center.iter_mut().enumerate() {
                     *component = match self.config.metric {
-                        Metric::SquaredEuclidean => {
+                        Metric::SquaredEuclidean | Metric::Cosine => {
                             (members
                                 .iter()
                                 .map(|&i| f64::from(points[i].1.vector[d]))
@@ -273,7 +273,7 @@ impl<S: ObjectStore> Database<S> {
         filter: &[(&str, &str)],
         fill_k: bool,
     ) -> Result<IvfSearch> {
-        self.config.vector(query)?;
+        let query = self.config.query(query)?;
         if probes == 0 {
             return Err(Error::Invalid("IVF probes must be positive".into()));
         }
@@ -293,7 +293,7 @@ impl<S: ObjectStore> Database<S> {
             .centers
             .iter()
             .enumerate()
-            .map(|(i, center)| (i, self.config.metric.score(query, center)))
+            .map(|(i, center)| (i, self.config.metric.routing_score(&query, center)))
             .collect();
         output.centroid_distances = ranked.len();
         ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
@@ -309,7 +309,7 @@ impl<S: ObjectStore> Database<S> {
                 }
                 output.neighbors.push(Neighbor {
                     id: *id,
-                    distance: self.config.metric.score(query, &document.vector),
+                    distance: self.config.metric.score(&query, &document.vector),
                 });
                 output.vector_distances += 1;
             }

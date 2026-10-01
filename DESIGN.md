@@ -33,11 +33,16 @@ writes become visible after durable storage.
 
 Document IDs are u64. Vectors have one positive, persisted dimension and finite
 f32 components. Each live document also has a map of UTF-8 string keys to string
-values. The persisted metric enum supports squared Euclidean and Manhattan
-distance, accumulated in f64. Exact search scans all live documents, sorts by
-ascending distance then ID, and returns at most k results. Exact query results
-retain allocation only for the returned neighbors; temporary scoring still
-uses O(matching rows) memory. Holding many completed results remains a caller
+values. The persisted metric enum supports squared Euclidean, Manhattan and
+cosine distance, accumulated in f64. Cosine puts and queries require nonzero
+L2 norm. Cosine vectors are normalized in f64 and stored as f32 when applied
+to the resident map or segmented tail, including replay; durable requests and
+retry digests retain the submitted vector. `get` returns the stored unit vector.
+Cosine distance is `1 - dot(q, v)` on normalized vectors. Exact search scans all
+live documents, sorts by ascending distance then ID, and returns at most k
+results. Exact query results retain allocation only for the returned neighbors;
+temporary scoring still uses O(matching rows) memory. Holding many completed
+results remains a caller
 resource choice. Filtered exact search
 requires every specified key/value equality to hold; missing keys do not match.
 An empty filter includes every document. A put replaces both the vector and the
@@ -47,10 +52,11 @@ complete metadata map; a delete removes both.
 
 `build_ivf(IvfConfig)` explicitly builds an in-memory index from the acknowledged
 map. Seeded farthest-point initialization and a fixed number of assignment/update
-iterations train means for squared Euclidean distance and coordinate medians for
-Manhattan distance. Each ID belongs to one final partition; full-precision vectors
-remain in the document map. Empty partitions retain their centers. Ties are
-deterministic; partitions are capped at the live row count.
+iterations train means for squared Euclidean and cosine distance and coordinate
+medians for Manhattan distance. Each ID belongs to one final partition;
+full-precision vectors remain in the document map. Empty partitions retain
+their centers. Ties are deterministic; partitions are capped at the live row
+count.
 
 `search_ivf(query, k, probes)` scores every center, scans the nearest partitions,
 and orders candidates by exact distance then ID. It can miss true neighbors and
@@ -199,7 +205,9 @@ width, the SHA-256 of the namespace's derived-index options, the pack key and,
 per block, the block's SHA-256 digest and put-row count. The body holds one
 per-pack affine codebook (f32 minimum and step per dimension), row IDs in
 block order, packed five-bit codes (little-endian bit fields) and full f32
-vectors of rows matching the declared resident predicate. Tombstones have no
+vectors of rows matching the declared resident predicate. Cosine uses squared
+Euclidean sketch distances and lower bounds on stored unit vectors, preserving
+routing order and the nonnegative-prefix pruning proof. Tombstones have no
 row. A per-pack codebook is between the measured run-local and block-local
 granularities. Embedding the sketch gives it exactly its pack's lifetime and
 costs no extra PUT or DELETE: consolidation and pruning reuse packs and their
@@ -220,6 +228,8 @@ blocks compress about threefold, so the per-query byte budget covers more
 candidate rows, uploads and cache footprint shrink, and reranking scans
 records from a reused buffer without per-record allocation instead of parsing
 JSON floats. Logs, roots and indexes keep their formats.
+Block v2 and sketch metric bytes are 0 for squared Euclidean, 1 for Manhattan,
+and 2 for cosine; existing bytes retain their meaning.
 
 The sketch is derived, never authoritative. Opening reads a bounded prefix
 of each referenced pack through batched range reads (8 at a time), re-reads
@@ -452,6 +462,8 @@ schema. `apply_batch` publishes one version 3 object for all its operations.
 Version 4 stores a bounded retry request and its durable conditional outcome in
 the same object; successful outcomes apply its operations, conflicts apply none.
 Recovery accepts all four versions and treats version 1 metadata as empty. The
+cosine log vector remains exactly as submitted; applying or replaying it derives
+the unit vector held in memory and later snapshots or sealed blocks. The log
 mutation key is `mutation-` followed by a contiguous 20-digit decimal sequence
 starting at 1. A sequence counts a published log object, not the number of
 operations inside a batch.

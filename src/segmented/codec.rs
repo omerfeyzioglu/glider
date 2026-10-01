@@ -24,6 +24,7 @@ fn metric_byte(metric: Metric) -> u8 {
     match metric {
         Metric::SquaredEuclidean => 0,
         Metric::Manhattan => 1,
+        Metric::Cosine => 2,
     }
 }
 

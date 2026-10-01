@@ -236,6 +236,10 @@ for footprint and amplification measurements.
 
 ## Rebuildable IVF-Flat search
 
+`Config.metric` accepts `SquaredEuclidean`, `Manhattan`, or `Cosine`. Cosine
+requires nonzero vectors and queries; `get` returns a normalized vector for a
+cosine collection. Distance is `1 - dot(q, v)` after normalization.
+
 Exact `db.search(query, k)` remains available. To trade recall for fewer distance
 calculations, build the derived in-memory index after loading your data:
 
