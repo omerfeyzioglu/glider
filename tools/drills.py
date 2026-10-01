@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local release-build crash, cache-loss, and backup/restore drills."""
+"""Local release-build crash, paused-writer, cache-loss, and backup/restore drills."""
 import argparse
 import http.client
 import json
@@ -41,7 +41,7 @@ def request(port, method, path, body=None):
 def environment(data, cache, port):
     values = {**os.environ, "GLIDER_DATA_DIR": str(data), "GLIDER_CACHE_DIR": str(cache),
               "GLIDER_DIMENSIONS": "3", "GLIDER_METRIC": "squared_euclidean",
-              "GLIDER_RESIDENT_FILTER": "drill=yes",
+              "GLIDER_RESIDENT_FILTER": "drill=yes", "GLIDER_LEASE_SECONDS": "1",
               "GLIDER_LISTEN": f"127.0.0.1:{port}"}
     values.pop("GLIDER_API_TOKEN", None)
     values.pop("GLIDER_CACHE_BYTES", None)
@@ -56,12 +56,16 @@ def start(env, log):
         if process.poll() is not None:
             raise RuntimeError(f"server exited during startup: {process.returncode}")
         try:
+            # The listener accepts connections before the server holds the
+            # lease; until then requests time out.
             req = urllib.request.Request(f"http://{env['GLIDER_LISTEN']}/healthz")
             with urllib.request.urlopen(req, timeout=1) as response:
                 if response.status == 200:
                     return process
-        except urllib.error.URLError:
+        except OSError:
             time.sleep(0.05)
+    process.kill()
+    process.wait(timeout=10)
     raise RuntimeError("server did not become healthy")
 
 
@@ -96,40 +100,61 @@ def verify(port, ids):
     assert set(ids) <= found, (ids, found)
 
 
+def absent(port, point_id):
+    try:
+        request(port, "GET", f"/v1/points/{point_id}")
+    except urllib.error.HTTPError as error:
+        return error.code == 404
+    return False
+
+
 def write_body(point_id, request_id):
     return {"upsert": [{"id": point_id, "vector": [point_id, 0, 0],
                         "metadata": {"drill": "yes"}}], "request_id": request_id}
 
 
+def write_refusal(port, body):
+    """How the server refused the write, or None if it acknowledged it."""
+    try:
+        request(port, "POST", "/v1/write", body)
+    except urllib.error.HTTPError as error:
+        return f"HTTP {error.code}: {error.read().decode(errors='replace')}"
+    except OSError as error:
+        return f"connection failed: {error}"
+    return None
+
+
 def drill(seed):
     rng = random.Random(seed)
+
+    def request_id(port):
+        boundary = request(port, "GET", "/v1/status")["sequence"]
+        return {"boundary": boundary, "nonce": f"{rng.getrandbits(128):032x}"}
+
     with tempfile.TemporaryDirectory(prefix="glider-drills-") as temporary:
         base = Path(temporary)
         cache = base / "cache"
-        old = base / "old"
-        staged = base / "staged"
+        data = base / "data"
         backup = base / "backup"
         restored = base / "restored"
         log = (base / "server.log").open("w+")
         process = None
+        paused = None
         stage = "kill"
         try:
             port = free_port()
-            env = environment(old, cache, port)
+            env = environment(data, cache, port)
             process = start(env, log)
             owner = admin(env, "status", expect_success=False)
-            assert "already has an owner" in owner["error"], owner
+            assert "lease" in owner["error"], owner
             acknowledged = []
             for point_id in range(1, 9):
-                boundary = request(port, "GET", "/v1/status")["sequence"]
-                rid = {"boundary": boundary, "nonce": f"{rng.getrandbits(128):032x}"}
-                answer = request(port, "POST", "/v1/write", write_body(point_id, rid))
+                answer = request(port, "POST", "/v1/write",
+                                 write_body(point_id, request_id(port)))
                 assert answer["conflict"] is None, answer
                 acknowledged.append(point_id)
             print(f"kill drill: {len(acknowledged)} writes acknowledged before SIGKILL", flush=True)
-            boundary = request(port, "GET", "/v1/status")["sequence"]
-            uncertain_id = {"boundary": boundary, "nonce": f"{rng.getrandbits(128):032x}"}
-            uncertain_body = write_body(9, uncertain_id)
+            uncertain_body = write_body(9, request_id(port))
             sent = threading.Event()
             submitted = threading.Event()
             submission_error = []
@@ -156,10 +181,9 @@ def drill(seed):
             process.wait(timeout=10)
             thread.join(timeout=12)
             process = None
-            # A forced exit leaves a claim. Restore to a fresh isolated namespace.
-            staged_env = environment(staged, cache, port)
-            admin(staged_env, "restore", old)
-            process = start(staged_env, log)
+            # No operator step: the restart waits out the killed server's
+            # lease, then takes over the same namespace and fences it.
+            process = start(env, log)
             verify(port, acknowledged)
             first = request(port, "POST", "/v1/write", uncertain_body)
             second = request(port, "POST", "/v1/write", uncertain_body)
@@ -168,18 +192,45 @@ def drill(seed):
             verify(port, stable_ids)
             print(f"PASS kill seed={seed}", flush=True)
 
+            stage = "paused-writer"
+            # Freeze the server beyond its lease; a second server takes over
+            # the same namespace. The resumed server must not publish.
+            process.send_signal(signal.SIGSTOP)
+            paused, process = process, None
+            old_port, port = port, free_port()
+            cache = base / "cache-2"
+            env = environment(data, cache, port)
+            process = start(env, log)
+            verify(port, stable_ids)
+            answer = request(port, "POST", "/v1/write", write_body(10, request_id(port)))
+            assert answer["conflict"] is None, answer
+            stable_ids.append(10)
+            fenced_body = write_body(11, {"boundary": 0,
+                                          "nonce": f"{rng.getrandbits(128):032x}"})
+            paused.send_signal(signal.SIGCONT)
+            refusal = write_refusal(old_port, fenced_body)
+            assert refusal is not None, "a fenced server acknowledged a write"
+            print(f"paused-writer drill: resumed server refused the write ({refusal})", flush=True)
+            # Its next lease renewal finds the takeover, so it stops.
+            code = paused.wait(timeout=20)
+            assert code != 0, code
+            paused = None
+            verify(port, stable_ids)
+            assert absent(port, 11), "the fenced write exists"
+            print(f"PASS paused-writer seed={seed}", flush=True)
+
             stage = "cache-loss"
             stop(process)
             process = None
             shutil.rmtree(cache, ignore_errors=True)
-            process = start(staged_env, log)
+            process = start(env, log)
             verify(port, stable_ids)
             print(f"PASS cache-loss seed={seed}", flush=True)
 
             stage = "backup/restore"
             stop(process)
             process = None
-            result = admin(staged_env, "backup", backup)
+            result = admin(env, "backup", backup)
             assert result["objects_copied"] > 0, result
             restored_env = environment(restored, cache, port)
             result = admin(restored_env, "restore", backup)
@@ -195,9 +246,11 @@ def drill(seed):
             print(f"FAIL {stage} seed={seed}: {exc}\nserver log:\n{log.read()}", file=sys.stderr)
             raise
         finally:
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
+            for running in (process, paused):
+                if running is not None and running.poll() is None:
+                    running.send_signal(signal.SIGCONT)
+                    running.kill()
+                    running.wait(timeout=10)
             log.close()
 
 

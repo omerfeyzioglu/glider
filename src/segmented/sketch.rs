@@ -2,8 +2,8 @@
 //! reader. Each immutable pack starts with a derived sketch frame bound to the
 //! digests of its blocks; the root and logs remain authoritative.
 use super::{
-    authenticate, cache::Source, codec, consider, decode_block_bytes, lock_cache, Block, BlockRef,
-    Ranked, RemoteReads, Root, SegmentedDatabase, View,
+    authenticate, cache::Source, codec, consider, consider_with, decode_block_bytes, lock_cache,
+    Block, BlockRef, QueryHit, QueryOptions, Ranked, RemoteReads, Root, SegmentedDatabase, View,
 };
 use crate::{store::ObjectStore, Config, Error, Metric, Mutation, Neighbor, Result};
 use serde::{Deserialize, Serialize};
@@ -18,27 +18,39 @@ const LEVELS: f64 = 31.;
 const MAGIC: &[u8; 8] = b"GLSKT001";
 const ROUTED_MAGIC: &[u8; 8] = b"GLSKT002";
 
-/// Blocks an unfiltered selective query reads. Routing ranks `blocks`
-/// candidates. In rank order each candidate widens its pack's span, a single
-/// byte range from the first to the last chosen block of that pack, if all
-/// spans still total at most `bytes` and number at most `requests`. Every
-/// live block inside a span is reranked, since its bytes are read anyway.
-/// The choice never depends on cache contents, so each query issues at most
-/// `requests` range GETs and downloads at most `bytes` payload bytes.
+/// Blocks a routed selective query reads. Routing ranks
+/// `max(blocks, local_blocks)` candidates. In rank order, a candidate whose
+/// block is in the RAM or NVMe cache is read locally while fewer than
+/// `local_blocks` have been. Any other candidate among the first `blocks`
+/// widens its pack's span, a single byte range from the first to the last
+/// such block of that pack, if all spans still total at most `bytes` and
+/// number at most `requests`. Every live block inside a span is reranked,
+/// since its bytes are read anyway.
+///
+/// Remote limits therefore apply only to blocks that are not cached: each
+/// query issues at most `requests` range GETs and downloads at most `bytes`
+/// payload bytes, and with an empty cache (or `local_blocks == 0`) it reads
+/// exactly the spans that the first `blocks` candidates choose. With
+/// `local_blocks > 0` the result depends on cache contents: a warm cache
+/// reads up to `local_blocks` cached candidates in addition to the remote
+/// spans, while losing the cache returns queries to the cold choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadBudget {
     pub blocks: usize,
     pub requests: usize,
     pub bytes: usize,
+    pub local_blocks: usize,
 }
 
 impl ReadBudget {
-    /// Spans for the first `blocks` routed blocks, without a byte limit.
+    /// Spans for the first `blocks` routed blocks, without a byte limit or a
+    /// separate local limit, so the choice does not depend on the cache.
     pub fn uniform(blocks: usize) -> Self {
         Self {
             blocks,
             requests: blocks,
             bytes: usize::MAX,
+            local_blocks: 0,
         }
     }
 }
@@ -826,6 +838,14 @@ impl LoadedSketch {
         }
     }
 
+    /// Live rows of one block of this pack.
+    fn live_rows(&self, block: usize) -> usize {
+        let block = &self.sketch.blocks[block];
+        (block.start..block.end)
+            .filter(|&row| self.is_live(row))
+            .count()
+    }
+
     fn is_live(&self, row: usize) -> bool {
         self.live[row / 64] & (1 << (row % 64)) != 0
     }
@@ -1038,10 +1058,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.search_selective_within(query, k, ReadBudget::uniform(max_blocks), filter)
     }
 
-    /// `search_selective` with separate budgets for routed blocks and remote
-    /// fetches. Blocks are considered in routing order; a cached block is
-    /// always read, an uncached one only while the remote fetch and byte
-    /// budgets allow, otherwise it is skipped.
+    /// `search_selective` with separate limits for routed candidates, remote
+    /// range requests and bytes, and cached blocks read locally; see
+    /// [`ReadBudget`]. A nonzero `local_blocks` makes results depend on the
+    /// cache contents.
     pub fn search_selective_within(
         &self,
         query: &[f32],
@@ -1049,29 +1069,48 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         budget: ReadBudget,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
+        Ok(self
+            .search_selective_within_options(query, k, budget, filter, QueryOptions::default())?
+            .iter()
+            .map(QueryHit::neighbor)
+            .collect())
+    }
+
+    /// Selective search with optional fields from the scored record. For the
+    /// resident predicate, only final hits require document block reads.
+    pub fn search_selective_within_options(
+        &self,
+        query: &[f32],
+        k: usize,
+        budget: ReadBudget,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
         self.view()
-            .search_selective_within(query, k, budget, filter)
-            .map(|(neighbors, _)| neighbors)
+            .search_selective_within(query, k, budget, filter, options)
+            .map(|(hits, _)| hits)
     }
 }
 
 impl<S: ObjectStore> View<S> {
-    /// `SegmentedDatabase::search_selective_within` on this view, with the
-    /// remote reads the query caused.
+    /// `SegmentedDatabase::search_selective_within_options` on this view,
+    /// with the remote reads the query caused.
     pub(crate) fn search_selective_within(
         &self,
         query: &[f32],
         k: usize,
         budget: ReadBudget,
         filter: &[(&str, &str)],
-    ) -> Result<(Vec<Neighbor>, RemoteReads)> {
+        options: QueryOptions,
+    ) -> Result<(Vec<QueryHit>, RemoteReads)> {
         let query = self.config.query(query)?;
         if k == 0 {
             return Ok((Vec::new(), RemoteReads::default()));
         }
         let mut heap = BinaryHeap::new();
-        let reads = match filter {
-            [] => self.route_and_rerank(&query, k, budget, &[], &mut heap)?,
+        let mut resident = false;
+        let mut reads = match filter {
+            [] => self.route_and_rerank(&query, k, budget, &[], options, &mut heap)?,
             [(key, value)]
                 if self
                     .options
@@ -1079,6 +1118,7 @@ impl<S: ObjectStore> View<S> {
                     .as_ref()
                     .is_some_and(|(k, v)| k == key && v == value) =>
             {
+                resident = true;
                 let dimensions = self.config.dimensions;
                 for loaded in &self.sketches.packs {
                     let sketch = &loaded.sketch;
@@ -1101,17 +1141,51 @@ impl<S: ObjectStore> View<S> {
             }
             // Other predicates: read the same routed blocks and keep only
             // matching records. Approximate, and may return fewer than k.
-            _ => self.route_and_rerank(&query, k, budget, filter, &mut heap)?,
+            _ => self.route_and_rerank(&query, k, budget, filter, options, &mut heap)?,
         };
         for (&id, (_, document)) in self.tail.iter() {
             if let Some(document) = document {
                 if crate::matches_filter(&document.metadata, filter) {
-                    consider(&mut heap, k, self.config, &query, id, &document.vector);
+                    consider_with(
+                        &mut heap,
+                        k,
+                        self.config,
+                        &query,
+                        id,
+                        &document.vector,
+                        || {
+                            (
+                                options.include_metadata.then(|| document.metadata.clone()),
+                                options.include_vector.then(|| document.vector.clone()),
+                            )
+                        },
+                    );
                 }
             }
         }
         let mut results: Vec<_> = heap.into_iter().map(|ranked: Ranked| ranked.0).collect();
         results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        if resident && (options.include_metadata || options.include_vector) {
+            // Resident hits come from the sketch; fetch only the final hits'
+            // documents from this view, charging their remote reads.
+            for hit in &mut results {
+                if hit.metadata.is_some() || hit.vector.is_some() {
+                    continue;
+                }
+                let document = self.document(hit.id, &mut reads)?.ok_or_else(|| {
+                    Error::Corrupt("resident hit missing from current documents".into())
+                })?;
+                if self.config.metric.score(&query, &document.vector).to_bits()
+                    != hit.distance.to_bits()
+                {
+                    return Err(Error::Corrupt(
+                        "resident hit differs from scored version".into(),
+                    ));
+                }
+                hit.metadata = options.include_metadata.then_some(document.metadata);
+                hit.vector = options.include_vector.then_some(document.vector);
+            }
+        }
         Ok((results, reads))
     }
 
@@ -1121,6 +1195,7 @@ impl<S: ObjectStore> View<S> {
         k: usize,
         budget: ReadBudget,
         filter: &[(&str, &str)],
+        options: QueryOptions,
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<RemoteReads> {
         if budget.blocks == 0 || budget.requests == 0 {
@@ -1128,8 +1203,12 @@ impl<S: ObjectStore> View<S> {
                 "selective search needs a block budget".into(),
             ));
         }
-        let ranked = self.route(query, budget.blocks, filter);
-        self.rerank(query, k, &ranked, budget, filter, heap)
+        // Without a cache no candidate can be read locally.
+        let ranked = match self.cache {
+            Some(_) => self.route(query, budget.blocks.max(budget.local_blocks), filter),
+            None => self.route(query, budget.blocks, filter),
+        };
+        self.rerank(query, k, &ranked, budget, (filter, options), heap)
     }
 
     /// The `max_blocks` rooted blocks with the smallest minimum approximate
@@ -1280,45 +1359,70 @@ impl<S: ObjectStore> View<S> {
         k: usize,
         ranked: &[(f64, usize, usize)],
         budget: ReadBudget,
-        filter: &[(&str, &str)],
+        selection: (&[(&str, &str)], QueryOptions),
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<RemoteReads> {
-        let candidates: Vec<_> = ranked
-            .iter()
-            .map(|&(_, slot, index)| {
-                let (run, ordinal) =
-                    self.sketches.packs[slot].roots[index].expect("routed blocks are rooted");
-                &self.root.runs[run].blocks[ordinal]
-            })
-            .collect();
-        let ranges = choose(&candidates, budget);
-        // Every rooted block inside a chosen span, in span and offset order.
+        let (filter, options) = selection;
+        // In rank order, cached candidates are read locally up to the local
+        // limit; the other candidates among the first `budget.blocks` are
+        // charged against the remote request and byte limits.
         let mut targets = Vec::new();
         let mut references = Vec::new();
+        let mut fetched = Vec::new();
+        let mut remote = Vec::new();
+        {
+            let mut cache = self.cache.as_deref().map(lock_cache).transpose()?;
+            for (rank, &(_, slot, index)) in ranked.iter().enumerate() {
+                let loaded = &self.sketches.packs[slot];
+                let (run, ordinal) = loaded.roots[index].expect("routed blocks are rooted");
+                let reference = &self.root.runs[run].blocks[ordinal];
+                let hit = match cache.as_mut() {
+                    Some(cache) if fetched.len() < budget.local_blocks => {
+                        cache.lookup(reference)?
+                    }
+                    _ => None,
+                };
+                match hit {
+                    Some((bytes, source)) => {
+                        targets.push((run, ordinal, loaded.live_rows(index)));
+                        references.push(reference);
+                        fetched.push((super::Slice::from(bytes), source));
+                    }
+                    None if rank < budget.blocks => remote.push(reference),
+                    None => {}
+                }
+            }
+        }
+        let local = targets.len();
+        let ranges = choose(&remote, budget);
+        // Every rooted block inside a chosen span and not already read
+        // locally, in span and offset order.
         for &(object, offset, length, _) in &ranges {
             let slot = ranked
                 .iter()
-                .zip(&candidates)
-                .find(|(_, reference)| reference.object == object)
-                .map(|(&(_, slot, _), _)| slot)
+                .find(|&&(_, slot, _)| self.sketches.packs[slot].sketch.pack == object)
+                .map(|&(_, slot, _)| slot)
                 .expect("each span comes from a candidate");
             let loaded = &self.sketches.packs[slot];
             let mut inside: Vec<_> = loaded
-                .sketch
-                .blocks
+                .roots
                 .iter()
-                .zip(&loaded.roots)
-                .filter_map(|(block, root)| {
+                .enumerate()
+                .filter_map(|(index, root)| {
                     let (run, ordinal) = (*root)?;
                     let reference = &self.root.runs[run].blocks[ordinal];
                     (reference.offset >= offset
-                        && reference.offset + reference.length <= offset + length)
-                        .then(|| {
-                            let live = (block.start..block.end)
-                                .filter(|&row| loaded.is_live(row))
-                                .count();
-                            (reference.offset, (run, ordinal, live), reference)
-                        })
+                        && reference.offset + reference.length <= offset + length
+                        && !targets[..local]
+                            .iter()
+                            .any(|&(r, o, _)| (r, o) == (run, ordinal)))
+                    .then(|| {
+                        (
+                            reference.offset,
+                            (run, ordinal, loaded.live_rows(index)),
+                            reference,
+                        )
+                    })
                 })
                 .collect();
             inside.sort_by_key(|&(at, _, _)| at);
@@ -1328,7 +1432,7 @@ impl<S: ObjectStore> View<S> {
             }
         }
         let mut reads = RemoteReads::default();
-        let fetched = self.fetch_blocks(&references, &ranges, &mut reads)?;
+        fetched.extend(self.fetch_blocks(&references[local..], &ranges, &mut reads)?);
         let (config, latest, tail) = (self.config, &self.latest, &self.tail);
         // Current records of one authenticated block, as a local top-k.
         let scan = |index: usize, block: Block| -> Result<Vec<Ranked>> {
@@ -1355,7 +1459,12 @@ impl<S: ObjectStore> View<S> {
                     } if !location.entry.deleted => {
                         seen += 1;
                         if crate::matches_filter(&metadata, filter) {
-                            consider(&mut local, k, config, query, id, &vector);
+                            consider_with(&mut local, k, config, query, id, &vector, || {
+                                (
+                                    options.include_metadata.then(|| metadata.clone()),
+                                    options.include_vector.then(|| vector.clone()),
+                                )
+                            });
                         }
                     }
                     Mutation::Delete { .. } if location.entry.deleted => {}
@@ -1401,7 +1510,14 @@ impl<S: ObjectStore> View<S> {
                         seen += 1;
                         if codec::metadata_matches(entries, metadata, filter) {
                             codec::components(components, &mut vector);
-                            consider(&mut local, k, config, query, view.id, &vector);
+                            consider_with(&mut local, k, config, query, view.id, &vector, || {
+                                (
+                                    options
+                                        .include_metadata
+                                        .then(|| codec::metadata(entries, metadata)),
+                                    options.include_vector.then(|| vector.clone()),
+                                )
+                            });
                         }
                     }
                     None if location.entry.deleted => {}
@@ -1896,6 +2012,7 @@ mod tests {
             blocks: 6,
             requests: 2,
             bytes: 700,
+            local_blocks: 0,
         };
         assert_eq!(
             choose(&refs, budget),

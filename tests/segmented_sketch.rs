@@ -1,6 +1,6 @@
 use glider::{
     retry::{Request, RequestId},
-    segmented::{SegmentedDatabase, SegmentedOptions},
+    segmented::{QueryOptions, ReadBudget, SegmentedDatabase, SegmentedOptions},
     store::{LocalStore, ObjectStore},
     Config, Error, Metric, Mutation, Result,
 };
@@ -124,6 +124,84 @@ fn ids(results: Vec<glider::Neighbor>) -> Vec<(u64, u64)> {
         .into_iter()
         .map(|neighbor| (neighbor.id, neighbor.distance.to_bits()))
         .collect()
+}
+
+#[test]
+fn query_fields_follow_tail_overwrite_seal_and_consolidation() {
+    let temp = tempfile::tempdir().unwrap();
+    let hooks = Arc::new(Mutex::new(Hooks::default()));
+    let mut db = open(&temp.path().join("db"), &hooks).unwrap();
+    let fields = QueryOptions {
+        include_metadata: true,
+        include_vector: true,
+    };
+    let vector = |n: f32| vec![n; DIMENSIONS];
+    for batch in 0..3_u64 {
+        let mutations = (0..10_u64)
+            .map(|row| Mutation::Put {
+                id: batch * 10 + row,
+                vector: vector((batch * 10 + row) as f32),
+                metadata: BTreeMap::from([
+                    ("tag".into(), "hot".into()),
+                    ("route".into(), "yes".into()),
+                    ("version".into(), batch.to_string()),
+                ]),
+            })
+            .collect();
+        db.apply_request(Request {
+            id: RequestId {
+                boundary: db.sequence(),
+                nonce: batch.to_le_bytes().repeat(2).try_into().unwrap(),
+            },
+            conditions: Vec::new(),
+            mutations,
+        })
+        .unwrap();
+        db.seal_delta().unwrap();
+    }
+    while db.consolidate_runs_step().unwrap() {}
+    assert_eq!(db.run_count(), 1);
+    db.apply_request(Request {
+        id: RequestId {
+            boundary: db.sequence(),
+            nonce: [9; 16],
+        },
+        conditions: Vec::new(),
+        mutations: vec![Mutation::Put {
+            id: 0,
+            vector: vector(0.),
+            metadata: BTreeMap::from([
+                ("tag".into(), "hot".into()),
+                ("route".into(), "yes".into()),
+                ("version".into(), "new-tail".into()),
+            ]),
+        }],
+    })
+    .unwrap();
+    let budget = ReadBudget::uniform(db.block_count().max(1));
+    for filter in [vec![], vec![("route", "yes")], vec![("tag", "hot")]] {
+        for hits in [
+            db.search_exact_with_options(&vector(0.), 30, &filter, fields)
+                .unwrap(),
+            db.search_selective_within_options(&vector(0.), 30, budget, &filter, fields)
+                .unwrap(),
+        ] {
+            assert_eq!(hits.len(), 30);
+            for hit in hits {
+                let document = db.get(hit.id).unwrap().unwrap();
+                assert_eq!(
+                    hit.metadata.as_ref(),
+                    Some(&document.metadata),
+                    "id {}",
+                    hit.id
+                );
+                assert_eq!(hit.vector.as_ref(), Some(&document.vector), "id {}", hit.id);
+                if hit.id == 0 {
+                    assert_eq!(hit.metadata.unwrap()["version"], "new-tail");
+                }
+            }
+        }
+    }
 }
 
 /// Reading every block must reproduce exact search, and the resident filter is

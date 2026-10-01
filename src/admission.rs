@@ -2,6 +2,7 @@
 //! reads run beside it on published snapshots when the engine provides them.
 use crate::{
     retry::{Lookup, Outcome, Request, RequestId, Revision},
+    segmented::{QueryHit, QueryOptions},
     serving::{SearchMode, SingleMachine},
     store::ObjectStore,
     streaming::OwnedDocument,
@@ -15,9 +16,15 @@ pub trait Snapshot: Send + Sync {
     fn sequence(&self) -> u64;
     /// Current document for an ID, or `None` if absent or deleted.
     fn get(&self, id: u64) -> crate::Result<Option<OwnedDocument>>;
-    /// Neighbors, with the remote reads and payload bytes this query caused.
-    fn query(&self, query: &[f32], k: usize, filter: &[(&str, &str)])
-        -> crate::Result<QueryResult>;
+    /// Hits with the fields `options` requests, and the remote reads and
+    /// payload bytes this query caused.
+    fn query(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> crate::Result<QueryResult>;
 }
 
 /// One database owner driven by the admission committer. Commands and
@@ -41,6 +48,34 @@ pub trait Engine: Send + 'static {
         k: usize,
         filter: &[(&str, &str)],
     ) -> crate::Result<Vec<Neighbor>>;
+    fn query_with_options(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> crate::Result<Vec<QueryHit>> {
+        self.query(query, k, filter)?
+            .into_iter()
+            .map(|neighbor| {
+                let document = if options.include_metadata || options.include_vector {
+                    Some(self.get(neighbor.id)?.ok_or_else(|| {
+                        crate::Error::Corrupt("query hit missing from current documents".into())
+                    })?)
+                } else {
+                    None
+                };
+                Ok(QueryHit {
+                    id: neighbor.id,
+                    distance: neighbor.distance,
+                    metadata: document
+                        .as_ref()
+                        .and_then(|d| options.include_metadata.then(|| d.metadata.clone())),
+                    vector: document.and_then(|d| options.include_vector.then_some(d.vector)),
+                })
+            })
+            .collect()
+    }
     /// Run at most one bounded maintenance unit while no command is queued.
     /// Returns whether work was performed.
     fn idle_step(&mut self) -> crate::Result<bool> {
@@ -206,6 +241,7 @@ pub struct Observation {
 pub struct QueryResult {
     pub sequence: u64,
     pub neighbors: Vec<Neighbor>,
+    pub hits: Vec<QueryHit>,
     /// Remote object reads and payload bytes this query caused.
     pub remote_reads: u64,
     pub remote_bytes: u64,
@@ -297,6 +333,7 @@ enum Read {
         query: Vec<f32>,
         k: usize,
         filter: Vec<(String, String)>,
+        options: QueryOptions,
         reply: Reply<QueryResult>,
     },
     Get {
@@ -332,6 +369,7 @@ impl Read {
                 query,
                 k,
                 filter,
+                options,
                 reply,
             } => {
                 let filter: Vec<_> = filter
@@ -339,18 +377,20 @@ impl Read {
                     .map(|(k, v)| (k.as_str(), v.as_str()))
                     .collect();
                 let result = match target {
-                    Target::Snapshot(snapshot) => snapshot.query(&query, k, &filter),
+                    Target::Snapshot(snapshot) => snapshot.query(&query, k, &filter, options),
                     Target::Committer(db) => {
                         let (reads, bytes) = db.remote_reads();
-                        db.query(&query, k, &filter).map(|neighbors| {
-                            let (reads_after, bytes_after) = db.remote_reads();
-                            QueryResult {
-                                sequence: db.sequence(),
-                                remote_reads: reads_after - reads,
-                                remote_bytes: bytes_after - bytes,
-                                neighbors,
-                            }
-                        })
+                        db.query_with_options(&query, k, &filter, options)
+                            .map(|hits| {
+                                let (reads_after, bytes_after) = db.remote_reads();
+                                QueryResult {
+                                    sequence: db.sequence(),
+                                    remote_reads: reads_after - reads,
+                                    remote_bytes: bytes_after - bytes,
+                                    neighbors: hits.iter().map(QueryHit::neighbor).collect(),
+                                    hits,
+                                }
+                            })
                     }
                 };
                 finish(reply, result, queue_wait, start)
@@ -576,6 +616,16 @@ impl<E: Engine> Client<E> {
         k: usize,
         filter: Vec<(String, String)>,
     ) -> Result<Ticket<QueryResult>> {
+        self.query_with_options(query, k, filter, QueryOptions::default())
+    }
+
+    pub fn query_with_options(
+        &self,
+        query: Vec<f32>,
+        k: usize,
+        filter: Vec<(String, String)>,
+        options: QueryOptions,
+    ) -> Result<Ticket<QueryResult>> {
         self.config.vector(&query)?;
         if filter.len() > 100 {
             return Err(crate::Error::Invalid("at most 100 equality predicates".into()).into());
@@ -591,6 +641,7 @@ impl<E: Engine> Client<E> {
                 query,
                 k,
                 filter,
+                options,
                 reply,
             }))
         })

@@ -272,7 +272,13 @@ fn serving_options(cache: Option<PathBuf>) -> SegmentedServingOptions {
     } else {
         SegmentedServingOptions::m21(PathBuf::new())
     };
-    options.cache = cache.map(|directory| (directory, 0, 256 * 1024 * 1024));
+    // `GLIDER_M24_CACHE_BYTES` raises the NVMe cache so warm-up can hold a
+    // namespace larger than the declared 256 MiB.
+    let nvme = env::var("GLIDER_M24_CACHE_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(256 * 1024 * 1024);
+    options.cache = cache.map(|directory| (directory, 0, nvme));
     options
 }
 
@@ -554,8 +560,20 @@ fn static_pass(
     oracle: &Value,
 ) -> Result<Value> {
     let mut classes = Vec::new();
-    for pass in ["first_empty_cache", "second_warm"] {
+    for pass in ["first_empty_cache", "second_warm", "third_namespace_warm"] {
         let mut result = serde_json::Map::new();
+        if pass == "third_namespace_warm" {
+            // Warm the whole namespace into NVMe as idle maintenance would.
+            let started = Instant::now();
+            while db
+                .database()
+                .warm_cache_step(serving_options(None).warm_unit_bytes)?
+            {}
+            result.insert(
+                "warm_up".into(),
+                json!({"ms":ms(started.elapsed()),"cache":db.database().cache_stats()?}),
+            );
+        }
         for (key, filter) in [("unfiltered", Vec::new()), ("filtered", vec![FILTER])] {
             let oracle_key = format!("{key}_exact_ids");
             let (mut hits, mut short, mut per_query) = (Vec::new(), 0, Vec::new());
@@ -920,41 +938,47 @@ fn verify(args: &[String]) -> Result<Value> {
         Ok(())
     })?;
     let scan_ms = ms(started.elapsed());
+    // `local_blocks == 0` reproduces the cold choice whatever the cache
+    // holds; the serving budget's local limit is measured after warm-up.
     let serving_budget = serving_options(None).read_budget;
-    let mut budgets = BTreeMap::new();
-    for (label, budget) in [
-        ("uniform_8", ReadBudget::uniform(8)),
-        ("uniform_10", ReadBudget::uniform(10)),
-        ("uniform_12", ReadBudget::uniform(12)),
-        ("serving", serving_budget),
-        (
-            "serving_16",
-            ReadBudget {
-                blocks: 16,
-                ..serving_budget
-            },
-        ),
-        (
-            "serving_24",
-            ReadBudget {
-                blocks: 24,
-                ..serving_budget
-            },
-        ),
-    ] {
+    let cold_budget = ReadBudget {
+        local_blocks: 0,
+        ..serving_budget
+    };
+    let recall = |budget: ReadBudget| -> Result<f64> {
         let mut recall = [0_usize; 2];
-        for oracle in &oracles {
+        for oracle in oracles.iter().filter(|oracle| !oracle.filtered) {
             let truth: Vec<u64> = oracle.heap.iter().map(|&(_, id)| id).collect();
-            if oracle.filtered {
-                continue;
-            }
             let found = db
                 .database()
                 .search_selective_within(&oracle.query, 10, budget, &[])?;
             recall[0] += found.iter().filter(|n| truth.contains(&n.id)).count();
             recall[1] += 10;
         }
-        budgets.insert(label, recall[0] as f64 / recall[1] as f64);
+        Ok(recall[0] as f64 / recall[1] as f64)
+    };
+    let mut budgets = BTreeMap::new();
+    for (label, budget) in [
+        ("uniform_8", ReadBudget::uniform(8)),
+        ("uniform_10", ReadBudget::uniform(10)),
+        ("uniform_12", ReadBudget::uniform(12)),
+        ("serving", cold_budget),
+        (
+            "serving_16",
+            ReadBudget {
+                blocks: 16,
+                ..cold_budget
+            },
+        ),
+        (
+            "serving_24",
+            ReadBudget {
+                blocks: 24,
+                ..cold_budget
+            },
+        ),
+    ] {
+        budgets.insert(label, recall(budget)?);
     }
     // Best possible coverage by any 8 committed blocks (tail rows count as
     // found): separates layout locality from routing quality.
@@ -977,42 +1001,64 @@ fn verify(args: &[String]) -> Result<Value> {
         "oracle_best_8_blocks",
         ceiling[0] as f64 / ceiling[1] as f64,
     );
-    let mut quality = BTreeMap::<&str, (Vec<f64>, usize)>::new();
-    let mut first_results = Vec::new();
-    for oracle in &oracles {
-        let truth: Vec<u64> = oracle.heap.iter().map(|&(_, id)| id).collect();
-        let filter = if oracle.filtered {
-            vec![FILTER]
-        } else {
-            Vec::new()
-        };
-        let found =
-            db.database()
-                .search_selective_within(&oracle.query, 10, serving_budget, &filter)?;
-        if first_results.len() < 20 {
-            first_results.push(found.iter().map(|n| n.id).collect::<Vec<_>>());
-        }
-        let entry = quality
-            .entry(if oracle.filtered {
-                "filtered"
+    // Quality of both classes and the first 20 result ID lists.
+    let quality = |budget: ReadBudget| -> Result<(Value, Vec<Vec<u64>>)> {
+        let mut quality = BTreeMap::<&str, (Vec<f64>, usize)>::new();
+        let mut first_results = Vec::new();
+        for oracle in &oracles {
+            let truth: Vec<u64> = oracle.heap.iter().map(|&(_, id)| id).collect();
+            let filter = if oracle.filtered {
+                vec![FILTER]
             } else {
-                "unfiltered"
+                Vec::new()
+            };
+            let found =
+                db.database()
+                    .search_selective_within(&oracle.query, 10, budget, &filter)?;
+            if first_results.len() < 20 {
+                first_results.push(found.iter().map(|n| n.id).collect::<Vec<_>>());
+            }
+            let entry = quality
+                .entry(if oracle.filtered {
+                    "filtered"
+                } else {
+                    "unfiltered"
+                })
+                .or_default();
+            entry
+                .0
+                .push(found.iter().filter(|n| truth.contains(&n.id)).count() as f64 / 10.);
+            entry.1 += usize::from(found.len() < truth.len());
+        }
+        let quality: BTreeMap<_, _> = quality
+            .into_iter()
+            .map(|(key, (mut recalls, short))| {
+                let mean = recalls.iter().sum::<f64>() / recalls.len() as f64;
+                recalls.sort_by(f64::total_cmp);
+                (key, json!({"queries":recalls.len(),"mean_recall_at_10":mean,
+                    "fifth_percentile_recall_at_10":recalls[recalls.len()*5/100-1],"short_results":short}))
             })
-            .or_default();
-        entry
-            .0
-            .push(found.iter().filter(|n| truth.contains(&n.id)).count() as f64 / 10.);
-        entry.1 += usize::from(found.len() < truth.len());
+            .collect();
+        Ok((json!(quality), first_results))
+    };
+    let (quality_cold, first_results) = quality(cold_budget)?;
+    // Warm the whole namespace into the NVMe cache, then measure the serving
+    // budget, which also reranks up to `local_blocks` cached blocks.
+    let warm_started = Instant::now();
+    while db
+        .database()
+        .warm_cache_step(serving_options(None).warm_unit_bytes)?
+    {}
+    let warm_up = json!({"ms":ms(warm_started.elapsed()),"cache":db.database().cache_stats()?});
+    let (quality_warm, _) = quality(serving_budget)?;
+    let mut warm_budgets = BTreeMap::new();
+    for local_blocks in [12, serving_budget.local_blocks, 48] {
+        let budget = ReadBudget {
+            local_blocks,
+            ..serving_budget
+        };
+        warm_budgets.insert(format!("serving_local_{local_blocks}"), recall(budget)?);
     }
-    let quality: BTreeMap<_, _> = quality
-        .into_iter()
-        .map(|(key, (mut recalls, short))| {
-            let mean = recalls.iter().sum::<f64>() / recalls.len() as f64;
-            recalls.sort_by(f64::total_cmp);
-            (key, json!({"queries":recalls.len(),"mean_recall_at_10":mean,
-                "fifth_percentile_recall_at_10":recalls[recalls.len()*5/100-1],"short_results":short}))
-        })
-        .collect();
     db.close()?;
 
     fs::remove_dir_all(cache.join("glider-block-cache-v1")).ok();
@@ -1026,7 +1072,7 @@ fn verify(args: &[String]) -> Result<Value> {
         };
         let found: Vec<_> = db
             .database()
-            .search_selective_within(&oracle.query, 10, serving_budget, &filter)?
+            .search_selective_within(&oracle.query, 10, cold_budget, &filter)?
             .iter()
             .map(|n: &Neighbor| n.id)
             .collect();
@@ -1056,7 +1102,7 @@ fn verify(args: &[String]) -> Result<Value> {
                 Vec::new()
             };
             let found: Vec<_> = restored
-                .search_selective_within(&oracle.query, 10, serving_budget, &filter)?
+                .search_selective_within(&oracle.query, 10, cold_budget, &filter)?
                 .iter()
                 .map(|n| n.id)
                 .collect();
@@ -1070,8 +1116,10 @@ fn verify(args: &[String]) -> Result<Value> {
     Ok(
         json!({"reopen":reopen,"scan_ms":scan_ms,"live_documents":seen,
         "expected_documents":rows(),"value_mismatches":mismatches,
-        "overwritten_ids":generation.len(),"update_wave_quality":quality,
-        "unfiltered_mean_recall_by_block_budget":budgets,
+        "overwritten_ids":generation.len(),"update_wave_quality":quality_cold,
+        "unfiltered_mean_recall_by_block_budget":budgets,"warm_up":warm_up,
+        "update_wave_quality_warm":quality_warm,
+        "warm_unfiltered_mean_recall_by_local_blocks":warm_budgets,
         "cache_loss_open":loss_open,"cache_loss_results_equal":loss_equal,
         "backup":backup_report}),
     )

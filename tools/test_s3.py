@@ -95,6 +95,8 @@ def main():
         run("cargo", "test", "--locked", "--features", "s3", "--test", "failure_matrix", "--no-run", env=env)
         run("cargo", "test", "--locked", "--release", "--features", "s3",
             "--test", "segmented_crash", "--no-run", env=env)
+        run("cargo", "test", "--locked", "--release", "--features", "s3",
+            "--test", "takeover", "--no-run", env=env)
     if output or segment_output or compaction_output or search_output:
         run("cargo", "bench", "--locked", "--bench", "baseline", "--no-run", env=env)
         run("cargo", "bench", "--locked", "--features", "s3", "--bench", "baseline", "--no-run", env=env)
@@ -164,6 +166,8 @@ def main():
             "--", "--ignored", "--nocapture", env=env)
         run("cargo", "test", "--locked", "--release", "--features", "s3",
             "--test", "segmented_crash", "minio_", "--", "--ignored", env=env)
+        run("cargo", "test", "--locked", "--release", "--features", "s3",
+            "--test", "takeover", "minio_", "--", "--ignored", env=env)
         run(*test_args, "store::s3::tests::minio_", "--", "--ignored", "--nocapture", env=env)
         run(*test_args, "store::s3::tests::server_restart_prepare", "--", "--ignored", env=env)
         run("docker", "kill", "--signal", "KILL", name, capture=True)

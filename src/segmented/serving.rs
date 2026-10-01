@@ -1,11 +1,12 @@
 //! Single-owner segmented serving. Queries use the persisted sketches and run
 //! on published views beside the admission committer; seal, consolidation,
-//! pruning, reclamation and cleanup advance in bounded units that the
-//! committer runs only while no command is queued.
-use super::{root_key, ReadBudget, SegmentedDatabase, SegmentedOptions, View};
+//! pruning, reclamation, cleanup and cache warm-up advance in bounded units
+//! that the committer runs only while no command is queued.
+use super::{
+    root_key, QueryHit, QueryOptions, ReadBudget, SegmentedDatabase, SegmentedOptions, View,
+};
 use crate::{
     admission::{Engine, EngineMetrics, QueryResult, Snapshot},
-    ownership::OwnedStore,
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     store::ObjectStore,
     streaming::OwnedDocument,
@@ -23,7 +24,8 @@ pub struct SegmentedServingOptions {
     /// Start a seal when this many acknowledged log objects are unsealed.
     /// The engine rejects writes at 64, which forces synchronous maintenance.
     pub seal_tail_objects: usize,
-    /// Blocks an unfiltered selective query may read, and its remote budget.
+    /// Blocks a selective query may read: its remote budget, charged only
+    /// for uncached blocks, and its limit on cached blocks read locally.
     pub read_budget: ReadBudget,
     /// Obsolete objects removed by one cleanup unit.
     pub cleanup_objects: usize,
@@ -33,12 +35,18 @@ pub struct SegmentedServingOptions {
     pub cache: Option<(PathBuf, usize, usize)>,
     /// Scoped threads used to score sketches for one query.
     pub query_threads: usize,
+    /// Bytes one idle warm-up unit may read into the NVMe cache; 0 disables
+    /// warm-up.
+    pub warm_unit_bytes: usize,
 }
 
 impl SegmentedServingOptions {
     /// The M21 250,000-row envelope: 64 MiB engine RSS and a 256 MiB NVMe
     /// cache. The RAM block tier is disabled: NVMe (and the OS page cache)
-    /// hold the working set, leaving the RAM budget for engine state.
+    /// hold the working set, leaving the RAM budget for engine state. Idle
+    /// warm-up copies the namespace into NVMe 256 KiB at a time, and up to
+    /// 24 cached blocks (twice the routed candidates) are reranked locally
+    /// in addition to the remote budget.
     pub fn m21(cache_directory: PathBuf) -> Self {
         Self {
             seal_tail_objects: 32,
@@ -46,11 +54,13 @@ impl SegmentedServingOptions {
                 blocks: 12,
                 requests: 8,
                 bytes: 1024 * 1024,
+                local_blocks: 24,
             },
             cleanup_objects: 4,
             max_index_bytes: 24 * 1024 * 1024,
             cache: Some((cache_directory, 0, 256 * 1024 * 1024)),
             query_threads: 4,
+            warm_unit_bytes: 256 * 1024,
         }
     }
 
@@ -80,10 +90,11 @@ pub struct ServingCounters {
     /// Seals forced inside a write because the log tail reached its bound.
     pub forced_seals: u64,
     pub sketch_compactions: u64,
+    pub warm_steps: u64,
 }
 
 pub struct SegmentedServing<S: ObjectStore> {
-    db: SegmentedDatabase<OwnedStore<S>>,
+    db: SegmentedDatabase<S>,
     options: SegmentedServingOptions,
     maintenance_time: Duration,
     /// A root changed since prune/reclaim last found no candidate.
@@ -93,8 +104,9 @@ pub struct SegmentedServing<S: ObjectStore> {
 }
 
 impl<S: ObjectStore> SegmentedServing<S> {
-    /// Claim exclusive ownership, then open the segmented namespace. A failed
-    /// open can leave the claim; follow the stopped-owner procedure.
+    /// Take over the namespace (fencing every earlier writer), then open it.
+    /// Hold a [`crate::lease::Lease`] first so a live writer is not deposed;
+    /// see [`SegmentedDatabase::take_over_with_options`] for errors.
     pub fn open(
         store: S,
         config: Config,
@@ -111,10 +123,8 @@ impl<S: ObjectStore> SegmentedServing<S> {
                 "segmented serving bounds are invalid".into(),
             ));
         }
-        let mut db =
-            SegmentedDatabase::open_with_options(OwnedStore::claim(store)?, config, segmented)?;
+        let mut db = SegmentedDatabase::take_over_with_options(store, config, segmented)?;
         if db.selective_index_bytes() > options.max_index_bytes {
-            db.into_store()?.release()?;
             return Err(Error::Invalid(
                 "segmented sketches exceed the serving index budget".into(),
             ));
@@ -133,7 +143,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         })
     }
 
-    pub fn database(&self) -> &SegmentedDatabase<OwnedStore<S>> {
+    pub fn database(&self) -> &SegmentedDatabase<S> {
         &self.db
     }
 
@@ -141,9 +151,13 @@ impl<S: ObjectStore> SegmentedServing<S> {
         self.counters
     }
 
-    /// Release the namespace claim after serial administrative work.
+    /// Stop using the handle. An uncertain handle reports `RecoveryRequired`;
+    /// the next takeover fences its late requests either way.
     pub fn close(self) -> Result<()> {
-        self.db.into_store()?.release()
+        if self.db.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        Ok(())
     }
 
     /// Kind of the most recent maintenance unit, for diagnostics.
@@ -152,7 +166,8 @@ impl<S: ObjectStore> SegmentedServing<S> {
     }
 
     /// One bounded unit: a staged step, a seal plan, a run consolidation, a
-    /// prune/reclaim plan or a cleanup batch. Returns false when idle.
+    /// prune/reclaim plan, a cleanup batch or, when nothing else is due, one
+    /// cache warm-up read. Returns false when idle.
     pub fn maintenance_step(&mut self) -> Result<bool> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
@@ -221,7 +236,17 @@ impl<S: ObjectStore> SegmentedServing<S> {
         self.last_unit = "cleanup";
         let removed = db.cleanup_step(self.options.cleanup_objects)?;
         counters.removed_objects += removed as u64;
-        Ok(removed > 0)
+        if removed > 0 {
+            return Ok(true);
+        }
+        // Lowest priority: keep the selected root on local NVMe so queries
+        // read it without remote requests.
+        self.last_unit = "warm";
+        if self.options.warm_unit_bytes > 0 && db.warm_cache_step(self.options.warm_unit_bytes)? {
+            counters.warm_steps += 1;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// At the hard log-tail bound, finish any staged maintenance and a seal
@@ -341,13 +366,20 @@ impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
     fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
         self.view.get(id)
     }
-    fn query(&self, query: &[f32], k: usize, filter: &[(&str, &str)]) -> Result<QueryResult> {
-        let (neighbors, reads) =
+    fn query(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<QueryResult> {
+        let (hits, reads) =
             self.view
-                .search_selective_within(query, k, self.read_budget, filter)?;
+                .search_selective_within(query, k, self.read_budget, filter, options)?;
         Ok(QueryResult {
             sequence: self.view.sequence(),
-            neighbors,
+            neighbors: hits.iter().map(QueryHit::neighbor).collect(),
+            hits,
             remote_reads: reads.requests,
             remote_bytes: reads.bytes,
         })
@@ -400,6 +432,16 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
         self.db
             .search_selective_within(query, k, self.options.read_budget, filter)
     }
+    fn query_with_options(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
+        self.db
+            .search_selective_within_options(query, k, self.options.read_budget, filter, options)
+    }
     /// Admission runs queries on these views, beside the committer.
     fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {
         Some(Arc::new(Published {
@@ -410,6 +452,8 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
     fn idle_step(&mut self) -> Result<bool> {
         self.maintenance_step()
     }
+    /// Cumulative query reads through the cache; each query's own reads are
+    /// reported in its `QueryResult`.
     fn remote_reads(&self) -> (u64, u64) {
         self.db
             .cache_stats()
@@ -450,6 +494,7 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
                     "glider_segmented_sketch_compactions_total",
                     counters.sketch_compactions,
                 ),
+                ("glider_segmented_warm_steps_total", counters.warm_steps),
                 ("glider_cache_ram_hits_total", cache.ram_hits),
                 ("glider_cache_nvme_hits_total", cache.nvme_hits),
                 ("glider_cache_remote_fetches_total", cache.remote_fetches),
@@ -460,6 +505,16 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
                 ("glider_cache_corrupt_entries_total", cache.corrupt_entries),
                 ("glider_cache_nvme_bytes", cache.nvme_bytes as u64),
                 ("glider_cache_nvme_entries", cache.nvme_entries as u64),
+                ("glider_cache_nvme_limit_bytes", cache.nvme_limit as u64),
+                ("glider_cache_namespace_bytes", cache.namespace_bytes as u64),
+                ("glider_cache_warm_bytes", cache.warm_bytes as u64),
+                ("glider_cache_warm_complete", u64::from(cache.warm_complete)),
+                ("glider_cache_warm_fetches_total", cache.warm_fetches),
+                (
+                    "glider_cache_warm_payload_bytes_total",
+                    cache.warm_payload_bytes,
+                ),
+                ("glider_writer_epoch", self.db.epoch()),
                 (
                     "glider_sketch_index_bytes",
                     self.db.selective_index_bytes() as u64,
@@ -467,11 +522,8 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
             ],
         })
     }
-    /// A clean handle releases its claim; an uncertain one keeps it.
+    /// A clean handle closes; an uncertain one reports `RecoveryRequired`.
     fn close(self) -> Result<()> {
-        if self.db.poisoned {
-            return Err(Error::RecoveryRequired);
-        }
-        self.db.into_store()?.release()
+        SegmentedServing::close(self)
     }
 }

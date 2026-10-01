@@ -256,6 +256,36 @@ at 5.30 PUT/s because maintenance published fewer packs and roots; the M27
 target of 4 PUT/s needs batching by clients or a different arrival pattern,
 not more committer work. [Evidence](../benchmarks/M27.md).
 
+## 2026-10-01 — Remote read budget charges only uncached blocks
+
+At 1,000,000 SIFT rows the 8-request budget limited update-wave recall to
+0.876 while 12 uniformly chosen blocks reached 0.990, and the 256 MiB NVMe
+cache held only the 45 MiB that queries had read. The read budget therefore
+stopped being independent of cache contents: cached candidates are reranked
+locally under a separate local block limit, the remote request and byte
+limits apply only to uncached blocks, and an empty cache keeps the previous
+cold choice exactly. An idle warm-up unit copies the selected root into the
+NVMe tier, one authenticated range read at a time, without exceeding the
+cache limit. Warm quality now depends on the cache; correctness does not.
+The warm 1M recall and latency gates are not yet measured.
+[Evidence](../benchmarks/M31.md).
+
+## 2026-10-01 — Automatic takeover with permanent fences
+
+A killed `glider-server` left its permanent ownership claim, so every crash
+needed an operator to restore into a fresh prefix. A lease alone cannot fence
+a paused writer whose clock is wrong, and the object contract has no
+compare-and-swap. A writer's next log and root keys are deterministic, so a
+taker now occupies exactly those keys with permanent conditional creates (a
+takeover record and a root fence marker): a resumed writer's next publication
+fails at the store, at no per-write cost, for two small objects per process
+start. A renewed lease only paces takeovers. Lease and database handles, and
+old and new servers, now share a local directory, where create was
+check-then-write and a reopen could reclaim another handle's in-progress
+publication; `LocalStore` now serializes mutation under a directory lock.
+Drills restart a killed server on the same directory and show that a frozen,
+resumed server cannot write.
+
 ## 2026-10-01 — Queries run beside the committer on published views
 
 Segmented queries and document reads moved off the single admission committer
@@ -267,4 +297,6 @@ read-your-writes; packs of a replaced root stay until no view holds it.
 DELETE, which a store lock would have forced. In the 1M in-memory probe the
 query queue p95 fell from about 43 to 4 ms, but four simultaneous queries now
 share the CPU and end-to-end p95 stayed near 53 ms: routing cost per query, not
-serialization, bounds this workload. [Evidence](../benchmarks/M31.md#concurrent-queries-m34).
+serialization, bounds this workload. Idle cache warm-up likewise reads its
+range outside the cache lock, so queries never wait for its GET.
+[Evidence](../benchmarks/M31.md#concurrent-queries-m34).

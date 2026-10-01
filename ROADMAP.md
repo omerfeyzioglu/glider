@@ -1025,8 +1025,11 @@ and the M31 load meets warm p95 <=50 ms.
 
 ## M35 — Local SSD as a namespace cache
 
-Status: planned. The NVMe cache holds only blocks queries already read
-(45 MiB of 256 MiB at 1M), and the read budget charges cached blocks too.
+Status: implemented, not yet measured. The NVMe cache held only blocks
+queries already read (45 MiB of 256 MiB at 1M), and the read budget charged
+cached blocks too. Cached candidates are now reranked under a separate local
+block limit (`GLIDER_LOCAL_BLOCKS`, default 24), idle warm-up fills the cache,
+and status/metrics report warm state; the warm 1M acceptance run remains.
 
 Steps:
 - Charge the read budget only for remote reads; cached blocks are free.
@@ -1040,8 +1043,13 @@ cold behavior keeps the remote budget, and cache-loss tests still pass.
 
 ## M36 — Restarts without an operator
 
-Status: planned. A killed writer leaves its ownership claim, so the next
-process refuses to open and recovery needs `glider-admin restore`.
+Status: implemented. Local drills and MinIO takeover tests pass; not yet run
+on AWS S3.
+`glider-server` holds a renewed lease and takes over with permanent fence
+objects at the deposed writer's next log and root keys (`DESIGN.md`,
+"Segmented writer takeover"); `tools/drills.py` restarts a killed server
+on the same directory and checks that a frozen server resumed after takeover
+cannot write.
 
 Steps:
 - Replace the permanent claim with a renewed lease plus a monotonically

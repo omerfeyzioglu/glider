@@ -1,9 +1,49 @@
-# Single-writer recovery procedure
+# Recovery procedures
 
-Use this procedure for an `OwnedDatabase` namespace. The object store must
-satisfy the complete-object, strongly consistent listing and conditional-create
-contract in `DESIGN.md`. Keep the old namespace and its backups intact while
-diagnosing failure.
+The object store must satisfy the complete-object, strongly consistent listing
+and conditional-create contract in `DESIGN.md`.
+
+## Segmented collections (`glider-server`)
+
+A crash, kill, host loss or uncertain write needs no operator step. Start
+`glider-server` (or any `glider-admin` command) again on the same prefix with
+the same `GLIDER_DIMENSIONS`, `GLIDER_METRIC`, `GLIDER_RESIDENT_FILTER` and
+`GLIDER_ROUTED_KEYS`. It waits at most one lease duration
+(`GLIDER_LEASE_SECONDS`, default 10) for the dead process's lease to expire,
+then takes the namespace over: it fences the previous writer at the object
+store, replays the log tail and serves every acknowledged write. A graceful
+SIGINT/SIGTERM releases the lease, so the next start does not wait.
+
+- A process that was only paused or partitioned, not dead, is fenced: its
+  later writes fail with a "fenced by a takeover" error and are not
+  committed, its next lease renewal reports it deposed and it exits. Until
+  then it may still answer reads from its old view, so remove it from client
+  routing.
+- A second process started while a server renews its lease waits one lease
+  duration and fails with a lease (busy) error; it deposes nobody.
+- Resolve a write whose outcome was lost with `GET
+  /v1/requests/{boundary}/{nonce}` or by resending it with the same
+  `request_id` after the restart; an unacknowledged write may be present or
+  absent, never partial.
+- Upgrading from a pre-M36 binary: stop every old server first (it holds no
+  lease and would be fenced immediately). Its leftover `owner-*` claim
+  objects are ignored. After the first takeover, pre-M36 binaries reject the
+  namespace.
+
+Restore is needed only to move data or after loss or corruption: a missing
+or corrupt selected root, index or pack, a log gap or invalid metadata fails
+open. Do not delete objects to make it open.
+`glider-admin backup <empty-destination>` creates a validated copy of the
+collection while no server holds the lease. With `GLIDER_DATA_DIR` (or
+`GLIDER_S3_NAMESPACE`) set to a fresh empty destination, `glider-admin restore
+<backup-or-prefix>` copies a backup or a stopped namespace, excluding lease and
+claim objects, publishes `metadata` last and validates the segmented root and
+log tail. The first server start there takes it over. Never reuse a failed
+destination.
+
+## Resident `OwnedDatabase` namespaces
+
+Keep the old namespace and its backups intact while diagnosing failure.
 
 1. **Stop the old writer and client traffic.** Verify the process cannot issue
    new requests. A timed-out request already sent to S3 may still finish after
@@ -27,17 +67,6 @@ diagnosing failure.
    no database write could have been acknowledged there; initialize a fresh
    empty prefix instead. If any data object exists without `metadata`, treat it
    as corruption, not an empty database.
-
-   For a segmented `glider-server` collection, set the same
-   `GLIDER_DIMENSIONS`, `GLIDER_METRIC` and `GLIDER_RESIDENT_FILTER` as the old
-   server, set `GLIDER_DATA_DIR` (or `GLIDER_S3_NAMESPACE`) to the fresh
-   destination, then run `glider-admin restore <old-directory-or-s3-prefix>`.
-   This is the segmented equivalent of staging: it excludes ownership controls,
-   publishes metadata last, validates the segmented root and log tail, briefly
-   claims the destination, and releases that claim. Check acknowledged IDs and
-   query results before starting the server there. `glider-admin backup
-   <empty-destination>` creates a validated backup after clean server shutdown;
-   the same restore command accepts that backup as its source.
 4. **Handle interruption.** If staging errors or stops before validation, never
    point clients at that destination and never reuse it. Reserve another empty
    prefix for the next attempt. A nonempty partial copy without metadata fails

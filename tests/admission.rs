@@ -5,6 +5,7 @@ use glider::{
     ownership::claims,
     recovery::stage_isolated_namespace,
     retry::{Lookup, Outcome, Request, RequestId, Revision},
+    segmented::QueryOptions,
     serving::{ServingOptions, SingleMachine},
     store::ObjectStore,
     streaming::OwnedDocument,
@@ -377,7 +378,13 @@ impl Snapshot for Counted {
     fn get(&self, _: u64) -> glider::Result<Option<OwnedDocument>> {
         Ok(None)
     }
-    fn query(&self, query: &[f32], _: usize, _: &[(&str, &str)]) -> glider::Result<QueryResult> {
+    fn query(
+        &self,
+        query: &[f32],
+        _: usize,
+        _: &[(&str, &str)],
+        _: QueryOptions,
+    ) -> glider::Result<QueryResult> {
         assert!(query[0] >= 0., "injected reader panic");
         if let Some(hold) = &self.1 {
             hold.enter();
@@ -385,6 +392,7 @@ impl Snapshot for Counted {
         Ok(QueryResult {
             sequence: self.0,
             neighbors: Vec::new(),
+            hits: Vec::new(),
             remote_reads: 0,
             remote_bytes: 0,
         })
