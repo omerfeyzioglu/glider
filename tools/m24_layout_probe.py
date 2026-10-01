@@ -35,7 +35,7 @@ def main() -> None:
     for name, expected in EXPECTED.items():
         if sha256(args.data / name) != expected:
             raise ValueError(f"unexpected SIFT1M digest: {name}")
-    run("cargo", "build", "--locked", "--release", "--features", "experimental-segmented",
+    run("cargo", "build", "--locked", "--release", 
         "--example", "m24_layout_probe")
     with tempfile.TemporaryDirectory(prefix="glider-m24-layout-") as workdir:
         result = json.loads(run("target/release/examples/m24_layout_probe",

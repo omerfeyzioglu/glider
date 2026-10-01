@@ -8,6 +8,26 @@ Architecture evolves from requirements and measurements, not anticipated scale.
 
 ## Architecture
 
+### Engines and namespace compatibility
+
+Two engines share the object contract, configuration and metrics but use
+disjoint namespace formats:
+
+- The segmented engine (`segmented::SegmentedDatabase`, served by
+  `SegmentedServing` and `glider-server`) is the serving path. RAM holds the
+  latest-ID directory, pack sketches and the unsealed log tail; vectors stay in
+  immutable packs read through bounded caches.
+- The resident engine (`Database`, `SingleMachine`) keeps every document in
+  RAM. It is the small-collection library mode and the exact reference.
+
+The `metadata` object's version names the engine: 1 is resident, 2 and 3 are
+segmented. Opening a namespace with the other engine, or with a configuration
+or options different from the stored ones, is an `Invalid` error before any
+write; an unknown version is `Corrupt`. Each engine reads every version its
+format sections below list and writes the current one. Nothing migrates a
+namespace between engines in place; data moves by reading one and writing the
+other.
+
 The Rust library implements this path:
 
 ```text
@@ -353,7 +373,7 @@ digest bind disposable RAM/NVMe cache entries to a pinned root in the
 segmented namespace; `SegmentedServing` serves it, and the declared M21
 250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
 measured 10,000-row independent-arrival boundary and alternatives are in
-`benchmarks/M21.md`. The `experimental-segmented` API defines metadata v2/v3,
+`benchmarks/M21.md`. The segmented API defines metadata v2/v3,
 root/index/log v1 and block v1/v2 in a fresh namespace. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
@@ -397,8 +417,8 @@ single-machine limit and explicit coordination semantics.
 [OpenData](https://github.com/opendata-oss/opendata) are references for economics
 and operating behavior. OpenData's SlateDB foundation is not an adoption decision
 for glider's owned storage engine. The next measurable stages are M21–M24 in
-`ROADMAP.md`; the segmented engine remains behind the `experimental-segmented`
-feature, and its acceptance evidence is in `benchmarks/M24.md`.
+`ROADMAP.md`; the segmented engine's acceptance evidence is in
+`benchmarks/M24.md`.
 
 ### Target invariants
 

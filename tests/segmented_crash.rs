@@ -1,4 +1,3 @@
-#![cfg(feature = "experimental-segmented")]
 //! Crash-point matrix: fail every object create and remove of a fixed
 //! workload, before it lands or after (response lost), then reopen and check
 //! the acknowledged state against a model and exact search.

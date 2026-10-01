@@ -116,7 +116,7 @@ def main():
     base, query = str(args.data / "sift1m_base_250000.fvecs"), str(args.data / "sift1m_query.fvecs")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
-    run("cargo", "build", "--locked", "--release", "--features", "s3,experimental-segmented",
+    run("cargo", "build", "--locked", "--release", "--features", "s3",
         "--example", "m24_acceptance", env=env)
     binary = "target/release/examples/m24_acceptance"
     name = "glider-m24-" + secrets.token_hex(6)

@@ -1,5 +1,3 @@
-#![cfg(feature = "experimental-segmented")]
-
 use glider::{
     retry::{Request, RequestId},
     segmented::SegmentedDatabase,
