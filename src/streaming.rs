@@ -215,7 +215,13 @@ impl<S: ObjectStore> StreamingDatabase<S> {
                         vector,
                         metadata,
                     } => {
-                        overlay.insert(id, Some(Document { vector, metadata }));
+                        overlay.insert(
+                            id,
+                            Some(Document {
+                                vector: config.normalized(vector),
+                                metadata,
+                            }),
+                        );
                     }
                     Mutation::Delete { id } => {
                         overlay.insert(id, None);
@@ -291,7 +297,7 @@ impl<S: ObjectStore> StreamingDatabase<S> {
         k: usize,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
-        self.config.vector(query)?;
+        let query = self.config.query(query)?;
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -303,7 +309,7 @@ impl<S: ObjectStore> StreamingDatabase<S> {
         }) {
             for (id, document) in &posting.documents {
                 if !self.overlay.contains_key(id) && matches_filter(&document.metadata, filter) {
-                    consider(&mut heap, k, *id, document, query, self.config.metric);
+                    consider(&mut heap, k, *id, document, &query, self.config.metric);
                 }
             }
         } else {
@@ -315,7 +321,7 @@ impl<S: ObjectStore> StreamingDatabase<S> {
                 |id, document| {
                     if !self.overlay.contains_key(&id) && matches_filter(&document.metadata, filter)
                     {
-                        consider(&mut heap, k, id, &document, query, self.config.metric);
+                        consider(&mut heap, k, id, &document, &query, self.config.metric);
                     }
                     Ok(())
                 },
@@ -324,7 +330,7 @@ impl<S: ObjectStore> StreamingDatabase<S> {
         for (&id, document) in &self.overlay {
             if let Some(document) = document.as_ref() {
                 if matches_filter(&document.metadata, filter) {
-                    consider(&mut heap, k, id, document, query, self.config.metric);
+                    consider(&mut heap, k, id, document, &query, self.config.metric);
                 }
             }
         }

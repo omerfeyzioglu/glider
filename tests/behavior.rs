@@ -486,6 +486,7 @@ fn exact_search_matches_integer_grid_oracle_for_every_k() {
                         let distance = match metric {
                             Metric::SquaredEuclidean => dx * dx + dy * dy,
                             Metric::Manhattan => dx + dy,
+                            Metric::Cosine => unreachable!("this test covers L1 and L2"),
                         };
                         (distance, id as u64)
                     })
@@ -602,6 +603,7 @@ fn top_k_matches_full_sort_with_ties_extremes_and_boundary_sizes() {
                         distance += match metric {
                             Metric::SquaredEuclidean => delta * delta,
                             Metric::Manhattan => delta.abs(),
+                            Metric::Cosine => unreachable!("this test covers L1 and L2"),
                         };
                     }
                     glider::Neighbor { id: *id, distance }

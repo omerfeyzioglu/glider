@@ -1327,7 +1327,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     (
                         sequence,
                         Some(Document {
-                            vector: vector.clone(),
+                            vector: self.config.normalized(vector.clone()),
                             metadata: metadata.clone(),
                         }),
                     ),
@@ -1392,6 +1392,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(outcome)
     }
 
+    /// Return the stored document; cosine vectors are normalized to unit length.
     pub fn get(&self, id: u64) -> Result<Option<OwnedDocument>> {
         if let Some((_, document)) = self.tail.get(&id) {
             return Ok(document.as_ref().map(|document| OwnedDocument {
@@ -1439,14 +1440,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         k: usize,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
-        self.config.vector(query)?;
+        let query = self.config.query(query)?;
         if k == 0 {
             return Ok(Vec::new());
         }
         let mut heap = BinaryHeap::new();
         self.scan_live(|id, vector, metadata| {
             if matches_filter(metadata, filter) {
-                consider(&mut heap, k, self.config, query, id, vector);
+                consider(&mut heap, k, self.config, &query, id, vector);
             }
             Ok(())
         })?;

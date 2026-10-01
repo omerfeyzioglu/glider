@@ -450,6 +450,7 @@ impl PackSketch {
         bytes.push(match config.metric {
             Metric::SquaredEuclidean => 0,
             Metric::Manhattan => 1,
+            Metric::Cosine => 2,
         });
         bytes.push(BITS as u8);
         bytes.extend_from_slice(&[0; 2]);
@@ -498,6 +499,7 @@ impl PackSketch {
                     match config.metric {
                         Metric::SquaredEuclidean => 0,
                         Metric::Manhattan => 1,
+                        Metric::Cosine => 2,
                     },
                     BITS as u8,
                     0,
@@ -880,13 +882,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         budget: ReadBudget,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
-        self.config.vector(query)?;
+        let query = self.config.query(query)?;
         if k == 0 {
             return Ok(Vec::new());
         }
         let mut heap = BinaryHeap::new();
         match filter {
-            [] => self.route_and_rerank(query, k, budget, &mut heap)?,
+            [] => self.route_and_rerank(&query, k, budget, &mut heap)?,
             [(key, value)]
                 if self
                     .options
@@ -904,7 +906,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                                 &mut heap,
                                 k,
                                 self.config,
-                                query,
+                                &query,
                                 sketch.ids.get(row as usize),
                                 vector,
                             );
@@ -921,7 +923,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         for (&id, (_, document)) in &self.tail {
             if let Some(document) = document {
                 if crate::matches_filter(&document.metadata, filter) {
-                    consider(&mut heap, k, self.config, query, id, &document.vector);
+                    consider(&mut heap, k, self.config, &query, id, &document.vector);
                 }
             }
         }
@@ -955,7 +957,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             let difference =
                 f64::from(minimum) + f64::from(scale) * code as f64 - f64::from(query[axis]);
             match config.metric {
-                Metric::SquaredEuclidean => difference * difference,
+                Metric::SquaredEuclidean | Metric::Cosine => difference * difference,
                 Metric::Manhattan => difference.abs(),
             }
         };
@@ -1395,7 +1397,9 @@ mod tests {
                                         + f64::from(sketch.scales[axis]) * code as f64
                                         - f64::from(query[axis]);
                                     match metric {
-                                        Metric::SquaredEuclidean => difference * difference,
+                                        Metric::SquaredEuclidean | Metric::Cosine => {
+                                            difference * difference
+                                        }
                                         Metric::Manhattan => difference.abs(),
                                     }
                                 })

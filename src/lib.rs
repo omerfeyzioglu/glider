@@ -60,9 +60,17 @@ pub enum Error {
 pub enum Metric {
     SquaredEuclidean,
     Manhattan,
+    Cosine,
 }
 impl Metric {
     fn score(self, a: &[f32], b: &[f32]) -> f64 {
+        if self == Self::Cosine {
+            return 1.
+                - a.iter()
+                    .zip(b)
+                    .map(|(&x, &y)| f64::from(x) * f64::from(y))
+                    .sum::<f64>();
+        }
         a.iter()
             .zip(b)
             .map(|(&a, &b)| {
@@ -70,9 +78,16 @@ impl Metric {
                 match self {
                     Self::SquaredEuclidean => d * d,
                     Self::Manhattan => d.abs(),
+                    Self::Cosine => unreachable!(),
                 }
             })
             .sum()
+    }
+    fn routing_score(self, a: &[f32], b: &[f32]) -> f64 {
+        match self {
+            Self::Cosine => Self::SquaredEuclidean.score(a, b),
+            _ => self.score(a, b),
+        }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +109,33 @@ impl Config {
                 "vector must have configured dimension and finite components".into(),
             ));
         }
+        if self.metric == Metric::Cosine && vector.iter().all(|&x| x == 0.) {
+            return Err(Error::Invalid(
+                "cosine vector must have nonzero L2 norm".into(),
+            ));
+        }
         Ok(())
+    }
+    fn normalized(self, mut vector: Vec<f32>) -> Vec<f32> {
+        if self.metric == Metric::Cosine {
+            let norm = vector
+                .iter()
+                .map(|&x| f64::from(x).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            for component in &mut vector {
+                *component = (f64::from(*component) / norm) as f32;
+            }
+        }
+        vector
+    }
+    fn query<'a>(self, vector: &'a [f32]) -> Result<std::borrow::Cow<'a, [f32]>> {
+        self.vector(vector)?;
+        Ok(if self.metric == Metric::Cosine {
+            std::borrow::Cow::Owned(self.normalized(vector.to_vec()))
+        } else {
+            std::borrow::Cow::Borrowed(vector)
+        })
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -1211,6 +1252,7 @@ impl<S: ObjectStore> Database<S> {
     pub fn config(&self) -> Config {
         self.config
     }
+    /// Return the stored vector; cosine vectors are normalized to unit length.
     pub fn get(&self, id: u64) -> Option<&[f32]> {
         self.documents
             .get(&id)
@@ -1341,7 +1383,7 @@ impl<S: ObjectStore> Database<S> {
         k: usize,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
-        self.config.vector(query)?;
+        let query = self.config.query(query)?;
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -1351,7 +1393,7 @@ impl<S: ObjectStore> Database<S> {
             .filter(|(_, document)| matches_filter(&document.metadata, filter))
             .map(|(&id, document)| Neighbor {
                 id,
-                distance: self.config.metric.score(query, &document.vector),
+                distance: self.config.metric.score(&query, &document.vector),
             })
             .collect();
         let order =
@@ -1425,7 +1467,13 @@ impl<S: ObjectStore> Database<S> {
                 vector,
                 metadata,
             } => {
-                self.documents.insert(id, Document { vector, metadata });
+                self.documents.insert(
+                    id,
+                    Document {
+                        vector: self.config.normalized(vector),
+                        metadata,
+                    },
+                );
             }
             Mutation::Delete { id } => {
                 self.documents.remove(&id);
