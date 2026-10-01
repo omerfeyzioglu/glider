@@ -963,7 +963,11 @@ the exact oracle, with unsupported queries rejected explicitly.
 
 ## M31 — One million vectors
 
-Status: planned.
+Status: blocked on M35 and M37. The 1,000,000-row envelope loads and serves
+within RAM, open, write and storage gates, but misses recall (0.894, the best
+possible 8 blocks hold 0.888) and warm query p95 (54.9 ms against 50 ms); see
+`benchmarks/M31.md`. Neighbors of a query spread across packs of independent
+seals, and queries queue behind each other on one executor.
 
 Steps:
 - Declare the 1,000,000-row envelope before measuring: corpus (SIFT1M or a
@@ -977,18 +981,116 @@ Steps:
 
 Done when: the declared 1M envelope passes on MinIO with failure tests.
 
-## M32 — In-region AWS acceptance
+## Next: a production-shaped single node
 
-Status: planned. The 25,200-row laptop check proved correctness on S3
-Standard but its latency was bound by the client network.
+Goal: the same single-writer, S3-authoritative design serves 1,000,000+
+vectors with quality that does not decay with size, concurrent queries, a
+local SSD used the way object-storage-native systems use it, restarts that
+need no operator, and a query API that returns what applications need. Each
+milestone keeps the working method: declared gates, failure tests for every
+durability change, exact search as the quality oracle, and clean code that
+later work can extend.
+
+## M33 — Query results carry documents
+
+Status: in progress.
 
 Steps:
-- With explicit approval for each run, start a small EC2 instance in
-  `eu-central-1`, run the M31 (or M24) acceptance against S3 Standard, record
-  the instance type and prices, and terminate it with verified cleanup.
+- `/v1/query` and the library return each hit's metadata and, on request,
+  its vector, from the version the distance was computed on, without extra
+  remote reads except for resident-filter hits.
 
-Done when: the declared envelope's latency, request and cost gates are
-measured in-region, or the remaining provider gap is recorded.
+Done when: server and engine tests cover unfiltered, routed, resident and
+tail hits, and default responses are unchanged.
+
+## M34 — Concurrent queries
+
+Status: planned. One admission executor runs queries, writes and maintenance
+in turn; at 1M a query executes in ~11 ms but waits up to 43 ms (p95).
+
+Steps:
+- Execute queries in parallel against an immutable published view (root,
+  sketches, directory and tail snapshot); writes and maintenance stay on the
+  single committer and never block on readers.
+- Move the heavy part of maintenance units (pack building, uploads) off the
+  committer so only short publication steps share its queue.
+- Keep read-your-writes: a query admitted after an acknowledgement sees it.
+
+Done when: concurrency tests prove snapshot consistency and read-your-writes,
+and the M31 load meets warm p95 <=50 ms.
+
+## M35 — Local SSD as a namespace cache
+
+Status: planned. The NVMe cache holds only blocks queries already read
+(45 MiB of 256 MiB at 1M), and the read budget charges cached blocks too.
+
+Steps:
+- Charge the read budget only for remote reads; cached blocks are free.
+- Warm the whole namespace into the SSD cache in the background after open
+  or first query, bounded by a configurable size; cache loss only slows
+  queries. Works on instance-store NVMe, EBS or a container volume.
+- Report warm/cold state in status and metrics.
+
+Done when: a warm 1M namespace meets the recall and latency gates from SSD,
+cold behavior keeps the remote budget, and cache-loss tests still pass.
+
+## M36 — Restarts without an operator
+
+Status: planned. A killed writer leaves its ownership claim, so the next
+process refuses to open and recovery needs `glider-admin restore`.
+
+Steps:
+- Replace the permanent claim with a renewed lease plus a monotonically
+  increasing writer epoch; a new process takes over an expired lease.
+- Fence the old writer: every publication it attempts after takeover must
+  fail at the object store, so two writers can never both commit.
+- Crash-point and takeover tests, including a paused (not dead) old writer.
+
+Done when: kill-and-restart drills recover on the same prefix with no manual
+step, and fencing tests prove a stale writer cannot publish.
+
+## M37 — Global clustered index
+
+Status: design next. Per-seal locality cannot bound reads as data grows;
+Turbopuffer (SPFresh) and OpenData Vector (SPANN with LIRE) use global
+centroid partitions, and OpenData records rejecting per-segment indexes for
+this reason.
+
+Steps:
+- Design document first: centroid set and its persisted versioned form,
+  posting layout in packs (each cluster contiguous, boundary vectors possibly
+  in two clusters), seal-time assignment, background merge/split/reassign
+  (LIRE), crash semantics, and how sketches, filters and the directory fit.
+- Implement in reviewed stages with crash tests; keep exact search as the
+  oracle and the per-seal layout readable until migration is defined.
+
+Done when: the M31 envelope passes with <=8 remote requests per cold query,
+and recall does not degrade between 250,000 and 1,000,000 rows.
+
+## M38 — Query model
+
+Status: planned. Filters are equality conjunctions only.
+
+Steps:
+- Specify the query model: IN, numeric ranges, OR/NOT, returned fields and
+  paging; add metadata indexes (e.g. compressed posting bitmaps) designed
+  together with M37 partitions.
+
+Done when: declared filter workloads meet recall and latency gates against
+exact search, and unsupported expressions are rejected explicitly.
+
+## M39 — In-region AWS acceptance
+
+Status: planned after M33–M37. Permissions are in place: the test runs on a
+tagged EC2 instance in `eu-central-1` with short-lived credentials, writes its
+results to the test prefix and terminates itself.
+
+Steps:
+- Run the M31 envelope against S3 Standard, record instance type and prices,
+  verify termination and delete test objects.
+
+Done when: latency, request and cost gates are measured in-region, or the
+remaining provider gap is recorded.
 
 ## Beyond a single service
 
