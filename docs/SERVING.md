@@ -74,7 +74,8 @@ Check `clustering.state` for progress. With the server stopped,
 `serving::SingleMachine` is a serial library API over `OwnedDatabase`. One
 process owns one bucket/prefix. The initial workload is 2,000 live documents,
 64 dimensions, squared Euclidean distance, k=10, and `selected=true` on every
-100th ID. Exact serving is selected by M12; `SearchMode::Approximate` is rejected.
+100th ID. Exact serving is selected by the
+[quality evaluation](../benchmarks/M12.md); `SearchMode::Approximate` is rejected.
 No network listener or authentication layer is supplied. The optional
 [bounded admission worker](ADMISSION.md) serializes concurrent library callers.
 
@@ -84,8 +85,8 @@ The measured workload submits full batches: 200 overwrites, 100 deletes, and
 100 new IDs per cycle, keeping 2,000 live rows. Small batches are valid but do
 not inherit this workload's maintenance write-amplification result.
 
-The wrapper checks input/capacity before I/O and compacts when the M10 soft
-limits are reached, before publishing the next batch. This introduces a visible
+The wrapper checks input/capacity before I/O and compacts when the configured
+soft limits are reached, before publishing the next batch. This introduces a visible
 maintenance pause in that batch call. Batch latency includes it; it is not a
 single-write latency claim. The serving budget is batch p95 <=100 ms including
 maintenance and sustained throughput >=100 logical mutations/s. A successful
@@ -118,7 +119,7 @@ remote deployments need their own capacity acceptance.
 Record `status()` alongside process memory metrics:
 
 - `maintenance.sequence`: last committed mutation object; each batch consumes one.
-- `tail_objects`, `visible_objects`, `should_compact`, `writes_blocked`: M10
+- `tail_objects`, `visible_objects`, `should_compact`, `writes_blocked`:
   recovery pressure. Counts exclude the owner root and live claim (two objects).
 - `documents` / `max_documents`: live row capacity.
 - `search_mode`: exact; no enabled derived ANN generation can be stale.
@@ -176,12 +177,12 @@ namespace with an older binary that does not understand that format.
 `cargo test --locked --test serving` covers capacity before I/O, scheduled
 maintenance failure before a submitted batch, lost mutation acknowledgements,
 poisoned close, interrupted backup, exact restoration and legacy migration.
-M9's process-crash tests also exercise the underlying publication boundaries.
+Process-crash tests also exercise the underlying publication boundaries.
 
 `python3 tools/m13_soak.py target/m13-run` starts disposable MinIO and runs six
 successive processes for five minutes each. Each cycle runs 100 seeded oracle
-queries and 400 mutations, paced at one cycle/second. The M12 policy maps the
-original 10% planned ANN traffic to explicitly selected exact queries, giving
+queries and 400 mutations, paced at one cycle/second. The exact-search policy
+maps the original 10% planned ANN traffic to explicitly selected exact queries, giving
 60% unfiltered and 40% selective exact. The first process injects a lost cleanup
 acknowledgement, stages a fresh-prefix takeover, and rehearses backup/restore.
 Every subsequent process reconstructs an independent expected state and checks

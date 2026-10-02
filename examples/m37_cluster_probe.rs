@@ -3,7 +3,7 @@
 //! Trains centroids on a bounded seeded sample (`glider::ivf::train_bounded`),
 //! assigns every row to its nearest centroid (and, as a separate
 //! configuration, up to 5% of rows also to their second centroid), lays out
-//! cluster-contiguous postings in memory as `docs/M37_CLUSTERED_INDEX.md`
+//! cluster-contiguous postings in memory as `docs/CLUSTERED_INDEX.md`
 //! specifies, and simulates cold queries within request and byte caps:
 //!
 //! - `whole_postings`: read whole postings in centroid order and stop at the

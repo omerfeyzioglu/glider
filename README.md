@@ -110,20 +110,17 @@ Known limitations:
 - Filters are equality conjunctions only. Only the declared resident
   predicate is exact; other filters are applied to the routed blocks and
   may return fewer than `k` results.
-- Peak memory at 1,000,000 vectors (235.6 MiB on MinIO, 256.7 MiB on AWS)
+- Peak memory at 1,000,000 vectors (235.6 MiB on MinIO, 257.9 MiB on AWS)
   is above the 192 MiB target.
-- Opening a large collection on S3 takes seconds (4.87 s, and 13.36 s for
-  a reopen, at 1,000,000 vectors), and S3 write p95 follows conditional-PUT
-  latency (173 ms at 1,000,000 vectors).
+- Opening a large collection on S3 takes seconds (3.15 s, and 4.00 s for a
+  reopen, at 1,000,000 vectors), above the 2 s target.
 - The dimension, metric, resident filter and routed keys are fixed when a
   collection is created.
 - Plain HTTP with an optional static bearer token; terminate TLS in a
   reverse proxy.
 - A point must fit in one 120 KiB storage block (vector plus metadata, about
   122,000 bytes); larger points are rejected with `400`
-  ([limits](docs/API.md#post-v1write)). A namespace written by a binary that
-  accepted such a point cannot seal until that point is deleted or replaced,
-  and once 64 unsealed log objects accumulate it needs manual repair.
+  ([limits](docs/API.md#post-v1write)).
 - No built-in scheduled backups; use S3 Versioning and `glider-admin backup`.
 
 ## Configuration
@@ -227,22 +224,22 @@ Measured at 1,000,000 vectors of SIFT1M (128 dimensions, squared Euclidean,
 k=10, 200 queries) under the M31 workload: load in 100-row batches, then
 300 s of four writers each overwriting 100 rows per second and four readers
 each querying every 100 ms, then restart, cache-loss and backup checks. Both
-runs use the clustered view (explicit conversion, 32 probes); they predate
-automatic clustering and root manifests.
+runs use the clustered view (explicit conversion, 32 probes); the MinIO run
+predates automatic clustering and root manifests.
 
-| Measure | MinIO, Apple M4 ([M37](benchmarks/M37.md#1m-minio-acceptance-on-the-clustered-view), `a636045`) | AWS S3 Standard, c7g.2xlarge ([M39](benchmarks/M39.md#clustered-view-on-an-8-vcpu-instance), `af7fb0e`) | Target |
+| Measure | MinIO, Apple M4 ([M37](benchmarks/M37.md#1m-minio-acceptance-on-the-clustered-view), `a636045`) | AWS S3 Standard, c7g.2xlarge ([M39](benchmarks/M39.md#root-manifests-and-fast-open-on-s3), `9e2f602`) | Target |
 |---|---:|---:|---:|
 | Static recall@10 (mean / p5) | 0.998 / 1.0 | 0.998 / 1.0 | >=0.90 / >=0.80 |
-| Recall@10 after updates, cold (mean / p5) | 0.963 / 0.8 | 0.966 / 0.8 | >=0.90 / >=0.80 |
-| Warm unfiltered query p95 | 36.6 ms | 29.4 ms | <=50 ms |
-| Cold unfiltered query p95 | 33.7 ms | 57.1 ms | <=200 ms |
-| Write p95 | 33.0 ms | 173.0 ms | <=150 ms |
-| Open / reopen | 1.43 / 1.73 s | 4.87 / 13.36 s | <=2 s |
-| Peak engine RSS | 235.6 MiB | 256.7 MiB | <=192 MiB |
+| Recall@10 after updates, cold (mean / p5) | 0.963 / 0.8 | 0.963 / 0.8 | >=0.90 / >=0.80 |
+| Warm unfiltered query p95 | 36.6 ms | 30.9 ms | <=50 ms |
+| Cold unfiltered query p95 | 33.7 ms | 58.6 ms | <=200 ms |
+| Write p95 | 33.0 ms | 97.6 ms | <=150 ms |
+| Open / reopen | 1.43 / 1.73 s | 3.15 / 4.00 s | <=2 s |
+| Peak engine RSS | 235.6 MiB | 257.9 MiB | <=192 MiB |
 
 MinIO ran on loopback on an Apple M4 (10 cores, 16 GiB). The AWS run used a
 c7g.2xlarge (8 Graviton3 vCPU, 16 GiB) in eu-central-1 against S3 Standard;
-its filtered (resident 1%) query p95 was 9.8 ms, and it lost no
+its filtered (resident 1%) query p95 was 10.6 ms, and it lost no
 acknowledged writes and returned equal results after cache loss and backup
 restore. Datasets, seeds, raw
 results and the remaining measurements are in [BENCHMARKS.md](BENCHMARKS.md)
@@ -281,10 +278,11 @@ Checks that CI runs:
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --locked
-cargo test --all-features --locked
+cargo test --release --locked
+cargo test --release --all-features --locked
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tools/benchmarks.py summary --check
+python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 ```
 
 Object-store integration tests run against a disposable, pinned MinIO
@@ -309,7 +307,7 @@ on EC2 and S3) are described in [BENCHMARKS.md](BENCHMARKS.md). See
 | [docs/SERVING.md](docs/SERVING.md) | Server operations and resident-library serving envelope |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime and AWS deployment diagrams |
 | [DESIGN.md](DESIGN.md) | Architecture, formats and guarantees |
-| [docs/M37_CLUSTERED_INDEX.md](docs/M37_CLUSTERED_INDEX.md) | Clustered index design |
+| [docs/CLUSTERED_INDEX.md](docs/CLUSTERED_INDEX.md) | Clustered index design |
 | [ROADMAP.md](ROADMAP.md) | Milestones and next work |
 | [BENCHMARKS.md](BENCHMARKS.md), [benchmarks/SUMMARY.md](benchmarks/SUMMARY.md) | Measurements and how to reproduce them |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |

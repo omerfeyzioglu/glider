@@ -4,7 +4,7 @@ All notable user-visible changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-10-03
 
 First release: a single-node, single-writer vector database with S3 as the
 authoritative store. Milestones M1–M39 in [ROADMAP.md](ROADMAP.md); design
@@ -44,6 +44,9 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   read-your-writes.
 - Disposable local block cache (RAM and SSD), authenticated against the
   selected root and warmed in the background.
+- Open reads run indexes and sketch frames with up to 32 requests in
+  flight and keeps digest-verified copies in the local cache for the next
+  open (1,000,000 vectors on S3: open 3.15 s, reopen 4.00 s).
 - Distances: squared Euclidean, Manhattan and cosine. Filters: one exact
   resident predicate, up to four routed keys, other equality filters
   post-filtered.
@@ -71,11 +74,10 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
 - Equality filters only; non-resident filters are approximate and may
   return fewer than `k` results.
 - At 1,000,000 vectors, peak RSS exceeds the 192 MiB target, and open
-  time and write p95 on S3 exceed their targets
+  time on S3 exceeds its target
   ([benchmarks/M39.md](benchmarks/M39.md)).
-- A point must fit in one 120 KiB storage block; a namespace that already
-  holds a larger point (written by a pre-release binary) cannot seal until
-  that point is deleted or replaced ([limits](docs/API.md#post-v1write)).
+- A point must fit in one 120 KiB storage block; larger points are rejected
+  with `400` ([limits](docs/API.md#post-v1write)).
 - No TLS; use a reverse proxy.
 
-[1.0.0]: https://github.com/omerfeyzioglu/glider/tree/main
+[1.0.0]: https://github.com/omerfeyzioglu/glider/releases/tag/v1.0.0

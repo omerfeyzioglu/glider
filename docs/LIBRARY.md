@@ -1,9 +1,9 @@
 # Library guide
 
-Glider is also a Rust library. This guide covers using it from Rust: the S3
-backend, the resident `Database` engine (milestones M2–M13) and the
-segmented engine that `glider-server` is built on. For the server, see the [README](../README.md) and the
-[HTTP API reference](API.md).
+Glider is also a Rust library. This guide covers using it from Rust: the
+segmented engine behind `glider-server` and the resident `Database` engine,
+including its S3 backend. For the server, see the [README](../README.md) and
+the [HTTP API reference](API.md).
 
 The crate has two engines with disjoint namespace formats
 ([DESIGN.md](../DESIGN.md#engines-and-namespace-compatibility)):
@@ -11,7 +11,7 @@ The crate has two engines with disjoint namespace formats
 - the **segmented engine** (`segmented::SegmentedDatabase`, served by
   `SegmentedServing`), which keeps vectors in immutable object-storage packs
   and only a compact directory, routing sketches and the unsealed log tail in
-  RAM; it is the serving path, described [last](#segmented-collections-library-api);
+  RAM; it is the serving path, described [below](#segmented-collections-library-api);
 - the **resident engine** (`Database`, `OwnedDatabase`, `SingleMachine`),
   which keeps every document in RAM; it suits small collections and is the
   exact reference.
@@ -20,7 +20,51 @@ Opening a namespace with the other engine fails with an explicit error.
 Cargo features: `s3` enables the S3-compatible store; `server` adds the
 HTTP server and admin binaries.
 
-## S3-compatible backend (M2)
+## Segmented collections (library API)
+
+The HTTP server is built on this engine. With the `s3` feature for object storage,
+`SegmentedServing` keeps only a compact ID directory, persisted per-pack
+five-bit routing sketches and the unsealed log tail in memory. Vectors stay in
+immutable object-storage packs read through a bounded RAM/NVMe block cache.
+Unfiltered queries are approximate: they read a fixed number of routed blocks
+and rerank them exactly. The one equality predicate declared at namespace
+creation is answered exactly from full-precision vectors kept in the sketches;
+declared routed keys restrict candidate rows before block ranking; all filters
+are checked during reranking (approximate, possibly fewer than k results), and
+`search_exact` remains the oracle. Run it
+behind `admission::Service`, which executes seal, consolidation, reclamation
+and cleanup in bounded units while no command is queued, and runs up to
+`Limits::queries` queries in parallel on the latest acknowledged state.
+`SegmentedServing::open` takes the namespace over, fencing every earlier
+writer at the object store; hold a `lease::Lease` (as `glider-server` does)
+so a live writer is not deposed.
+
+```rust
+use glider::{admission::{Limits, Service, Shutdown}, Config, Metric};
+use glider::segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOptions};
+let config = Config { dimensions: 128, metric: Metric::SquaredEuclidean };
+let declared = SegmentedOptions {
+    resident_filter: Some(("cohort".into(), "one-percent".into())),
+    routed_keys: vec!["half".into(), "pct".into()],
+};
+let engine = SegmentedServing::open(
+    store, config, declared, SegmentedServingOptions::m21("block-cache".into()))?;
+// Up to four queries run at once on reader threads beside the committer.
+let service = Service::start(engine, Limits { queries: 4, ..Limits::default() })?;
+let client = service.client();
+let hits = client.query(vec![0.; 128], 10, vec![])?.wait()?;
+service.shutdown(Shutdown::Drain)?;
+```
+
+The measured 250,000-row envelope, its gates and the reproduction command are
+in [benchmarks/M24.md](../benchmarks/M24.md#single-machine-acceptance-protocol-declared-before-the-run).
+
+## Resident engine
+
+The resident engine keeps every document in RAM. It suits small collections
+and serves as the exact reference for the segmented engine.
+
+### S3-compatible backend
 
 Enable the `s3` Cargo feature. Provision a bucket and give one database exclusive
 ownership of a namespace prefix. Use nonoverlapping prefixes. Configure credentials through the client builder
@@ -101,7 +145,7 @@ For the bounded real-provider handoff, see [the S3 pilot](S3_PILOT.md).
 It has a disposable MinIO mode and an explicit AWS mode that checks an active
 Free account plan before writing. Routine CI uses only MinIO.
 
-## Atomic batch writes
+### Atomic batch writes
 
 Use a batch to publish several ordered operations with one object-store PUT:
 
@@ -133,7 +177,7 @@ outcome survives restart, compaction and isolated takeover within a bounded
 For concurrent callers, [bounded admission](ADMISSION.md) provides one
 commit worker, count/byte limits, cancellation and explicit shutdown.
 
-## Recovery checkpoints (M3)
+### Recovery checkpoints
 
 Call `db.checkpoint()?` to persist the current live state as one immutable segment.
 Reopen loads the latest checkpoint plus newer mutations. Checkpoint errors require
@@ -180,7 +224,7 @@ still scan chunks. The posting is rebuilt on every open and makes no durable
 writes. Exceeding the row budget returns an error; use ordinary streaming open
 for a broader filter.
 
-## Compaction (M4)
+### Compaction
 
 Call `db.compact()?` to publish a full snapshot and reclaim covered mutations and
 older snapshots. It runs synchronously and preserves live values, deletes and
@@ -191,12 +235,13 @@ its frequency based on measured maintenance and recovery costs.
 reclaims obsolete chunks after publishing the new manifest. The byte limit is
 an example, not a measured default for every deployment.
 
-A compacted namespace requires an M4-capable binary. Compaction reclaims logical
-objects; S3 bucket versioning may retain historical versions and delete markers.
+A compacted namespace requires a binary that supports compaction. Compaction
+reclaims logical objects; S3 bucket versioning may retain historical versions
+and delete markers.
 See [DESIGN.md](../DESIGN.md) for recovery semantics and [BENCHMARKS.md](../BENCHMARKS.md)
 for footprint and amplification measurements.
 
-## Rebuildable IVF-Flat search
+### Rebuildable IVF-Flat search
 
 `Config.metric` accepts `SquaredEuclidean`, `Manhattan`, or `Cosine`. Cosine
 requires nonzero vectors and queries; `get` returns a normalized vector for a
@@ -225,7 +270,7 @@ See [DESIGN.md](../DESIGN.md) for training, validation and lifecycle semantics.
 Run the short comparison with `python3 tools/ann_benchmark.py --output target/ann`.
 See [BENCHMARKS.md](../BENCHMARKS.md) and [the latest ANN comparison](../benchmarks/ANN.md).
 
-## Metadata equality filtering
+### Metadata equality filtering
 
 Attach a complete string-to-string metadata map to each document. A normal
 `put` replaces any previous metadata with an empty map. Filter pairs are combined
@@ -253,11 +298,12 @@ show why sparse filters can make partial probing both incomplete and inaccurate.
 Metadata and vectors share the mutation and snapshot durability
 boundary; existing version 1 databases open with empty metadata.
 
-## Bounded single-machine serving
+### Bounded single-machine serving
 
 For the initial 2,000-row, 64-dimension deployment, `SingleMachine` owns the
 namespace, enforces capacity, and completes due maintenance before a batch.
-Queries use exact mode; M12 did not justify enabling approximate serving.
+Queries use exact mode; the [quality evaluation](../benchmarks/M12.md) did not
+justify enabling approximate serving.
 
 ```rust
 use glider::{Config, Metric, Mutation, store::LocalStore};
@@ -278,49 +324,9 @@ The [M20 SIFT envelope](../benchmarks/M20.md) additionally validates 5,000×128
 descriptors with four callers on local MinIO; configuration and scope are in
 [serving operations](SERVING.md#larger-sift-descriptor-envelope).
 
-Use 100-operation batches for the measured M8 maintenance envelope. This
+Use 100-operation batches for the measured maintenance envelope. This
 serial library API has no HTTP listener or background scheduler. See
 [resident serving operations](SERVING.md#resident-library-mode) for status,
 backup/restore, failure handling and the 30-minute soak command. After
 uncertainty, follow the
 [fresh-prefix recovery procedure](RECOVERY.md).
-
-## Segmented collections (library API)
-
-The HTTP server is built on this engine; the sections above describe the
-resident `Database` engine, which keeps every vector in RAM and suits small
-collections. The two use different namespace formats, and opening one with the
-other fails with an explicit error. With the `s3` feature for object storage,
-`SegmentedServing` keeps only a compact ID directory, persisted per-pack
-five-bit routing sketches and the unsealed log tail in memory. Vectors stay in
-immutable object-storage packs read through a bounded RAM/NVMe block cache.
-Unfiltered queries are approximate: they read a fixed number of routed blocks
-and rerank them exactly. The one equality predicate declared at namespace
-creation is answered exactly from full-precision vectors kept in the sketches;
-declared routed keys restrict candidate rows before block ranking; all filters are checked during reranking (approximate, possibly fewer than k results), and `search_exact` remains the oracle. Run it
-behind `admission::Service`, which executes seal, consolidation, reclamation
-and cleanup in bounded units while no command is queued, and runs up to
-`Limits::queries` queries in parallel on the latest acknowledged state.
-`SegmentedServing::open` takes the namespace over, fencing every earlier
-writer at the object store; hold a `lease::Lease` (as `glider-server` does)
-so a live writer is not deposed.
-
-```rust
-use glider::{admission::{Limits, Service, Shutdown}, Config, Metric};
-use glider::segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOptions};
-let config = Config { dimensions: 128, metric: Metric::SquaredEuclidean };
-let declared = SegmentedOptions {
-    resident_filter: Some(("cohort".into(), "one-percent".into())),
-    routed_keys: vec!["half".into(), "pct".into()],
-};
-let engine = SegmentedServing::open(
-    store, config, declared, SegmentedServingOptions::m21("block-cache".into()))?;
-// Up to four queries run at once on reader threads beside the committer.
-let service = Service::start(engine, Limits { queries: 4, ..Limits::default() })?;
-let client = service.client();
-let hits = client.query(vec![0.; 128], 10, vec![])?.wait()?;
-service.shutdown(Shutdown::Drain)?;
-```
-
-The measured 250,000-row envelope, its gates and the reproduction command are
-in [benchmarks/M24.md](../benchmarks/M24.md#single-machine-acceptance-protocol-declared-before-the-run).

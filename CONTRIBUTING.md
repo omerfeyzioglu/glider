@@ -22,10 +22,11 @@ These are the commands CI runs (Rust 1.98.1):
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --locked
-cargo test --all-features --locked
+cargo test --release --locked
+cargo test --release --all-features --locked
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tools/benchmarks.py summary --check
+python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 python3 tools/test_s3.py   # requires Docker; disposable MinIO
 ```
 

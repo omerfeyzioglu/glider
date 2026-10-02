@@ -1074,7 +1074,7 @@ the server converts automatically at `GLIDER_AUTO_CLUSTER_ROWS` and rebuilds
 the view as the collection grows. With 32 probes the 1,000,000-row MinIO
 acceptance measured 0.998 static and 0.963 update-wave mean recall@10 within
 8 requests and 1 MiB (`benchmarks/M37.md`); split/reassign (stage 6) was not
-needed. Design: `docs/M37_CLUSTERED_INDEX.md`. Per-seal locality cannot
+needed. Design: `docs/CLUSTERED_INDEX.md`. Per-seal locality cannot
 bound reads as data grows; Turbopuffer (SPFresh) and OpenData Vector (SPANN
 with LIRE) use global centroid partitions, and OpenData records rejecting
 per-segment indexes for this reason.

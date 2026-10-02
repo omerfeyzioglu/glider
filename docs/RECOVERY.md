@@ -25,10 +25,10 @@ SIGINT/SIGTERM releases the lease, so the next start does not wait.
   /v1/requests/{boundary}/{nonce}` or by resending it with the same
   `request_id` after the restart; an unacknowledged write may be present or
   absent, never partial.
-- Upgrading from a pre-M36 binary: stop every old server first (it holds no
-  lease and would be fenced immediately). Its leftover `owner-*` claim
-  objects are ignored. After the first takeover, pre-M36 binaries reject the
-  namespace.
+- Upgrading from a binary without takeover fencing: stop every old server
+  first (it holds no lease and would be fenced immediately). Its leftover
+  `owner-*` claim objects are ignored. After the first takeover, those older
+  binaries reject the namespace.
 
 Restore is needed only to move data or after loss or corruption: a missing
 or corrupt selected root, index or pack, a log gap or invalid metadata fails
