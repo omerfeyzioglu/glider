@@ -288,6 +288,13 @@ fn serving_options(cache: Option<PathBuf>) -> SegmentedServingOptions {
         .and_then(|value| value.parse().ok())
         .unwrap_or(256 * 1024 * 1024);
     options.cache = cache.map(|directory| (directory, 0, nvme));
+    // `GLIDER_M24_PROBES` overrides the clustered probe count.
+    if let Some(probes) = env::var("GLIDER_M24_PROBES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        options.cluster_probes = probes;
+    }
     options
 }
 

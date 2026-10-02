@@ -39,6 +39,8 @@ pub struct SegmentedServingOptions {
     /// Bytes one idle warm-up unit may read into the NVMe cache; 0 disables
     /// warm-up.
     pub warm_unit_bytes: usize,
+    /// Nearest clusters a query probes in a clustered view (M37).
+    pub cluster_probes: usize,
 }
 
 impl SegmentedServingOptions {
@@ -62,6 +64,7 @@ impl SegmentedServingOptions {
             cache: Some((cache_directory, 0, 256 * 1024 * 1024)),
             query_threads: 4,
             warm_unit_bytes: 256 * 1024,
+            cluster_probes: 16,
         }
     }
 
@@ -144,6 +147,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
             ));
         }
         db = db.with_query_threads(options.query_threads);
+        db.set_cluster_probes(options.cluster_probes);
         if let Some((directory, ram, nvme)) = &options.cache {
             db = db.with_block_cache(directory, *ram, *nvme)?;
         }
