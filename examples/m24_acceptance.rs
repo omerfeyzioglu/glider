@@ -297,9 +297,12 @@ struct Handles {
     kinds: Arc<Mutex<BTreeMap<String, (u64, u64)>>>,
 }
 
+/// `require_view` rejects a namespace without a clustered view in clustered
+/// mode; `load` opens before converting, so it passes false.
 fn open_serving(
     namespace: &str,
     cache: Option<PathBuf>,
+    require_view: bool,
 ) -> Result<(SegmentedServing<Counted>, Handles, Value)> {
     let Opened {
         store,
@@ -312,7 +315,7 @@ fn open_serving(
     let db = SegmentedServing::open(store, config(), options(), serving_options(cache))?;
     let open_ms = ms(started.elapsed());
     let after = metrics.snapshot();
-    if clustered() && db.database().clustered_epoch().is_none() {
+    if require_view && clustered() && db.database().clustered_epoch().is_none() {
         return Err("GLIDER_M24_CLUSTERED=1 but the namespace has no clustered view".into());
     }
     let observation = json!({"ms":open_ms,"http":counts(&before,&after),
@@ -347,7 +350,7 @@ fn load(args: &[String]) -> Result<Value> {
         return Err("usage: load BASE.fvecs NAMESPACE".into());
     };
     let base = Rows::open(base)?;
-    let (mut db, handles, open) = open_serving(namespace, None)?;
+    let (mut db, handles, open) = open_serving(namespace, None, false)?;
     let before = handles.metrics.snapshot();
     let started = Instant::now();
     let mut sequence = 0;
@@ -655,7 +658,7 @@ fn serve(args: &[String]) -> Result<Value> {
     };
     let rounds: u64 = rounds.parse()?;
     let rss_before_open = rss();
-    let (mut db, handles, open) = open_serving(namespace, Some(PathBuf::from(cache)))?;
+    let (mut db, handles, open) = open_serving(namespace, Some(PathBuf::from(cache)), true)?;
     let rss_after_open = rss();
     let static_quality = match &oracle {
         Some(oracle) => static_pass(&mut db, &queries, oracle)?,
@@ -919,7 +922,7 @@ fn verify(args: &[String]) -> Result<Value> {
         }
     }
     let cache = PathBuf::from(cache);
-    let (db, _handles, reopen) = open_serving(namespace, Some(cache.clone()))?;
+    let (db, _handles, reopen) = open_serving(namespace, Some(cache.clone()), true)?;
     // One authenticated scan checks every acknowledged value and computes
     // the exact oracle for 100 held-out queries of each class.
     let mut oracles: Vec<TopK> = (0..200)
@@ -1089,7 +1092,7 @@ fn verify(args: &[String]) -> Result<Value> {
     db.close()?;
 
     fs::remove_dir_all(cache.join("glider-block-cache-v1")).ok();
-    let (db, _handles, loss_open) = open_serving(namespace, Some(cache.clone()))?;
+    let (db, _handles, loss_open) = open_serving(namespace, Some(cache.clone()), true)?;
     let mut loss_equal = true;
     for (oracle, expected) in oracles.iter().zip(&first_results) {
         let filter = if oracle.filtered {
