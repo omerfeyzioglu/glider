@@ -75,6 +75,9 @@ impl SegmentedServingOptions {
         Self {
             max_index_bytes: 128 * 1024 * 1024,
             query_threads: 8,
+            // Measured at 1M rows: 16 probes leave update-wave p5 recall at
+            // 0.7; 32 reach 0.8 within the same remote budget.
+            cluster_probes: 32,
             ..Self::m21(cache_directory)
         }
     }
