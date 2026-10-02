@@ -1,6 +1,75 @@
-# Single-machine operations
+# Operating Glider
 
-## Supported envelope and scheduling
+## HTTP server
+
+`glider-server` owns one collection and one object-store prefix. Use the same
+dimensions, metric, resident filter and routed keys every time that prefix is
+opened. The server exposes [`/v1/status`](API.md#get-v1status) for its committed
+sequence, queue, cache and clustering state, and [`/metrics`](API.md#get-metrics)
+for Prometheus. The [configuration table](../README.md#configuration) lists
+the environment variables.
+
+### Restart and recovery
+
+SIGINT or SIGTERM drains queued work and releases the writer lease. After a
+crash, restart the server on the same prefix; it waits at most
+`GLIDER_LEASE_SECONDS` (default 10 seconds), fences the previous writer and
+replays the log tail. A write whose response was lost may or may not have
+committed: use its `request_id` to look up the outcome before issuing a new
+write. See the [recovery procedure](RECOVERY.md#segmented-collections-glider-server).
+
+### Backup and restore
+
+`glider-admin` uses the server's environment variables and takes the same
+writer lease. Stop the server before running it; while the server runs, use
+the HTTP status endpoint instead. Each admin invocation takes over the
+namespace and can advance its sequence, including `status`. The Compose
+image includes both binaries.
+For example, back up the local demo to an **empty, nonoverlapping** MinIO
+prefix:
+
+```sh
+docker compose stop glider
+docker compose run --rm --no-deps --entrypoint glider-admin glider \
+  backup s3://glider/backups/demo-001
+docker compose start glider
+```
+
+Choose a new destination for each backup; do not reuse a failed destination.
+`glider-admin restore <backup>` copies a backup into the **empty prefix
+configured by `GLIDER_S3_NAMESPACE` or `GLIDER_DATA_DIR`**, validates it and
+leaves it ready for a server start. Configure the server to use that new
+prefix after checking the restored collection. A crash by itself needs no
+restore. The [recovery guide](RECOVERY.md) covers corruption and failed copies.
+For the Compose demo, with `glider` stopped, restore the backup above into a
+new prefix with:
+
+```sh
+docker compose run --rm --no-deps -e GLIDER_S3_NAMESPACE=restored-demo \
+  --entrypoint glider-admin glider restore s3://glider/backups/demo-001
+```
+
+Set `GLIDER_S3_NAMESPACE=restored-demo` in the server configuration before
+starting it against the restored copy; the default `demo` still names the
+original collection.
+
+For AWS, enable S3 Versioning and a lifecycle rule for noncurrent versions
+and incomplete multipart uploads. Glider has no scheduled backup job; schedule
+`glider-admin backup` separately if required. A versioned bucket or a backup
+does not add a live standby: this deployment has one active server.
+
+### Cache and clustering
+
+The local block cache can be discarded. A cold cache can affect query latency
+and approximate recall until background warm-up finishes; check `cache.state`
+in `/v1/status`. The server builds a clustered view at
+`GLIDER_AUTO_CLUSTER_ROWS` and rebuilds it after the configured growth factor.
+Check `clustering.state` for progress. With the server stopped,
+`glider-admin convert` builds or repairs the view immediately.
+
+## Resident library mode
+
+### Supported envelope and scheduling
 
 `serving::SingleMachine` is a serial library API over `OwnedDatabase`. One
 process owns one bucket/prefix. The initial workload is 2,000 live documents,
@@ -25,7 +94,7 @@ An error during scheduled maintenance occurs before that batch is published;
 an error during batch publication may have committed the entire batch. Stop
 writes whenever `status().recovery_required` is true.
 
-## Larger SIFT descriptor envelope
+### Larger SIFT descriptor envelope
 
 [M20](../benchmarks/M20.md) validates 5,000 live SIFT small descriptors at
 128 dimensions, squared Euclidean exact k=10, with a 1% equality group. Four
@@ -44,7 +113,7 @@ byte/request budgets and measurement boundaries. This evidence is specific to
 integral descriptors and local MinIO; other data shapes, arrival rates and
 remote deployments need their own capacity acceptance.
 
-## Status and limits
+### Status and limits
 
 Record `status()` alongside process memory metrics:
 
@@ -70,7 +139,7 @@ stopped-owner recovery procedure. These input bounds complement measured RSS;
 they do not directly specify allocator memory. Process RSS and the backing service remain external
 operating limits. These results cover loopback MinIO, not remote-cloud latency.
 
-## Backup and restore
+### Backup and restore
 
 1. Quiesce application calls through the serial wrapper. Record the source
    prefix, configuration and `status().maintenance.sequence` in the application's
@@ -102,7 +171,7 @@ compaction produces the existing v2 single-object snapshot. Set
 layout needs a separately measured admission budget. Do not open a compacted
 namespace with an older binary that does not understand that format.
 
-## Verification
+### Verification
 
 `cargo test --locked --test serving` covers capacity before I/O, scheduled
 maintenance failure before a submitted batch, lost mutation acknowledgements,

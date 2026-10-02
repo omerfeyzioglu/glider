@@ -280,8 +280,9 @@ descriptors with four callers on local MinIO; configuration and scope are in
 
 Use 100-operation batches for the measured M8 maintenance envelope. This
 serial library API has no HTTP listener or background scheduler. See
-[serving operations](SERVING.md) for status, backup/restore, failure handling,
-and the 30-minute soak command. After uncertainty, follow the
+[resident serving operations](SERVING.md#resident-library-mode) for status,
+backup/restore, failure handling and the 30-minute soak command. After
+uncertainty, follow the
 [fresh-prefix recovery procedure](RECOVERY.md).
 
 ## Segmented collections (library API)
