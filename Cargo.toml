@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+memory-probe = []
 s3 = ["dep:object_store", "dep:tokio", "dep:futures", "dep:async-trait"]
 # HTTP service binary over the segmented engine.
 server = ["s3", "dep:axum", "tokio/signal", "tokio/macros"]

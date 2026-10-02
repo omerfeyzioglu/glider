@@ -1,6 +1,10 @@
 //! Reproducible, object-store-local admission workload for M31 latency investigation.
 //! Usage: cargo run --offline --release --example m31_latency_probe --
 //! ROWS SECONDS [THREADS [grouped|legacy [QUERIES]]]
+//! Set M31_PROBE_SNAPSHOT=1 for a held-view seal, or M31_PROBE_CACHE=1 and
+//! M31_PROBE_WARM_STEP=1 for one warm-up unit. The optional memory-probe
+//! feature reports live and peak requested Rust heap bytes; leave it off for
+//! latency measurements.
 use glider::{
     admission::{Engine, Limits, Service, Shutdown, Snapshot},
     retry::{Lookup, Outcome, Request, RequestId, Revision},
@@ -16,6 +20,70 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+#[cfg(feature = "memory-probe")]
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    sync::atomic::AtomicUsize,
+};
+
+#[cfg(feature = "memory-probe")]
+struct MeteredAllocator;
+
+#[cfg(feature = "memory-probe")]
+static HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "memory-probe")]
+static PEAK_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "memory-probe")]
+#[global_allocator]
+static ALLOCATOR: MeteredAllocator = MeteredAllocator;
+
+#[cfg(feature = "memory-probe")]
+unsafe impl GlobalAlloc for MeteredAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            let current = HEAP_BYTES.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+            PEAK_HEAP_BYTES.fetch_max(current, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        HEAP_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let replacement = unsafe { System.realloc(ptr, layout, new_size) };
+        if !replacement.is_null() {
+            if new_size >= layout.size() {
+                let added = new_size - layout.size();
+                let current = HEAP_BYTES.fetch_add(added, Ordering::Relaxed) + added;
+                PEAK_HEAP_BYTES.fetch_max(current, Ordering::Relaxed);
+            } else {
+                HEAP_BYTES.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+            }
+        }
+        replacement
+    }
+}
+
+#[cfg(feature = "memory-probe")]
+fn heap_mib() -> f64 {
+    HEAP_BYTES.load(Ordering::Relaxed) as f64 / 1048576.
+}
+
+#[cfg(feature = "memory-probe")]
+fn peak_heap_mib() -> f64 {
+    PEAK_HEAP_BYTES.load(Ordering::Relaxed) as f64 / 1048576.
+}
+
+#[cfg(feature = "memory-probe")]
+fn reset_heap_peak() {
+    PEAK_HEAP_BYTES.store(HEAP_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+}
 
 #[derive(Clone, Default)]
 struct MemoryStore(Arc<Mutex<BTreeMap<String, Vec<u8>>>>, Arc<AtomicU64>);
@@ -152,6 +220,52 @@ fn wait_until(at: Instant) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn rss_mib() -> f64 {
+    let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info>::zeroed();
+    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+    #[allow(deprecated)]
+    let status = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            libc::MACH_TASK_BASIC_INFO,
+            info.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    assert_eq!(status, 0);
+    unsafe { info.assume_init() }.resident_size as f64 / 1048576.
+}
+
+#[cfg(not(target_os = "macos"))]
+fn rss_mib() -> f64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("proc status");
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .expect("VmRSS")
+        .split_whitespace()
+        .next()
+        .expect("RSS KiB")
+        .parse()
+        .expect("RSS integer");
+    kib as f64 / 1024.
+}
+
+fn peak_rss_mib() -> f64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    assert_eq!(
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+        0
+    );
+    let peak = unsafe { usage.assume_init() }.ru_maxrss as u64;
+    if cfg!(target_os = "macos") {
+        peak as f64 / 1048576.
+    } else {
+        peak as f64 / 1024.
+    }
+}
+
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let rows: u64 = args.next().ok_or("ROWS required")?.parse()?;
@@ -179,6 +293,17 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
     let mut options = SegmentedServingOptions::m31("unused-cache".into());
     options.cache = None;
+    let warm_step = std::env::var_os("M31_PROBE_WARM_STEP").is_some();
+    if warm_step {
+        options.warm_unit_bytes = 0;
+    }
+    let cache_path = if std::env::var_os("M31_PROBE_CACHE").is_some() {
+        let path = std::env::temp_dir().join(format!("glider-m31-probe-{}", std::process::id()));
+        options.cache = Some((path.clone(), 0, 256 * 1024 * 1024));
+        Some(path)
+    } else {
+        None
+    };
     options.query_threads = threads;
     let store = MemoryStore::default();
     let log_count = store.1.clone();
@@ -201,6 +326,80 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "loaded {rows} rows in {:.2} s",
         load_start.elapsed().as_secs_f64()
     );
+    println!(
+        "loaded RSS current/peak {:.2}/{:.2} MiB, sketch charged {:.2} MiB",
+        rss_mib(),
+        peak_rss_mib(),
+        db.database().selective_index_bytes() as f64 / 1048576.
+    );
+    #[cfg(feature = "memory-probe")]
+    {
+        println!("loaded heap {:.2} MiB", heap_mib());
+        reset_heap_peak();
+    }
+    if warm_step {
+        println!("warm baseline RSS {:.2} MiB", rss_mib());
+        assert!(db.database().warm_cache_step(256 * 1024)?);
+        println!(
+            "after one 256-KiB warm unit RSS current/peak {:.2}/{:.2} MiB",
+            rss_mib(),
+            peak_rss_mib()
+        );
+        #[cfg(feature = "memory-probe")]
+        println!(
+            "warm heap current/peak {:.2}/{:.2} MiB",
+            heap_mib(),
+            peak_heap_mib()
+        );
+        if let Some(path) = cache_path {
+            std::fs::remove_dir_all(path)?;
+        }
+        return Ok(());
+    }
+    if std::env::var_os("M31_PROBE_SNAPSHOT").is_some() {
+        let held = db.snapshot().expect("segmented snapshot");
+        println!("snapshot baseline RSS {:.2} MiB", rss_mib());
+        for batch in 0..32 {
+            db.apply_request(request(
+                db.sequence(),
+                (2_000_000 + batch) as u128,
+                batch * 100,
+                1,
+            ))?;
+        }
+        println!(
+            "after 32 writes RSS current/peak {:.2}/{:.2} MiB",
+            rss_mib(),
+            peak_rss_mib()
+        );
+        #[cfg(feature = "memory-probe")]
+        println!(
+            "writes heap current/peak {:.2}/{:.2} MiB",
+            heap_mib(),
+            peak_heap_mib()
+        );
+        while db.database().tail_objects() > 0 {
+            db.maintenance_step()?;
+        }
+        println!(
+            "after root publication RSS current/peak {:.2}/{:.2} MiB",
+            rss_mib(),
+            peak_rss_mib()
+        );
+        #[cfg(feature = "memory-probe")]
+        println!(
+            "root heap current/peak {:.2}/{:.2} MiB",
+            heap_mib(),
+            peak_heap_mib()
+        );
+        drop(held);
+        println!(
+            "after reader release RSS current/peak {:.2}/{:.2} MiB",
+            rss_mib(),
+            peak_rss_mib()
+        );
+        return Ok(());
+    }
     let logs_before = log_count.load(Ordering::Relaxed);
     let initial_sequence = db.sequence();
     let service = Service::start(
@@ -306,6 +505,20 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             percentile(&idle, 95)
         );
     }
+    println!(
+        "serving RSS current/peak {:.2}/{:.2} MiB",
+        rss_mib(),
+        peak_rss_mib()
+    );
+    #[cfg(feature = "memory-probe")]
+    println!(
+        "serving heap current/peak {:.2}/{:.2} MiB",
+        heap_mib(),
+        peak_heap_mib()
+    );
     service.shutdown(Shutdown::Drain)?;
+    if let Some(path) = cache_path {
+        std::fs::remove_dir_all(path)?;
+    }
     Ok(())
 }
