@@ -370,23 +370,64 @@ directory and the log tail stay authoritative for `get`, exact search,
 retry and recovery, and a posting row is current only if the directory holds
 exactly its `(ID, sequence)` as a live version and no tail write shadows it.
 
-The view's centroid object records its source root sequence, the view
-boundary. Every live version sealed at or below it has exactly one posting
-row; versions sealed later stay in per-seal packs and their sketches. Writes
-after a conversion are unchanged: logs acknowledge, seals publish per-seal
-runs, and consolidation, pruning, reclamation and cleanup carry the view into
-each new root unchanged (version 4). Routing loads the posting sketches and
-only the canonical sketches of packs holding live versions above the
-boundary, and canonical rows at or below it are never active, so each
-current version has one routing row. Posting rows shadowed after opening keep
-their bits; queries compare their `(ID, sequence)` with the directory and
-tail instead (in routing only when a row would lower its block's best score),
-and reopening compacts them away.
+Coverage invariant: every live sealed version that no acknowledged tail
+write shadows has exactly one posting row in the catalog's extents, and
+routing holds exactly one row per current version. Opening derives
+coverage from the postings: a directory version is covered when a loaded
+posting row holds exactly its `(ID, sequence)`; two copies of one version,
+or an uncovered version inside a posting pack, make the view unavailable.
+Only canonical packs holding uncovered live versions are loaded and only
+their uncovered rows are active (none for a namespace converted and sealed
+by this binary; a stage 3 binary's per-seal packs sealed after its
+conversion stay routed this way until a new epoch). Queries skip a
+canonical record whose routing row is not live, and reclamation carries a
+moved row's liveness to its new pack. Posting rows shadowed after opening
+keep their bits; queries compare their `(ID, sequence)` with the directory
+and tail instead (in routing only when a row would lower its block's best
+score), and reopening compacts them away.
+
+Clustered seals (stage 4): with a loaded view, `start_seal` assigns each
+frozen put to its nearest center (ties by cluster ID) and plans
+cluster-contiguous blocks (at most 170 rows and 120 KiB raw, partition = the
+cluster ID) laid out in cluster-ID order into packs of at most 12 blocks;
+tombstones go to separate ID-sorted packs. Each put pack carries a
+`GLSKT003` sketch and is both the run's canonical pack and a posting pack:
+its blocks become `Canonical` extents. Steps create the packs, the run
+index, a new catalog (`sgcluster-{attempt}`: the selected catalog plus
+these extents) and a root v4 selecting it at the seal boundary, with the
+same epoch and centroid object. Acknowledgement, displaced tail versions,
+retry state and log replay are unchanged; only the root create publishes,
+earlier objects are orphans, and an uncertain create poisons the handle.
+Without a loaded view (none, or unavailable) seals keep the per-seal layout
+and carry the root's view reference unchanged.
+
+Posting merges (stage 5, `start_merge`/`merge_step`, an idle serving unit
+planned after each seal or merge): an extent is small while it has fewer
+current rows than three full blocks (510). A round merges, for each cluster
+with more than three small extents, its smallest extents (at least two,
+while they fit one 12-block pack) into one cluster-contiguous `Derived`
+extent, and drops extents with no current row; up to 32 output groups per
+round. It freezes the root and catalog (seals, consolidation, pruning,
+reclamation and conversion wait; tail writes continue), reads one source
+extent per step (one range GET, each block authenticated by its catalog
+digest; a read error leaves the round to retry), copies rows that are
+current and not shadowed by the tail, and creates each output pack, then
+one catalog, then one root. Before the root the previous catalog serves and
+staged objects are orphans; after it, replaced blocks leave their packs'
+sketches (a catalog may list only some blocks of a posting pack), the
+merged packs' rows are activated, and derived packs no catalog extent lists
+become obsolete. Canonical seal packs stay referenced by their runs.
+Consolidation and pruning carry the catalog unchanged; reclamation skips
+posting packs (and does nothing while the view is unavailable). Cleanup
+retains the selected root's runs and the catalog's packs; obsolete keys are
+never reused, so a late DELETE cannot remove a later generation's object.
+Backup copies each pack once (a clustered seal's pack is both canonical and
+posting) after checking it against the root's or catalog's digests.
 
 A selective query on a view scores every centroid, probes the nearest
 `probes` clusters (default 16, ties by cluster ID), ranks every block of the
-probed postings that has a current row together with the per-seal
-candidates by five-bit sketch distance, and takes ranked blocks in order
+probed postings that has a current row together with any uncovered
+canonical candidates by five-bit sketch distance, and takes ranked blocks in order
 within the remote request and byte limits as before (cached blocks under the
 M35 local limit); every block inside a chosen span is reranked exactly,
 checking the full filter, and the tail is merged. The resident predicate
@@ -452,12 +493,13 @@ unfiltered results are approximate under the M21 quality policy (mean
 recall@10 >=0.90, fifth percentile >=0.80, <1% short results), and the
 resident predicate is exact. Maintenance never runs concurrently with a
 command: while the queue is empty the committer executes one bounded unit (one
-seal/prune/reclaim step, an in-memory sketch compaction of one pack, a seal
-plan, one run consolidation, a prune/reclaim plan, a four-object cleanup
+seal/merge/prune/reclaim step, an in-memory sketch compaction of one pack, a
+seal plan, one run consolidation, a posting-merge plan (after a seal or
+merge), a prune/reclaim plan, a four-object cleanup
 batch or, when none is due, one cache warm-up read) and then rechecks the
 queue. A seal starts
 at 32 unsealed log objects. If the tail reaches the hard bound of 64 before
-idle time allows the seal, the next write finishes any staged prune/reclaim
+idle time allows the seal, the next write finishes any staged prune/reclaim/merge
 and a full seal synchronously, reported as that command's maintenance time.
 A failed idle read leaves state unchanged, is counted and retried after the
 next command; an uncertain write poisons the engine and fails the service.

@@ -1,11 +1,14 @@
 # M37: global clustered index for the segmented engine
 
-Status: stages 1-3 implemented: formats, the offline probe, explicit
-conversion (`convert_clustered`, `glider-admin convert`) and clustered queries.
-Static recall on real packs passes the gates at 250,000 and 1,000,000 rows
-(`benchmarks/M37.md`, stage 3); seals still write the per-seal layout
-(stage 4 is next). `DESIGN.md` ("Clustered view") states the implemented
-invariants.
+Status: stages 1-5 implemented: formats, the offline probe, explicit
+conversion (`convert_clustered`, `glider-admin convert`), clustered queries,
+clustered seals and bounded posting merges. Static recall on real packs
+passes the gates at 250,000 and 1,000,000 rows, and so does recall after
+an in-memory replay of the M31 update wave (`benchmarks/M37.md`, stages 3
+and 4-5); the MinIO/S3 acceptance (stage 7) runs with
+`tools/m24_acceptance.py --clustered`. Split/reassign (stage 6) is not
+implemented: the wave measurements did not require it. `DESIGN.md`
+("Clustered view") states the implemented invariants.
 The first implementation target is the M31 single-writer, 128-dimensional SIFT1M
 envelope. Exact search over the committed runs and log tail remains the oracle.
 
@@ -315,11 +318,31 @@ Stage 3 freezes the selected root and directory rather than quiescing
 writes: root-changing maintenance waits, while acknowledged tail writes may
 continue and shadow converted rows by the directory/tail rule. The view
 covers every live version sealed at or below the source root sequence (its
-boundary); until stage 4, seals after a conversion keep the per-seal layout,
-their canonical sketches route versions above the boundary beside the
-postings, and consolidation, pruning, reclamation and cleanup carry the view
-into each root unchanged. Converting again builds the next epoch, which is
-also the explicit repair of an unavailable view.
+boundary). Stage 3 binaries sealed later writes in the per-seal layout and
+routed them through canonical sketches beside the postings; stage 4 seals
+assign them to clusters instead (below), and opening derives which live
+versions a posting covers, so a stage 3 namespace keeps routing its
+uncovered per-seal versions canonically until a new epoch. Converting again
+builds the next epoch, which is also the explicit repair of an unavailable
+view.
+
+Stage 4 and 5 decisions. A clustered seal's put packs are the canonical
+packs of its run and `Canonical` catalog extents at once, so a seal uploads
+its rows once; the seal adds one catalog create before its root. A merge
+writes `Derived` copies and leaves canonical packs in their runs, so merged
+seal rows are stored twice until reclamation or pruning frees the canonical
+copy. A merge round may stage up to 32 output packs (each at most 12
+blocks and 2,040 rows, several clusters per pack) under one catalog and one
+root, rather than four clusters per publication: each root create uploads
+every block reference (about 2.3 MB at 1,000,000 rows), so publications,
+not packs, dominated upload in the wave replay. An extent is small below
+three full blocks (510 current rows); a cluster with more than three small
+extents is due. A six-block threshold measured 0.9615 / 0.8 recall after
+the 1,000,000-row wave but 5.81 PUT/s and 2.00 MiB/s upload; three blocks
+measured 0.9585 / 0.8 at 4.90 PUT/s and 1.68 MiB/s. A catalog may list
+only some blocks of a posting pack; the others are not routed. Coverage is
+derived at open from the posting rows themselves (no persisted boundary
+field), which keeps catalog v1 and root v4 unchanged.
 During offline conversion, stage new sketches as bytes without retaining a
 second full resident set; release v1 routing sketches before loading the v4
 view. Query views keep the state they hold across the switch. After
@@ -378,10 +401,10 @@ M21's tighter 64 MiB RSS and 1 s open gates when evaluating that envelope.
 3. (Done.) Add explicit v1-to-v4 conversion and clustered read-only queries. Test
    crashes after each staged pack, centroid, catalog and root create, plus
    restart, cache loss, missing/corrupt derived objects and exact equality.
-4. Add clustered seal-time assignment and root/catalog publication. Test
+4. (Done.) Add clustered seal-time assignment and root/catalog publication. Test
    overwrite/delete shadowing, displaced tail versions, group retries,
    uncertain log/root PUTs and replay at every seal step.
-5. Add one bounded physical posting-merge unit and make consolidation, prune,
+5. (Done.) Add one bounded physical posting-merge unit and make consolidation, prune,
    reclaim, cleanup and backup account for catalog reachability. Test every
    publication and deletion crash point, delayed DELETE and restore.
 6. Add local split/reassign and whole-epoch replacement only if occupancy or

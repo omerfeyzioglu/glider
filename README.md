@@ -111,7 +111,9 @@ which also repairs a missing or corrupt view) and publishes it with one
 root; the server then
 answers selective queries from cluster postings
 ([design](docs/M37_CLUSTERED_INDEX.md)). Without CENTROIDS the count targets
-about 4,000 live rows per cluster.
+about 4,000 live rows per cluster. Later seals assign new writes to the
+view's clusters, and idle maintenance merges each cluster's small extents,
+so the namespace stays clustered under writes.
 
 `restore` copies a backup or stopped namespace into a fresh empty destination
 and validates it; the first server start there takes it over. Never reuse a
