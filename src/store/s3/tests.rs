@@ -5,6 +5,9 @@ use crate::{
     streaming::StreamingDatabase,
     Config, Database, Metric, Mutation,
 };
+use bytes::Bytes;
+use http_body::Frame;
+use http_body_util::StreamBody;
 use object_store::client::{HttpErrorKind, HttpResponseBody};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -191,8 +194,14 @@ fn disconnected() -> HttpError {
         std::io::Error::other("injected lost connection"),
     )
 }
+fn incomplete_message() -> HttpError {
+    HttpError::new(
+        HttpErrorKind::Request,
+        std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "incomplete message"),
+    )
+}
 #[derive(Debug, Clone)]
-struct Script(Arc<Mutex<VecDeque<HttpResponse>>>);
+struct Script(Arc<Mutex<VecDeque<std::result::Result<HttpResponse, HttpError>>>>);
 impl HttpConnector for Script {
     fn connect(&self, _: &ClientOptions) -> object_store::Result<HttpClient> {
         Ok(HttpClient::new(self.clone()))
@@ -211,10 +220,17 @@ impl HttpService for Script {
         {
             assert!(request.uri().query().unwrap().contains("next-page"));
         }
-        self.0.lock().unwrap().pop_front().ok_or_else(disconnected)
+        self.0
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(disconnected()))
     }
 }
 fn scripted(responses: Vec<HttpResponse>) -> S3Store {
+    scripted_calls(responses.into_iter().map(Ok).collect())
+}
+fn scripted_calls(responses: Vec<std::result::Result<HttpResponse, HttpError>>) -> S3Store {
     S3Store::with_connector(
         builder(),
         "test",
@@ -340,6 +356,131 @@ fn conditional_create_errors_poison_without_retry() {
     }
 }
 #[test]
+fn read_transport_failure_retries_fresh_get_and_counts_it() {
+    let store = scripted_calls(vec![
+        Err(incomplete_message()),
+        Ok(response(200, encode_envelope(b"value"))),
+    ]);
+    assert_eq!(store.get("object").unwrap(), Some(b"value".to_vec()));
+    let counts = store.metrics().snapshot();
+    assert_eq!(counts.get, 2);
+    assert_eq!(counts.read_retries, 1);
+    assert_eq!(counts.transport_errors, 1);
+}
+
+#[test]
+fn read_503_retries_but_404_does_not() {
+    let store = scripted(vec![
+        response(503, "<Error><Code>SlowDown</Code></Error>"),
+        response(200, encode_envelope(b"value")),
+    ]);
+    assert_eq!(store.get("object").unwrap(), Some(b"value".to_vec()));
+    assert_eq!(store.metrics().snapshot().get, 2);
+    assert_eq!(store.metrics().snapshot().read_retries, 1);
+
+    let store = scripted(vec![
+        response(404, "<Error><Code>NoSuchKey</Code></Error>"),
+        response(200, encode_envelope(b"unexpected")),
+    ]);
+    assert_eq!(store.get("missing").unwrap(), None);
+    assert_eq!(store.metrics().snapshot().get, 1);
+    assert_eq!(store.metrics().snapshot().read_retries, 0);
+}
+
+#[test]
+fn failed_partial_body_starts_a_fresh_get() {
+    let envelope = encode_envelope(b"value");
+    let mut partial = response(200, &envelope);
+    let chunks: Vec<std::result::Result<Frame<Bytes>, HttpError>> = vec![
+        Ok(Frame::data(Bytes::copy_from_slice(&envelope[..20]))),
+        Err(disconnected()),
+    ];
+    *partial.body_mut() = HttpResponseBody::new(StreamBody::new(futures::stream::iter(chunks)));
+    let store = scripted(vec![partial, response(200, &envelope)]);
+    assert_eq!(store.get("object").unwrap(), Some(b"value".to_vec()));
+    assert_eq!(store.metrics().snapshot().get, 2);
+    assert_eq!(store.metrics().snapshot().read_retries, 1);
+}
+
+#[test]
+fn range_and_paginated_list_retry_complete_reads() {
+    let mut range = response(206, b"value");
+    range
+        .headers_mut()
+        .insert("content-range", "bytes 16-20/53".parse().unwrap());
+    let store = scripted(vec![response(503, "<Error/>"), range]);
+    assert_eq!(
+        store.get_range("object", 0, 5, 5).unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(store.metrics().snapshot().get, 2);
+    assert_eq!(store.metrics().snapshot().read_retries, 1);
+
+    let store = scripted(vec![
+        response(200, page("test/a", true)),
+        response(503, "<Error/>"),
+        response(200, page("test/a", true)),
+        response(200, page("test/b", false)),
+    ]);
+    assert_eq!(store.list().unwrap(), vec!["a", "b"]);
+    assert_eq!(store.metrics().snapshot().list, 4);
+    assert_eq!(store.metrics().snapshot().read_retries, 1);
+}
+
+#[test]
+fn batched_reads_retry_each_request() {
+    let store = scripted_calls(vec![
+        Err(disconnected()),
+        Ok(response(200, encode_envelope(b"value"))),
+    ]);
+    assert_eq!(
+        store.get_many(&["object".into()]).unwrap(),
+        vec![Some(b"value".to_vec())]
+    );
+    assert_eq!(store.metrics().snapshot().read_retries, 1);
+
+    let mut range = response(206, b"value");
+    range
+        .headers_mut()
+        .insert("content-range", "bytes 16-20/53".parse().unwrap());
+    let store = scripted_calls(vec![Err(disconnected()), Ok(range)]);
+    assert_eq!(
+        store.get_ranges(&[("object", 0, 5, 5)]).unwrap(),
+        vec![Some(b"value".to_vec())]
+    );
+    assert_eq!(store.metrics().snapshot().read_retries, 1);
+}
+
+#[test]
+fn read_retries_stop_after_three_attempts() {
+    let store = scripted_calls(vec![
+        Err(disconnected()),
+        Err(disconnected()),
+        Err(disconnected()),
+        Ok(response(200, encode_envelope(b"unexpected"))),
+    ]);
+    assert!(store.get("object").is_err());
+    let counts = store.metrics().snapshot();
+    assert_eq!(counts.get, 3);
+    assert_eq!(counts.read_retries, 2);
+    assert_eq!(counts.transport_errors, 3);
+}
+
+#[test]
+fn transport_errors_on_create_and_remove_do_not_retry_and_poison() {
+    let store = scripted_calls(vec![Err(disconnected()), Ok(response(200, ""))]);
+    assert!(store.create("object", b"value").is_err());
+    assert_eq!(store.metrics().snapshot().put, 1);
+    assert_eq!(store.metrics().snapshot().read_retries, 0);
+    assert!(matches!(store.get("object"), Err(Error::RecoveryRequired)));
+
+    let store = scripted_calls(vec![Err(disconnected()), Ok(response(204, ""))]);
+    assert!(store.remove("object").is_err());
+    assert_eq!(store.metrics().snapshot().delete, 1);
+    assert_eq!(store.metrics().snapshot().read_retries, 0);
+    assert!(matches!(store.list(), Err(Error::RecoveryRequired)));
+}
+#[test]
 fn read_errors_and_corrupt_envelopes_are_not_absence() {
     let store = scripted(vec![response(404, "<Error><Code>NoSuchKey</Code></Error>")]);
     assert_eq!(store.get("missing").unwrap(), None);
@@ -349,7 +490,10 @@ fn read_errors_and_corrupt_envelopes_are_not_absence() {
             "<Error><Code>Failure</Code></Error>",
         )]);
         assert!(store.get("object").is_err());
-        assert_eq!(store.metrics().snapshot().get, 1);
+        assert_eq!(
+            store.metrics().snapshot().get,
+            if status == 500 { 3 } else { 1 }
+        );
     }
     let good = encode_envelope(b"value");
     let mut changed = good.clone();
@@ -373,18 +517,18 @@ fn listing_exhausts_pages_and_never_returns_partial_success() {
     ]);
     assert_eq!(store.list().unwrap(), vec!["a", "b"]);
     assert_eq!(store.metrics().snapshot().list, 2);
-    for second in [
-        response(500, "<Error/>"),
-        response(200, "broken XML"),
-        response(200, page("test-other/b", false)),
+    for (second, attempts) in [
+        (response(500, "<Error/>"), 4),
+        (response(200, "broken XML"), 2),
+        (response(200, page("test-other/b", false)), 2),
     ] {
         let store = scripted(vec![response(200, page("test/a", true)), second]);
         assert!(store.list().is_err());
-        assert_eq!(store.metrics().snapshot().list, 2);
+        assert_eq!(store.metrics().snapshot().list, attempts);
     }
     let store = scripted(vec![response(200, page("test/a", true))]);
     assert!(store.list().is_err());
-    assert_eq!(store.metrics().snapshot().transport_errors, 1);
+    assert_eq!(store.metrics().snapshot().transport_errors, 3);
 }
 #[test]
 fn invalid_names_fail_before_requests_and_spawn_blocking_is_supported() {

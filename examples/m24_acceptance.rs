@@ -192,7 +192,8 @@ fn counts(before: &RequestCounts, after: &RequestCounts) -> Value {
         "delete":after.delete-before.delete,"other":after.other-before.other,
         "request_body_bytes":after.request_body_bytes-before.request_body_bytes,
         "http_errors":after.http_errors-before.http_errors,
-        "transport_errors":after.transport_errors-before.transport_errors})
+        "transport_errors":after.transport_errors-before.transport_errors,
+        "read_retries":after.read_retries-before.read_retries})
 }
 
 /// Reads fvecs rows on demand so the serving process never holds the corpus.

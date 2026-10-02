@@ -23,6 +23,9 @@ zstd = { version = "0.13", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"], optional = true }
 
 [dev-dependencies]
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
 libc = "0.2"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
