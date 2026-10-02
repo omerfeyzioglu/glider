@@ -1,5 +1,13 @@
 /target/
 
+# Local serving data, cache, and example backup directories
+/data/
+/restored/
+/backup/
+/glider-cache/
+/cache/
+/.cache/
+
 # Local environment and secrets
 .env
 .env.*
@@ -7,6 +15,7 @@
 
 # macOS and editor files
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
 *.swp
@@ -18,6 +27,9 @@
 
 # Python benchmark tooling
 __pycache__/
+.pytest_cache/
+.venv/
+*.pyc
 
 # Rebuildable detailed benchmark views; immutable raw history remains tracked
 /benchmarks/index.json
