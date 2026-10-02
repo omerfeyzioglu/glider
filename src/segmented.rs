@@ -18,14 +18,17 @@ mod clustered;
 mod codec;
 use clustered::{ClusterIndex, ExtentKind};
 mod convert;
-pub use convert::{ConversionSummary, ConvertOptions};
+pub use convert::{ConversionProgress, ConversionSummary, ConvertOptions};
 mod directory;
 use directory::Directory;
 mod merge;
 pub use merge::{ClusteredLayout, MergeSummary};
 mod serving;
 pub use cache::CacheStats;
-pub use serving::{SegmentedServing, SegmentedServingOptions, ServingCounters};
+pub use serving::{
+    ClusteringState, SegmentedServing, SegmentedServingOptions, ServingCounters,
+    DEFAULT_AUTO_CLUSTER_ROWS,
+};
 mod sketch;
 use sketch::{frame, unframe, Framed, PackSketch, SketchSet, FRAME_PREFIX_READ, MAX_SKETCH_BYTES};
 pub use sketch::{ReadBudget, SegmentedOptions};
@@ -1625,6 +1628,28 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             || self.merge.is_some()
     }
 
+    /// Whether a seal or run consolidation must wait. Both may publish
+    /// while a conversion builds a namespace's first view: they only append
+    /// or merge runs newer than the ones it froze, and the view it then
+    /// publishes routes the newer versions through their canonical packs.
+    /// With a selected view a seal would add posting extents of the old
+    /// epoch, so they wait for the conversion.
+    fn root_maintenance_blocked(&self) -> bool {
+        self.seal.is_some()
+            || self.reclaim.is_some()
+            || self.prune.is_some()
+            || self.merge.is_some()
+            || (self.convert.is_some() && self.root.clustered.is_some())
+    }
+
+    /// Live (not deleted) IDs of the sealed runs, excluding the log tail.
+    pub fn sealed_live_rows(&self) -> usize {
+        self.latest
+            .iter()
+            .filter(|(_, location)| !location.entry.deleted)
+            .count()
+    }
+
     /// Postings a clustered selective query probes (default
     /// [`DEFAULT_CLUSTER_PROBES`]); at least the number of clusters probes
     /// them all.
@@ -2333,6 +2358,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .iter()
                 .map(|&generation| root_key(generation)),
         );
+        // A staged conversion's objects are not referenced until its root.
+        retained.extend(self.conversion_staged().iter().cloned());
         if let Some(view) = &self.root.clustered {
             let Some(cluster) = &self.cluster else {
                 // An unreadable catalog does not name its packs: remove
@@ -2711,7 +2738,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.maintenance_active() {
+        if self.root_maintenance_blocked() {
             return Err(Error::MaintenanceRequired);
         }
         if self.tail_objects == 0 {
@@ -2996,11 +3023,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.maintenance_active() {
+        if self.root_maintenance_blocked() {
             return Err(Error::MaintenanceRequired);
         }
+        // A staged conversion reads the runs it froze by position.
+        let frozen = self.conversion_frozen_runs();
         let runs = &self.root.runs;
-        let pair = (0..runs.len().saturating_sub(1)).rev().find(|&i| {
+        let pair = (frozen..runs.len().saturating_sub(1)).rev().find(|&i| {
             let left = (runs[i].index_len - 24) / 24;
             let right = (runs[i + 1].index_len - 24) / 24;
             left.ilog2() <= right.ilog2()

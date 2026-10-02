@@ -97,19 +97,62 @@ pub(super) async fn record_metrics(
     response
 }
 
+fn sample(engine: &admission::EngineMetrics, name: &str) -> u64 {
+    engine
+        .samples
+        .iter()
+        .find(|(sample, _)| *sample == name)
+        .map_or(0, |&(_, value)| value)
+}
+
+/// Clustered-view state from the engine's samples: `none` (per-seal
+/// routing), `converting` (an automatic or explicit conversion is staged;
+/// queries use the previous root until it publishes) or `clustered`.
+/// `auto_cluster_rows` is the automatic conversion threshold (0 disabled)
+/// and `progress` the running conversion's phase and counters.
+pub(super) fn clustering_status(engine: &admission::EngineMetrics) -> Value {
+    let sample = |name: &str| sample(engine, name);
+    let progress = match sample("glider_clustered_state") {
+        1 => Some(json!({
+            "phase": match sample("glider_conversion_phase") {
+                1 => "sample",
+                2 => "assign",
+                3 => "gather",
+                4 => "write",
+                5 => "catalog",
+                6 => "root",
+                _ => "unknown",
+            },
+            "sources": sample("glider_conversion_sources"),
+            "sources_done": sample("glider_conversion_sources_done"),
+            "pass": sample("glider_conversion_pass"),
+            "passes": sample("glider_conversion_passes"),
+            "posting_packs": sample("glider_conversion_posting_packs"),
+            "rows": sample("glider_conversion_rows"),
+        })),
+        _ => None,
+    };
+    json!({
+        "state": match sample("glider_clustered_state") {
+            1 => "converting",
+            2 => "clustered",
+            _ => "none",
+        },
+        "epoch": sample("glider_clustered_epoch"),
+        "auto_cluster_rows": sample("glider_auto_cluster_rows"),
+        "progress": progress,
+        "conversions": sample("glider_conversions_total"),
+        "conversion_failures": sample("glider_conversion_failures_total"),
+    })
+}
+
 /// NVMe warm-up state from the engine's cache samples: `disabled` without an
 /// NVMe tier, `cold` before the first warm-up unit, `warming` during a pass,
 /// `warm` when the tier holds every block of the selected root, and
 /// `partial` when a pass ended with part of the root uncached (the limit is
 /// below `namespace_bytes`). Queries never depend on it for correctness.
 pub(super) fn cache_status(engine: &admission::EngineMetrics) -> Value {
-    let sample = |name: &str| {
-        engine
-            .samples
-            .iter()
-            .find(|(sample, _)| *sample == name)
-            .map_or(0, |&(_, value)| value)
-    };
+    let sample = |name: &str| sample(engine, name);
     let (limit, namespace, warm) = (
         sample("glider_cache_nvme_limit_bytes"),
         sample("glider_cache_namespace_bytes"),

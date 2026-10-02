@@ -57,6 +57,12 @@ equality-filter keys, fixed at namespace creation), and the local cache:
   copies the namespace into it, without exceeding the limit. Set the limit
   above `cache.namespace_bytes` from `/v1/status` to keep the whole namespace
   local.
+- `GLIDER_AUTO_CLUSTER_ROWS` (default 250,000; `0` disables): when the
+  namespace has no clustered view and its sealed data holds this many live
+  rows, the server builds the M37 clustered view itself as idle maintenance
+  (see Operations). Writes and queries continue meanwhile; queries switch to
+  the view when it is published. The default is where per-seal routing
+  reaches its recall gate (`benchmarks/M37.md`, `DESIGN.md`).
 - `GLIDER_LOCAL_BLOCKS` (default 24): cached blocks a query may rerank
   locally in addition to its remote budget (12 candidates, 8 range requests,
   1 MiB), which is charged only for uncached blocks. A warm cache therefore
@@ -72,7 +78,7 @@ API (JSON except `/metrics`):
 | `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?,"include_metadata":false,"include_vector":false}`; either optional flag adds that field to each hit. Unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, keys in `GLIDER_ROUTED_KEYS` restrict sketch routing, and other equality predicates are checked during reranking (approximate, may return fewer than k) |
 | `GET /v1/points/{id}` | Current vector and metadata, or 404 |
 | `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
-| `GET /v1/status`, `GET /healthz` | Sequence, queue state and cache warm-up (`cache.state`: `disabled`, `cold`, `warming`, `warm` or `partial`, with cached and namespace bytes); liveness |
+| `GET /v1/status`, `GET /healthz` | Sequence, queue state, cache warm-up (`cache.state`: `disabled`, `cold`, `warming`, `warm` or `partial`, with cached and namespace bytes) and clustered view (`clustering.state`: `none`, `converting` with `progress` phase and pass/source counters, or `clustered` with its `epoch`); liveness |
 | `GET /metrics` | Prometheus text metrics for requests, admission, maintenance, cache and sketches; no bearer token required |
 
 A write is acknowledged only after durable publication; resend an uncertain
@@ -105,6 +111,14 @@ GLIDER_DATA_DIR=./restored GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red 
 python3 tools/drills.py --seed 29
 ```
 
+The server converts a namespace to the clustered view automatically at
+`GLIDER_AUTO_CLUSTER_ROWS`; watch `clustering` in `/v1/status`. A crash or
+restart during the conversion loses nothing: the previous layout keeps
+serving and the next start begins a new conversion and removes the
+interrupted one's objects. The view's cluster count is fixed when it is
+built (about 4,000 rows per cluster), so after the collection has grown
+several times larger, rebuild it with `convert`.
+
 `convert [CENTROIDS]` seals the log tail of the stopped namespace, builds the
 M37 clustered view from its sealed rows (or rebuilds it as a new epoch,
 which also repairs a missing or corrupt view) and publishes it with one
@@ -114,6 +128,17 @@ answers selective queries from cluster postings
 about 4,000 live rows per cluster. Later seals assign new writes to the
 view's clusters, and idle maintenance merges each cluster's small extents,
 so the namespace stays clustered under writes.
+
+For protection against operator or application mistakes, enable S3
+Versioning on the bucket with a lifecycle rule that expires noncurrent
+versions after your retention window (and aborts incomplete multipart
+uploads) rather than relying on a backup feature in glider, which has none
+that runs automatically. glider never overwrites an object, so versioning
+only retains the objects cleanup deletes, for the retention period (they
+are billed until then). To recover, copy the object versions that were
+current at the chosen time into a fresh, empty prefix and check it with
+`glider-admin status` before serving it. `backup` remains the validated,
+consistent copy for moving or archiving a namespace.
 
 `restore` copies a backup or stopped namespace into a fresh empty destination
 and validates it; the first server start there takes it over. Never reuse a

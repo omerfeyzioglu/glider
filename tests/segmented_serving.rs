@@ -42,6 +42,8 @@ fn serving(cache: &Path) -> SegmentedServingOptions {
         query_threads: 3,
         warm_unit_bytes: 64 * 1024,
         cluster_probes: 16,
+        auto_cluster_rows: 0,
+        auto_cluster: glider::segmented::ConvertOptions::default(),
     }
 }
 

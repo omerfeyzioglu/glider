@@ -112,6 +112,9 @@ impl ServerConfig {
     ///   locally beyond its remote budget, default 24; 0 makes results
     ///   independent of cache contents)
     /// - `GLIDER_LEASE_SECONDS` (default 10): writer lease duration
+    /// - `GLIDER_AUTO_CLUSTER_ROWS` (default 250,000): live sealed rows at
+    ///   which a namespace without a clustered view converts to one as idle
+    ///   maintenance; 0 disables
     pub fn from_env() -> crate::Result<Self> {
         let invalid = |name: &str| Error::Invalid(format!("invalid {name}"));
         let dimensions = required("GLIDER_DIMENSIONS")?
@@ -162,6 +165,11 @@ impl ServerConfig {
         if let Some(blocks) = env("GLIDER_LOCAL_BLOCKS") {
             serving.read_budget.local_blocks =
                 blocks.parse().map_err(|_| invalid("GLIDER_LOCAL_BLOCKS"))?;
+        }
+        if let Some(rows) = env("GLIDER_AUTO_CLUSTER_ROWS") {
+            serving.auto_cluster_rows = rows
+                .parse()
+                .map_err(|_| invalid("GLIDER_AUTO_CLUSTER_ROWS"))?;
         }
         Ok(Self {
             listen: env("GLIDER_LISTEN")

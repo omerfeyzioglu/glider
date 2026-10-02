@@ -434,20 +434,34 @@ checking the full filter, and the tail is merged. The resident predicate
 stays exact from resident vectors of current posting and canonical rows.
 Probing every cluster with unbounded limits equals exact search.
 
-`convert_clustered` (`glider-admin convert`) builds a view under exclusive
-ownership in bounded steps: a sample pass keeps the 16,384 smallest
+`convert_clustered` (`glider-admin convert`, or `SegmentedServing`'s
+automatic conversion below) builds a view under exclusive ownership in
+bounded steps: a sample pass keeps the 16,384 smallest
 `(sample_priority(seed, ID), ID)` live sealed rows, two Lloyd iterations
 train centers (about 4,000 rows per cluster by default; cosine centers are
 normalized), an assignment pass keeps two bytes per row, and gather passes
 each read every canonical pack once and buffer at most `gather_bytes` of
 clusters' rows before writing their posting packs. It then creates the
-centroid object, the catalog (after checking that posting rows equal live
-sealed rows) and the root v4 at the next generation; the sequence, retry
-state, runs and tail are unchanged. Root-changing maintenance waits for it;
-writes may continue. Before the root create the previous root (v1/v2, or the
-previous view's v4) serves and every staged object is an orphan that a
-reopen's cleanup removes; any create error poisons the handle, and reopen
-selects whichever root exists. After the root, the handle drops its routing
+centroid object, the catalog (after checking that posting rows equal the
+gathered rows, and the frozen live sealed rows when no seal intervened) and
+the root v4 at the next generation; the sequence, retry state, runs and
+tail are unchanged. The conversion freezes the selected root's runs and
+their live sealed puts. Writes may continue. Pruning, reclamation and
+merges wait for it. Without a selected view, seals (per-seal layout) and
+consolidation of runs sealed after the freeze may publish between its
+steps: frozen runs keep their positions, so frozen `(run, block)`
+locations stay valid; a frozen put a later seal shadows is not gathered
+(assignments are kept for every put of a source block, so passes stay
+aligned); and the published root carries the newer runs, whose versions
+no posting covers and stay routed through their canonical packs. The
+root create waits for a staged seal. With a selected view, seals and
+consolidation wait too. Before the root create the previous root (v1/v2,
+or the previous view's v4) serves and every staged object is an orphan:
+cleanup retains it while the conversion is staged, a reopen's cleanup
+removes it, and so does cleanup after an abandoned attempt. A failed
+read leaves the conversion staged to retry the same step; any create
+error poisons the handle, and reopen selects whichever root exists; any
+other error abandons the attempt. After the root, the handle drops its routing
 state and loads the new view as an open does; the old view's packs stay
 pinned while a query view holds it, then become obsolete. Converting a
 converted namespace builds the next epoch. Backup copies the centroid
@@ -503,6 +517,32 @@ idle time allows the seal, the next write finishes any staged prune/reclaim/merg
 and a full seal synchronously, reported as that command's maintenance time.
 A failed idle read leaves state unchanged, is counted and retried after the
 next command; an uncertain write poisons the engine and fails the service.
+
+Automatic conversion (`auto_cluster_rows`, `GLIDER_AUTO_CLUSTER_ROWS`,
+default 250,000; 0 disables): when the selected root has no clustered view
+and its sealed runs hold at least that many live rows (checked once per root
+generation), an idle unit starts a conversion with the profile's
+`auto_cluster` options (16 MiB gather passes in `m21`, 64 MiB in `m31`);
+each later idle unit is one conversion step (one canonical pack read,
+training, or one create), after seal steps, seal plans and consolidation,
+which keep the log tail bounded meanwhile. Queries use published views and
+see the previous root until the conversion's root. Its publication unit
+also loads the new view as an open does, so commands wait for those sketch
+reads once. A restart mid-conversion selects the previous root; the new
+owner starts a new attempt and cleans up the old one's orphans. An error
+other than a read abandons the attempt and stops automatic conversion on
+that handle (`conversion_failures`). An explicit `convert_clustered`
+abandons a staged automatic attempt first. The threshold sits where the
+per-seal layout reaches its quality gate (M24, 250,000 rows: static p5
+recall@10 exactly 0.80 and one update-wave run at 0.899 / 0.70) and fails
+it at 1,000,000 rows (M31), while a view converted at 250,000 rows measured
+0.994 / 0.9 static and 0.977 / 0.9 after the update wave
+(`benchmarks/M37.md`). Nothing re-trains a view as the namespace grows:
+the centroid count is fixed at conversion (about 4,000 rows per cluster
+then), and a larger count needs an explicit conversion to a new epoch.
+`/v1/status` reports `clustering` (`none`, `converting` with the phase and
+pass/source counters, or `clustered` with its epoch); metrics carry the
+same values and conversion counters.
 
 `backup_to` copies root zero, the selected root, its indexes, packs (each
 verified against the root's block digests before its PUT; packs carry their

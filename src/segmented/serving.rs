@@ -1,10 +1,11 @@
 //! Single-owner segmented serving. Queries use the persisted sketches and run
 //! on published views beside the admission committer; seal, consolidation,
-//! pruning, reclamation, cleanup and cache warm-up advance in bounded units
-//! that the committer runs only while no command is queued.
+//! pruning, reclamation, posting merges, automatic clustered conversion,
+//! cleanup and cache warm-up advance in bounded units that the committer
+//! runs only while no command is queued.
 use super::{
-    root_key, ConversionSummary, ConvertOptions, QueryHit, QueryOptions, ReadBudget,
-    SegmentedDatabase, SegmentedOptions, View,
+    root_key, ConversionProgress, ConversionSummary, ConvertOptions, QueryHit, QueryOptions,
+    ReadBudget, SegmentedDatabase, SegmentedOptions, View,
 };
 use crate::{
     admission::{Engine, EngineMetrics, QueryResult, Snapshot},
@@ -41,7 +42,20 @@ pub struct SegmentedServingOptions {
     pub warm_unit_bytes: usize,
     /// Nearest clusters a query probes in a clustered view (M37).
     pub cluster_probes: usize,
+    /// Convert a namespace without a clustered view once its sealed runs
+    /// hold this many live rows, as idle maintenance units; 0 disables.
+    pub auto_cluster_rows: usize,
+    /// How an automatic conversion builds the view.
+    pub auto_cluster: ConvertOptions,
 }
+
+/// Default [`SegmentedServingOptions::auto_cluster_rows`]. Per-seal routing
+/// is at its quality gate at 250,000 rows (M24: static p5 recall@10 exactly
+/// 0.80, update-wave 0.899 / 0.70 in one run and 0.912 / 0.80 in the next)
+/// and below it at 1,000,000 (M31: 0.894 static, 0.877 / 0.70 update wave),
+/// while a view converted at 250,000 rows measured 0.994 / 0.9 static and
+/// 0.977 / 0.9 after the update wave (`benchmarks/M37.md`).
+pub const DEFAULT_AUTO_CLUSTER_ROWS: usize = 250_000;
 
 impl SegmentedServingOptions {
     /// The M21 250,000-row envelope: 64 MiB engine RSS and a 256 MiB NVMe
@@ -65,6 +79,13 @@ impl SegmentedServingOptions {
             query_threads: 4,
             warm_unit_bytes: 256 * 1024,
             cluster_probes: 16,
+            auto_cluster_rows: DEFAULT_AUTO_CLUSTER_ROWS,
+            // Gather passes buffer 16 MiB of rows within the 64 MiB RSS
+            // envelope; more passes read the source packs more often.
+            auto_cluster: ConvertOptions {
+                gather_bytes: 16 * 1024 * 1024,
+                ..ConvertOptions::default()
+            },
         }
     }
 
@@ -78,6 +99,8 @@ impl SegmentedServingOptions {
             // Measured at 1M rows: 16 probes leave update-wave p5 recall at
             // 0.7; 32 reach 0.8 within the same remote budget.
             cluster_probes: 32,
+            // The stage 3 conversion profile (64 MiB gather passes).
+            auto_cluster: ConvertOptions::default(),
             ..Self::m21(cache_directory)
         }
     }
@@ -101,6 +124,25 @@ pub struct ServingCounters {
     /// M37 posting merge rounds started and their steps.
     pub merge_starts: u64,
     pub merge_steps: u64,
+    /// Automatic clustered conversions started and their steps; published
+    /// conversions (automatic or explicit); automatic ones abandoned by an
+    /// error other than a read.
+    pub conversion_starts: u64,
+    pub conversion_steps: u64,
+    pub conversions: u64,
+    pub conversion_failures: u64,
+}
+
+/// Clustered-view state of a served namespace.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum ClusteringState {
+    /// No clustered view: queries route through per-seal sketches.
+    None,
+    /// A conversion is staged; queries use the previous root until it
+    /// publishes.
+    Converting(ConversionProgress),
+    /// A clustered view of this epoch is selected.
+    Clustered { epoch: u64 },
 }
 
 pub struct SegmentedServing<S: ObjectStore> {
@@ -112,6 +154,12 @@ pub struct SegmentedServing<S: ObjectStore> {
     /// A seal or merge changed the clustered catalog since the last merge
     /// plan found nothing due.
     merge_pending: bool,
+    /// Root generation whose live row count the automatic conversion
+    /// trigger last checked.
+    auto_checked: Option<u64>,
+    /// An automatic conversion failed other than by a read; it is not
+    /// retried by this handle (a restart tries again).
+    auto_failed: bool,
     counters: ServingCounters,
     last_unit: &'static str,
 }
@@ -160,6 +208,8 @@ impl<S: ObjectStore> SegmentedServing<S> {
             maintenance_time: Duration::ZERO,
             scan_pending: true,
             merge_pending: true,
+            auto_checked: None,
+            auto_failed: false,
             counters: ServingCounters::default(),
             last_unit: "none",
         })
@@ -173,6 +223,18 @@ impl<S: ObjectStore> SegmentedServing<S> {
         self.counters
     }
 
+    /// Whether the namespace has no clustered view, is converting or is
+    /// clustered.
+    pub fn clustering(&self) -> ClusteringState {
+        if let Some(progress) = self.db.conversion_progress() {
+            ClusteringState::Converting(progress)
+        } else if let Some(epoch) = self.db.clustered_epoch() {
+            ClusteringState::Clustered { epoch }
+        } else {
+            ClusteringState::None
+        }
+    }
+
     /// Stop using the handle. An uncertain handle reports `RecoveryRequired`;
     /// the next takeover fences its late requests either way.
     pub fn close(self) -> Result<()> {
@@ -183,13 +245,15 @@ impl<S: ObjectStore> SegmentedServing<S> {
     }
 
     /// Finish staged maintenance, then convert the namespace to a clustered
-    /// view (or rebuild it as a new epoch); see
-    /// [`SegmentedDatabase::convert_clustered`]. Idle maintenance removes the
-    /// replaced objects afterwards.
+    /// view (or rebuild it as a new epoch) with `options`; see
+    /// [`SegmentedDatabase::convert_clustered`]. A staged automatic
+    /// conversion is abandoned first. Idle maintenance removes the replaced
+    /// objects afterwards.
     pub fn convert_clustered(&mut self, options: ConvertOptions) -> Result<ConversionSummary> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
         }
+        self.db.abandon_conversion();
         while self.db.seal.is_some() {
             self.db.seal_step()?;
         }
@@ -203,6 +267,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
             self.db.merge_step()?;
         }
         let summary = self.db.convert_clustered(options)?;
+        self.counters.conversions += 1;
         self.scan_pending = true;
         self.merge_pending = true;
         Ok(summary)
@@ -214,8 +279,9 @@ impl<S: ObjectStore> SegmentedServing<S> {
     }
 
     /// One bounded unit: a staged step, a seal plan, a run consolidation, a
-    /// prune/reclaim plan, a cleanup batch or, when nothing else is due, one
-    /// cache warm-up read. Returns false when idle.
+    /// clustered conversion step or start, a merge or prune/reclaim plan, a
+    /// cleanup batch or, when nothing else is due, one cache warm-up read.
+    /// Returns false when idle.
     pub fn maintenance_step(&mut self) -> Result<bool> {
         if self.db.poisoned {
             return Err(Error::RecoveryRequired);
@@ -277,6 +343,45 @@ impl<S: ObjectStore> SegmentedServing<S> {
             counters.consolidations += 1;
             self.scan_pending = true;
             return Ok(true);
+        }
+        // While a conversion is staged, only seals and consolidation of
+        // newer runs may change the root; the other plans wait for it.
+        if db.conversion_active() {
+            self.last_unit = "conversion_step";
+            counters.conversion_steps += 1;
+            match db.conversion_step() {
+                Ok(Some(_)) => {
+                    counters.conversions += 1;
+                    self.scan_pending = true;
+                    self.merge_pending = true;
+                }
+                Ok(None) => {}
+                // A failed read keeps the conversion staged for a retry; a
+                // failed create poisons the handle. Anything else abandoned
+                // the attempt and would recur, so stop converting.
+                Err(error) => {
+                    if !db.conversion_active() && !db.poisoned {
+                        counters.conversion_failures += 1;
+                        self.auto_failed = true;
+                    }
+                    return Err(error);
+                }
+            }
+            return Ok(true);
+        }
+        let threshold = self.options.auto_cluster_rows;
+        if threshold > 0
+            && !self.auto_failed
+            && db.root.clustered.is_none()
+            && self.auto_checked != Some(db.root.generation)
+        {
+            self.last_unit = "conversion_plan";
+            self.auto_checked = Some(db.root.generation);
+            if db.sealed_live_rows() >= threshold {
+                db.start_conversion(self.options.auto_cluster)?;
+                counters.conversion_starts += 1;
+                return Ok(true);
+            }
         }
         if self.merge_pending {
             self.last_unit = "merge_plan";
@@ -569,6 +674,11 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
     fn metrics(&self) -> Result<EngineMetrics> {
         let cache = self.db.cache_stats()?.unwrap_or_default();
         let counters = self.counters;
+        let (clustered_state, progress) = match self.clustering() {
+            ClusteringState::None => (0, ConversionProgress::default()),
+            ClusteringState::Converting(progress) => (1, progress),
+            ClusteringState::Clustered { .. } => (2, ConversionProgress::default()),
+        };
         Ok(EngineMetrics {
             sequence: self.db.sequence,
             samples: vec![
@@ -600,6 +710,35 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
                 ("glider_segmented_warm_steps_total", counters.warm_steps),
                 ("glider_segmented_merge_starts_total", counters.merge_starts),
                 ("glider_segmented_merge_steps_total", counters.merge_steps),
+                ("glider_conversion_starts_total", counters.conversion_starts),
+                ("glider_conversion_steps_total", counters.conversion_steps),
+                ("glider_conversions_total", counters.conversions),
+                (
+                    "glider_conversion_failures_total",
+                    counters.conversion_failures,
+                ),
+                ("glider_clustered_state", clustered_state),
+                (
+                    "glider_clustered_epoch",
+                    self.db.clustered_epoch().unwrap_or(0),
+                ),
+                (
+                    "glider_auto_cluster_rows",
+                    self.options.auto_cluster_rows as u64,
+                ),
+                ("glider_conversion_phase", progress.phase_code()),
+                ("glider_conversion_sources", progress.sources as u64),
+                (
+                    "glider_conversion_sources_done",
+                    progress.sources_done as u64,
+                ),
+                ("glider_conversion_pass", progress.pass as u64),
+                ("glider_conversion_passes", progress.passes as u64),
+                (
+                    "glider_conversion_posting_packs",
+                    progress.posting_packs as u64,
+                ),
+                ("glider_conversion_rows", progress.rows),
                 ("glider_cache_ram_hits_total", cache.ram_hits),
                 ("glider_cache_nvme_hits_total", cache.nvme_hits),
                 ("glider_cache_remote_fetches_total", cache.remote_fetches),

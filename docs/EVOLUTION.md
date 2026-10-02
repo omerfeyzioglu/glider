@@ -343,3 +343,17 @@ After an in-memory replay of the M31 update wave, 16 probes, 8 requests and
 1 MiB reach 0.977 / 0.9 at 250,000 rows and 0.9585 / 0.8 at 1,000,000 rows;
 root uploads (every block reference per root) bounded the merge policy.
 [Evidence](../benchmarks/M37.md#stages-4-5-clustered-seals-and-posting-merges-under-the-update-wave).
+
+## 2026-10-02 — Automatic conversion as idle serving maintenance
+
+Without an operator `convert`, a growing namespace kept per-seal routing
+past the size where it misses the recall gate (0.894 static at 1,000,000
+rows). `SegmentedServing` now converts once the sealed runs hold
+`auto_cluster_rows` live rows (default 250,000, where per-seal p5 recall is
+on the gate), one conversion step per idle unit. A conversion of 1,000,000
+rows takes thousands of units, longer than writes take to fill the 64-object
+log tail, so finishing it synchronously or abandoning it at the bound was
+rejected; instead seals and consolidation of runs newer than the frozen ones
+publish between its steps, and their versions stay routed through canonical
+packs under the new view, which open already supported. Failed reads keep
+the attempt; staged objects are retained from cleanup until its root.
