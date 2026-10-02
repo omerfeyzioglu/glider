@@ -343,3 +343,17 @@ After an in-memory replay of the M31 update wave, 16 probes, 8 requests and
 1 MiB reach 0.977 / 0.9 at 250,000 rows and 0.9585 / 0.8 at 1,000,000 rows;
 root uploads (every block reference per root) bounded the merge policy.
 [Evidence](../benchmarks/M37.md#stages-4-5-clustered-seals-and-posting-merges-under-the-update-wave).
+
+## 2026-10-02 — Root manifests: publications write only changed runs
+
+Every root embedded every run's block list, so each publication rewrote all
+block references: 2.25 MB per root and 46% of uploaded bytes in the
+1,000,000-row update-wave replay, growing with the collection. Root v5 names
+each run's blocks through an immutable, digest-bound run manifest; a
+publication rewrites manifests only for runs whose blocks changed and reuses
+the selected root's references otherwise, one create per maintenance step
+before the root. Per-run manifests were chosen over delta segments with a
+merge policy because runs are already the bounded unit of change. A
+publication fell to 253 KB and all uploads from 529 to 311 MB; older roots
+open unchanged and upgrade on their next publication.
+[Evidence](../benchmarks/M39.md#root-manifests-root-v5-publication-bytes-in-the-update-wave-replay).

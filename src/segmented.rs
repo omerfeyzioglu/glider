@@ -21,6 +21,7 @@ mod convert;
 pub use convert::{ConversionSummary, ConvertOptions};
 mod directory;
 use directory::Directory;
+mod manifest;
 mod merge;
 pub use merge::{ClusteredLayout, MergeSummary};
 mod serving;
@@ -218,7 +219,7 @@ fn plan_deletes(deletes: &[(u64, usize)]) -> Vec<(Vec<u64>, usize)> {
 }
 
 /// Root-v1 metadata for one block inside an immutable physical pack.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BlockRef {
     pub(crate) object: String,
@@ -344,6 +345,11 @@ pub(crate) struct RunRef {
     pub(crate) index_len: usize,
     pub(crate) index_sha256: String,
     pub(crate) blocks: Vec<BlockRef>,
+    /// The run manifest holding `blocks` in a root v5. Roots v1, v2 and v4
+    /// embed `blocks` instead; a root about to be published is bound by
+    /// `stage_manifest`, which never trusts this field's previous value.
+    #[serde(skip)]
+    manifest: Option<clustered::ObjectRef>,
 }
 
 /// Keys of every takeover's fence objects: takeover records (log
@@ -364,7 +370,10 @@ impl Fences {
 }
 
 /// Root v1 has no fences, v2 adds takeover fences, and v4 adds a clustered
-/// view. Version 3 is reserved for fence markers.
+/// view. Version 3 is reserved for fence markers. Version 5 (`manifest`)
+/// names each run's blocks through a run manifest object instead of
+/// embedding them, with optional fences and view; every publication writes
+/// it. Older versions remain readable.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Root {
@@ -401,15 +410,23 @@ enum RootObject {
 
 /// Decode an object at `root_key(generation)`.
 fn decode_root(bytes: &[u8], config: Config, generation: u64) -> Result<RootObject> {
-    let object = if decode::<MetadataVersion>(bytes)?.version == 3 {
+    let version = decode::<MetadataVersion>(bytes)?.version;
+    let object = if version == 3 {
         let fence: RootFence = decode(bytes)?;
         if fence.generation != generation {
             return Err(Error::Corrupt("segmented fence generation mismatch".into()));
         }
         RootObject::Fence
     } else {
-        let root: Root = decode(bytes)?;
-        root.validate(config)?;
+        // A root v5's runs name their blocks through manifests, which the
+        // opener loads only for the selected root.
+        let root = if version == 5 {
+            manifest::decode_root(bytes, config)?
+        } else {
+            let root: Root = decode(bytes)?;
+            root.validate(config)?;
+            root
+        };
         if root.generation != generation {
             return Err(Error::Corrupt("segmented root generation mismatch".into()));
         }
@@ -420,7 +437,8 @@ fn decode_root(bytes: &[u8], config: Config, generation: u64) -> Result<RootObje
 
 /// The newest root at or below the listed generations, skipping fence
 /// markers above it, which it returns. `Error::Exists` means a listed object
-/// vanished: only a newer root supersedes one, so the caller retries.
+/// vanished: only a newer root supersedes one, so the caller retries. A root
+/// v5 is returned without its block lists (`manifest::load_manifests`).
 fn select_root<S: ObjectStore>(
     store: &S,
     config: Config,
@@ -455,7 +473,23 @@ impl Root {
         }
     }
 
+    /// Validate the complete root, including every run's block list.
     pub(crate) fn validate(&self, config: Config) -> Result<()> {
+        self.validate_header(config)?;
+        for run in &self.runs {
+            if run.blocks.is_empty() {
+                return Err(Error::Corrupt("invalid segmented run reference".into()));
+            }
+            for reference in &run.blocks {
+                validate_block_ref(reference)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate everything but the runs' block lists, which a decoded root
+    /// v5 has not loaded yet.
+    fn validate_header(&self, config: Config) -> Result<()> {
         let fences_valid = match self.version {
             1 => self.fences.is_empty() && self.clustered.is_none(),
             2 => {
@@ -468,12 +502,12 @@ impl Root {
                         .iter()
                         .all(|&generation| generation > 0 && generation < self.generation)
             }
-            4 => {
+            4 | 5 => {
                 self.generation > 0
-                    && self
-                        .clustered
-                        .as_ref()
-                        .is_some_and(|view| view.validate().is_ok())
+                    && match &self.clustered {
+                        Some(view) => view.validate().is_ok(),
+                        None => self.version == 5,
+                    }
                     && !self.fences.logs.contains(&0)
                     && self
                         .fences
@@ -493,7 +527,6 @@ impl Root {
                 || run.first_sequence <= previous_sequence
                 || run.first_sequence > run.last_sequence
                 || run.last_sequence > self.sequence
-                || run.blocks.is_empty()
                 || run.index_len < 48
                 || run.index_len > MAX_INDEX_BYTES
                 || !(run.index_len - 24).is_multiple_of(24)
@@ -502,9 +535,6 @@ impl Root {
                 return Err(Error::Corrupt("invalid segmented run reference".into()));
             }
             previous_sequence = run.last_sequence;
-            for reference in &run.blocks {
-                validate_block_ref(reference)?;
-            }
         }
         Ok(())
     }
@@ -1286,6 +1316,10 @@ pub struct SegmentedDatabase<S> {
     tail_logs: VecDeque<u64>,
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
+    /// Run manifests created for the root being prepared, by SHA-256 of
+    /// their bytes, so a step that rebuilds that root reuses them. Cleared
+    /// when a root is selected: an unreferenced one is then obsolete.
+    staged_manifests: BTreeMap<[u8; 32], clustered::ObjectRef>,
     /// Replaced roots; one that a view still holds pins its packs.
     retired: Vec<Weak<Root>>,
     cache: Option<Arc<Mutex<BlockCache>>>,
@@ -1545,7 +1579,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     }
 
     /// A copy of the selected root at the next free generation (above every
-    /// fence marker) carrying the namespace's fences.
+    /// fence marker) carrying the namespace's fences, as a root v5 whose
+    /// manifests `stage_manifest` binds before publication.
     fn next_root(&self) -> Result<Root> {
         let mut root = Root::clone(&self.root);
         root.generation = self
@@ -1555,13 +1590,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
         root.fences = self.fences.clone();
-        root.version = if root.clustered.is_some() {
-            4
-        } else if root.fences.is_empty() {
-            1
-        } else {
-            2
-        };
+        root.version = 5;
         Ok(root)
     }
 
@@ -1804,6 +1833,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 logs.push(sequence);
             } else if key.starts_with("sgpack-")
                 || key.starts_with("sgindex-")
+                || key.starts_with(manifest::PREFIX)
                 || key.starts_with("sgcentroid-")
                 || key.starts_with("sgcluster-")
             {
@@ -1812,11 +1842,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 return Err(Error::Corrupt(format!("unexpected segmented key: {key}")));
             }
         }
-        let (root, markers) =
+        let (mut root, markers) =
             select_root(&store, config, &generations).map_err(|error| match error {
                 Error::Exists(_) => Error::Corrupt("selected segmented root missing".into()),
                 error => error,
             })?;
+        manifest::load_manifests(&store, config, &mut root)?;
         let mut fences = root.fences.clone();
         fences.roots.extend(markers);
         let mut latest = Directory::default();
@@ -1876,6 +1907,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             tail_logs: VecDeque::new(),
             known_keys: listed,
             obsolete: VecDeque::new(),
+            staged_manifests: BTreeMap::new(),
             retired: Vec::new(),
             cache: None,
             options_digest: Sha256::digest(encode(&options)?).into(),
@@ -2320,6 +2352,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         ]);
         for run in &self.root.runs {
             retained.insert(run.index_object.clone());
+            retained.extend(run.manifest.iter().map(|manifest| manifest.key.clone()));
             for block in &run.blocks {
                 retained.insert(block.object.clone());
             }
@@ -2350,6 +2383,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Select a new root. A view holding the old one keeps its packs from
     /// cleanup until the view is dropped.
     fn replace_root(&mut self, root: Root) {
+        self.staged_manifests.clear();
         let old = std::mem::replace(&mut self.root, Arc::new(root));
         self.retired.push(Arc::downgrade(&old));
     }
@@ -2812,7 +2846,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(records)
     }
 
-    /// Publish at most one pack, index, catalog or root per call. The root
+    /// Publish at most one pack, index, catalog, run manifest or root per
+    /// call. The root
     /// is the only authority switch; an uncertain create poisons the handle
     /// until reopen. A clustered seal stages a catalog listing its posting
     /// extents, and its root selects that catalog.
@@ -2915,7 +2950,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         let mut root = self.next_root()?;
         root.sequence = seal.boundary;
-        root.retry = seal.retry;
+        root.retry = seal.retry.clone();
         if !seal.entries.is_empty() {
             let index = RunIndex {
                 sequence: seal.boundary,
@@ -2928,23 +2963,33 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 index_object: format!("sgindex-{}", seal.attempt),
                 index_len: bytes.len(),
                 index_sha256: format!("{:x}", Sha256::digest(&bytes)),
-                blocks: seal.references,
+                blocks: seal.references.clone(),
+                manifest: None,
             });
         }
-        let view =
-            seal.clustered
-                .and_then(|clustered| clustered.catalog)
-                .map(|(reference, index)| {
-                    let view = root
-                        .clustered
-                        .as_mut()
-                        .expect("clustered seals keep the view");
-                    view.catalog = reference;
-                    index
-                });
+        if let Some((reference, _)) = seal
+            .clustered
+            .as_ref()
+            .and_then(|clustered| clustered.catalog.as_ref())
+        {
+            root.clustered
+                .as_mut()
+                .expect("clustered seals keep the view")
+                .catalog = reference.clone();
+        }
         root.validate(self.config)?;
+        // The new run's manifest (and, for a legacy root, every other run's)
+        // is created one per step before the root.
+        if self.stage_manifest(&mut root)? {
+            self.seal = Some(seal);
+            return Ok(true);
+        }
+        let view = seal
+            .clustered
+            .and_then(|clustered| clustered.catalog)
+            .map(|(_, index)| index);
         self.poisoned = true;
-        self.create_staged(&root_key(root.generation), &encode(&root)?)?;
+        self.create_staged(&root_key(root.generation), &manifest::encode_root(&root)?)?;
         self.poisoned = false;
         if !seal.entries.is_empty() {
             let run = root.runs.len() - 1;
@@ -3074,6 +3119,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     index_len: bytes.len(),
                     index_sha256: format!("{:x}", Sha256::digest(&bytes)),
                     blocks,
+                    manifest: None,
                 },
                 bytes,
             ))
@@ -3083,12 +3129,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             replacement.as_ref().map(|(run, _)| run.clone()),
         );
         root.validate(self.config)?;
-        let root_bytes = encode(&root)?;
         if let Some((run, bytes)) = &replacement {
             self.poisoned = true;
             self.create_staged(&run.index_object, bytes)?;
             self.poisoned = false;
         }
+        // The merged run's manifest; a legacy root also gets the others'.
+        self.stage_manifests(&mut root)?;
+        let root_bytes = manifest::encode_root(&root)?;
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
@@ -3220,7 +3268,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(true)
     }
 
-    /// Advance one index PUT or root PUT. Writes may extend the log tail, but
+    /// Advance one index, run manifest or root PUT. Writes may extend the log tail, but
     /// the frozen root directory cannot change until this publication ends.
     pub fn prune_step(&mut self) -> Result<bool> {
         if self.poisoned {
@@ -3239,8 +3287,15 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.prune = Some(state);
             return Ok(true);
         }
+        if self.stage_manifest(&mut state.root)? {
+            self.prune = Some(state);
+            return Ok(true);
+        }
         self.poisoned = true;
-        self.create_staged(&root_key(state.root.generation), &encode(&state.root)?)?;
+        self.create_staged(
+            &root_key(state.root.generation),
+            &manifest::encode_root(&state.root)?,
+        )?;
         self.poisoned = false;
         let removed = state.entries.is_empty();
         Arc::make_mut(&mut self.latest).retain(|_, location| {
@@ -3411,7 +3466,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(true)
     }
 
-    /// Advance reclamation by one block GET, pack PUT, or root PUT. Only the
+    /// Advance reclamation by one block GET, pack, run manifest or root PUT. Only the
     /// root PUT changes authoritative visibility. An uncertain write poisons
     /// this handle, and reopen determines whether publication happened.
     pub fn reclaim_step(&mut self) -> Result<bool> {
@@ -3473,7 +3528,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             root.runs[run].blocks[block] = state.references.as_ref().unwrap()[index].clone();
         }
         root.validate(self.config)?;
-        let root_bytes = encode(&root)?;
+        // Every run that lost a block to the new pack gets a new manifest,
+        // one create per step.
+        if self.stage_manifest(&mut root)? {
+            self.reclaim = Some(state);
+            return Ok(true);
+        }
+        let root_bytes = manifest::encode_root(&root)?;
         // With a clustered view a moved row stays routed exactly when its old
         // canonical row was: postings cover the others.
         let routed: Option<BTreeSet<u64>> = self.root.clustered.is_some().then(|| {
@@ -4062,6 +4123,7 @@ mod tests {
             index_len: bytes.len(),
             index_sha256: format!("{:x}", Sha256::digest(&bytes)),
             blocks,
+            manifest: None,
         };
         let mut root = Root::empty(config);
         root.sequence = 1;
@@ -4445,6 +4507,8 @@ mod tests {
         db.apply_request(put(1, 2, 42, 3.)).unwrap();
         assert!(db.seal_step().unwrap()); // index for sequence 1
         db.apply_request(put(2, 3, 7, 4.)).unwrap();
+        assert!(db.seal_step().unwrap()); // run manifest for sequence 1
+        assert_eq!(db.root.sequence, 0);
         assert!(db.seal_step().unwrap()); // root for sequence 1
         assert_eq!(db.root.sequence, 1);
         assert_eq!(db.tail_objects, 2);
@@ -4716,7 +4780,8 @@ mod tests {
         })
         .unwrap();
         boundary += 1;
-        assert!(db.prune_step().unwrap());
+        assert!(db.prune_step().unwrap()); // run manifest
+        assert!(db.prune_step().unwrap()); // root
         assert!(!db.prune_step().unwrap());
         assert_eq!(db.root.runs[0].blocks.len(), 1);
         assert!(db.reclaim_pack_step().unwrap());

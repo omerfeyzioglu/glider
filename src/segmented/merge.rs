@@ -15,7 +15,7 @@
 use super::{
     clustered::{self, ClusterIndex, Extent, ExtentKind, ObjectRef},
     convert::layout,
-    decode_block, encode, root_key, sketch, Block, BlockRecord, PackSketch, SegmentedDatabase,
+    decode_block, root_key, sketch, Block, BlockRecord, PackSketch, SegmentedDatabase,
     MAX_PACK_BLOCKS,
 };
 use crate::{store::ObjectStore, Error, Mutation, Result};
@@ -384,18 +384,24 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(rows)
     }
 
-    /// Publish the root selecting the merged catalog, then rebind routing:
+    /// Publish the root selecting the merged catalog (after any manifests a
+    /// legacy root still needs), then rebind routing:
     /// replaced blocks leave their packs' sketches and the merged packs'
     /// rows become routable.
     fn publish_merge(&mut self, mut state: MergeState) -> Result<()> {
-        let (reference, view) = state.catalog.take().expect("catalog staged");
         let mut root = self.next_root()?;
         root.clustered
             .as_mut()
             .ok_or_else(|| Error::Corrupt("posting merge without a clustered root".into()))?
-            .catalog = reference;
+            .catalog = state.catalog.as_ref().expect("catalog staged").0.clone();
         root.validate(self.config)?;
-        let bytes = encode(&root)?;
+        // A legacy root's runs first get their manifests, one create per step.
+        if self.stage_manifest(&mut root)? {
+            self.merge = Some(state);
+            return Ok(());
+        }
+        let (_, view) = state.catalog.take().expect("catalog staged");
+        let bytes = super::manifest::encode_root(&root)?;
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &bytes)?;
         self.poisoned = false;
