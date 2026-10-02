@@ -41,8 +41,8 @@ def main():
     parser.add_argument("--bucket", default="glider-pilot-test-t1g1p")
     parser.add_argument("--prefix", default="glider-pilot")
     parser.add_argument("--region", default="eu-central-1")
-    parser.add_argument("--instance-type", default="c7g.2xlarge")
-    parser.add_argument("--max-minutes", type=int, default=120)
+    parser.add_argument("--instance-type", default="m7i-flex.large")
+    parser.add_argument("--max-minutes", type=int, default=150)
     parser.add_argument("--cleanup-datasets", action="store_true")
     parser.add_argument("--clustered", action="store_true",
                         help="convert to an M37 clustered view after load (GLIDER_M24_CLUSTERED=1)")
@@ -61,8 +61,10 @@ def main():
     }.items():
         script = script.replace(f"@@{key}@@", str(value))
     assert "@@" not in script
+    # Graviton types (c7g, m7g, t4g) need the arm64 image; others are x86_64.
+    arch = "arm64" if args.instance_type.split(".")[0].endswith("g") else "x86_64"
     ami = aws("ssm", "get-parameter", "--region", args.region, "--name",
-              "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+              f"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-{arch}",
               "--query", "Parameter.Value", "--output", "text").strip()
     tags = f"{{Key=project,Value={TAG}}},{{Key=run,Value={run_id}}}"
     instance = json.loads(aws(
@@ -110,7 +112,10 @@ def main():
         if args.cleanup_datasets:
             subprocess.run(["aws", "s3", "rm", "--only-show-errors", "--recursive",
                             f"s3://{args.bucket}/{args.prefix}/datasets/"], capture_output=True)
-        left = aws("s3", "ls", "--recursive", f"s3://{args.bucket}/{args.prefix}/{run_id}")
+        # `aws s3 ls` exits non-zero when nothing matches, which is the goal.
+        left = subprocess.run(["aws", "s3", "ls", "--recursive",
+                               f"s3://{args.bucket}/{args.prefix}/{run_id}"],
+                              capture_output=True, text=True).stdout
         print(f"remaining run objects: {len(left.splitlines())}", flush=True)
     print(f"{run_id}: {outcome}", flush=True)
     sys.exit(0 if outcome == "done" else 1)
