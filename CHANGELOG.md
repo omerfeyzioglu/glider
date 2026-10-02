@@ -4,7 +4,7 @@ All notable user-visible changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-10-03
 
 First release: a single-node, single-writer vector database with S3 as the
 authoritative store. Milestones M1–M39 in [ROADMAP.md](ROADMAP.md); design
@@ -80,4 +80,4 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   with `400` ([limits](docs/API.md#post-v1write)).
 - No TLS; use a reverse proxy.
 
-[1.0.0]: https://github.com/omerfeyzioglu/glider/tree/main
+[1.0.0]: https://github.com/omerfeyzioglu/glider/releases/tag/v1.0.0
