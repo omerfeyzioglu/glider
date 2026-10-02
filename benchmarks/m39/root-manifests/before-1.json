@@ -1,0 +1,306 @@
+{
+  "arch": "aarch64",
+  "base_prefix_sha256": "21f66e2975057b5728ba56de1c825bac4f4d89d596609ae985741c6242631816",
+  "canonical_pack_bytes": 249254133,
+  "canonical_packs": 625,
+  "clustered_index_bytes": 100379452,
+  "conversion": {
+    "centroids": 256,
+    "epoch": 1,
+    "extents": 697,
+    "gather_passes": 10,
+    "posting_bytes": 259128164,
+    "posting_packs": 689,
+    "root_generation": 606,
+    "rows": 1000000,
+    "sample_rows": 16384,
+    "source_sequence": 10000
+  },
+  "conversion_ms": 23020,
+  "exact_top10_sha256": "3f0c752db7162cae5215a183fee26e7629110e6a685f4b01a9ce9dc3cfa1e84a",
+  "k": 10,
+  "load_ms": 23427,
+  "metric": "squared_euclidean",
+  "oracle_ms": 1486,
+  "os": "macos",
+  "per_seal_index_bytes": 115400792,
+  "per_seal_m31_budget": {
+    "bytes_cap": 1048576,
+    "max_range_bytes": 609752,
+    "max_range_requests": 8,
+    "mean_query_ms": 7.622770210000001,
+    "mean_range_bytes": 236594.24,
+    "mean_range_requests": 7.995,
+    "mean_recall_at_10": 0.894,
+    "p5_recall_at_10": 0.8,
+    "requests": 8,
+    "short_results": 0
+  },
+  "posting_pack_bytes": 259128164,
+  "probe": "m37_conversion_probe",
+  "queries": 200,
+  "query_prefix_sha256": "5fa992cdb94ea8685d3f8491f94812df0f70af677d0e2a593f6fbd6a44184395",
+  "results": [
+    {
+      "bytes_cap": 1048576,
+      "max_range_bytes": 1048562,
+      "max_range_requests": 8,
+      "mean_query_ms": 2.269554165,
+      "mean_range_bytes": 1039789.295,
+      "mean_range_requests": 7.885,
+      "mean_recall_at_10": 0.826,
+      "p5_recall_at_10": 0.4,
+      "probes": 4,
+      "requests": 8,
+      "short_results": 0
+    },
+    {
+      "bytes_cap": 1048576,
+      "max_range_bytes": 1048570,
+      "max_range_requests": 8,
+      "mean_query_ms": 2.494279165,
+      "mean_range_bytes": 1039774.55,
+      "mean_range_requests": 7.985,
+      "mean_recall_at_10": 0.9295,
+      "p5_recall_at_10": 0.7,
+      "probes": 8,
+      "requests": 8,
+      "short_results": 0
+    },
+    {
+      "bytes_cap": 1048576,
+      "max_range_bytes": 1048535,
+      "max_range_requests": 8,
+      "mean_query_ms": 2.96225646,
+      "mean_range_bytes": 1039217.24,
+      "mean_range_requests": 7.995,
+      "mean_recall_at_10": 0.97,
+      "p5_recall_at_10": 0.8,
+      "probes": 16,
+      "requests": 8,
+      "short_results": 0
+    },
+    {
+      "bytes_cap": 1048576,
+      "max_range_bytes": 1048562,
+      "max_range_requests": 8,
+      "mean_query_ms": 3.8511562500000003,
+      "mean_range_bytes": 1039252.685,
+      "mean_range_requests": 7.995,
+      "mean_recall_at_10": 0.981,
+      "p5_recall_at_10": 0.9,
+      "probes": 32,
+      "requests": 8,
+      "short_results": 0
+    },
+    {
+      "bytes_cap": 1048576,
+      "max_range_bytes": 1048199,
+      "max_range_requests": 4,
+      "mean_query_ms": 2.85625833,
+      "mean_range_bytes": 969991.815,
+      "mean_range_requests": 4.0,
+      "mean_recall_at_10": 0.7475,
+      "p5_recall_at_10": 0.5,
+      "probes": 16,
+      "requests": 4,
+      "short_results": 0
+    },
+    {
+      "bytes_cap": 1048576,
+      "max_range_bytes": 1048557,
+      "max_range_requests": 12,
+      "mean_query_ms": 2.979545,
+      "mean_range_bytes": 1042495.44,
+      "mean_range_requests": 11.48,
+      "mean_recall_at_10": 0.9835,
+      "p5_recall_at_10": 0.9,
+      "probes": 16,
+      "requests": 12,
+      "short_results": 0
+    },
+    {
+      "bytes_cap": 524288,
+      "max_range_bytes": 524271,
+      "max_range_requests": 8,
+      "mean_query_ms": 2.15227833,
+      "mean_range_bytes": 517680.11,
+      "mean_range_requests": 7.645,
+      "mean_recall_at_10": 0.9575,
+      "p5_recall_at_10": 0.8,
+      "probes": 16,
+      "requests": 8,
+      "short_results": 0
+    },
+    {
+      "bytes_cap": 262144,
+      "max_range_bytes": 262144,
+      "max_range_requests": 8,
+      "mean_query_ms": 1.7182362500000001,
+      "mean_range_bytes": 257548.9,
+      "mean_range_requests": 6.92,
+      "mean_recall_at_10": 0.802,
+      "p5_recall_at_10": 0.5,
+      "probes": 16,
+      "requests": 8,
+      "short_results": 0
+    }
+  ],
+  "rows": 1000000,
+  "sketch_rebuilds": 0,
+  "threads": 10,
+  "update_wave": {
+    "blocks": 9897,
+    "counters": {
+      "consolidations": 20,
+      "forced_seals": 0,
+      "merge_starts": 18,
+      "merge_steps": 5662,
+      "prune_starts": 33,
+      "prune_steps": 66,
+      "reclaim_starts": 20,
+      "reclaim_steps": 657,
+      "removed_objects": 1059,
+      "seal_starts": 18,
+      "seal_steps": 450,
+      "sketch_compactions": 20,
+      "warm_steps": 0
+    },
+    "creates_by_kind": {
+      "metadata": {
+        "bytes": 0,
+        "creates": 0,
+        "per_round": 0.0
+      },
+      "sgcentroid": {
+        "bytes": 0,
+        "creates": 0,
+        "per_round": 0.0
+      },
+      "sgcluster": {
+        "bytes": 13819152,
+        "creates": 36,
+        "per_round": 0.12
+      },
+      "sgindex": {
+        "bytes": 66414504,
+        "creates": 71,
+        "per_round": 0.23666666666666666
+      },
+      "sglog": {
+        "bytes": 76756775,
+        "creates": 600,
+        "per_round": 2.0
+      },
+      "sgpack": {
+        "bytes": 126705230,
+        "creates": 653,
+        "per_round": 2.1766666666666667
+      },
+      "sgroot": {
+        "bytes": 245401227,
+        "creates": 109,
+        "per_round": 0.36333333333333334
+      }
+    },
+    "index_bytes": 115077312,
+    "layout": {
+      "canonical_extents": 452,
+      "clusters": 256,
+      "dead_extents": 0,
+      "derived_extents": 964,
+      "epoch": 1,
+      "extents": 1416,
+      "max_extents_per_cluster": 11,
+      "max_small_extents": 3,
+      "posting_packs": 803,
+      "uncovered_packs": 0
+    },
+    "longest_round_maintenance_ms": 600.5319999999999,
+    "maintenance_ms": 6913.310671999997,
+    "oracle_ms": 1564,
+    "overwritten_rows": 120000,
+    "reopen": {
+      "gets_by_kind": {
+        "metadata": {
+          "bytes": 125,
+          "gets": 1
+        },
+        "sgcentroid": {
+          "bytes": 132186,
+          "gets": 1
+        },
+        "sgcluster": {
+          "bytes": 409332,
+          "gets": 1
+        },
+        "sgindex": {
+          "bytes": 24000456,
+          "gets": 19
+        },
+        "sglog": {
+          "bytes": 3062306,
+          "gets": 24
+        },
+        "sgroot": {
+          "bytes": 2673898,
+          "gets": 1
+        }
+      },
+      "open_ms": 518.331709,
+      "range_bytes": 196521124,
+      "range_reads": 803
+    },
+    "results": [
+      {
+        "bytes_cap": 1048576,
+        "max_range_bytes": 1048557,
+        "max_range_requests": 8,
+        "mean_query_ms": 4.999367915,
+        "mean_range_bytes": 1041040.88,
+        "mean_range_requests": 8.0,
+        "mean_recall_at_10": 0.968,
+        "p5_recall_at_10": 0.8,
+        "probes": 16,
+        "requests": 8,
+        "short_results": 0
+      },
+      {
+        "bytes_cap": 524288,
+        "max_range_bytes": 524280,
+        "max_range_requests": 8,
+        "mean_query_ms": 4.02153667,
+        "mean_range_bytes": 517204.145,
+        "mean_range_requests": 7.945,
+        "mean_recall_at_10": 0.963,
+        "p5_recall_at_10": 0.8,
+        "probes": 16,
+        "requests": 8,
+        "short_results": 0
+      },
+      {
+        "bytes_cap": 1048576,
+        "max_range_bytes": 1048575,
+        "max_range_requests": 12,
+        "mean_query_ms": 5.068230000000001,
+        "mean_range_bytes": 1041699.585,
+        "mean_range_requests": 11.925,
+        "mean_recall_at_10": 0.995,
+        "p5_recall_at_10": 1.0,
+        "probes": 16,
+        "requests": 12,
+        "short_results": 0
+      }
+    ],
+    "rounds": 300,
+    "runs": 19,
+    "selected_root": {
+      "bytes": 2673898,
+      "key": "sgroot-00000000000000000716"
+    },
+    "tail_objects": 24,
+    "visible_bytes": 582317497,
+    "visible_pack_bytes": 552038970,
+    "wave_ms": 7915.777999999999
+  }
+}

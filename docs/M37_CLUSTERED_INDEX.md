@@ -64,6 +64,9 @@ later root of a converted namespace is v4. Older binaries reject v4 rather than 
 reference. Root keys remain
 `sgroot-{generation:020}`; their never-reused generations are the only index
 visibility switch. Root zero and metadata keep their existing meanings.
+Root v5 (DESIGN.md, "Root manifests") later moved block lists into run
+manifests; it carries the same optional view reference, so later roots of a
+converted namespace are v5 with `clustered`.
 
 The immutable **centroid object v1** has a new key kind `sgcentroid-{attempt}`
 and a length/digest in the root. It begins with `GLCENT01` and contains config identity

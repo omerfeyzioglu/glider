@@ -17,7 +17,8 @@
 //! idle maintenance (clustered seals every 32 logs, posting merges,
 //! consolidation, cleanup) runs to completion. It reports object creates
 //! and uploaded bytes by kind, the clustered layout and cold recall against
-//! the exact top-10 of the updated corpus.
+//! the exact top-10 of the updated corpus, then times a reopen of the final
+//! namespace and counts the whole-object GETs and bytes it read by kind.
 //!
 //! Usage: `m37_conversion_probe BASE.fvecs QUERY.fvecs ROWS [CENTROIDS|-] [ROUNDS]`.
 //! Prints one JSON object.
@@ -59,6 +60,12 @@ struct Memory {
     bytes: Arc<AtomicU64>,
     /// Creates and uploaded bytes by key kind (the prefix before '-').
     creates: Arc<Mutex<BTreeMap<String, (u64, u64)>>>,
+    /// Whole-object GETs and their bytes by key kind.
+    gets: Arc<Mutex<BTreeMap<String, (u64, u64)>>>,
+}
+
+fn kind(key: &str) -> String {
+    key.split('-').next().unwrap_or(key).to_owned()
 }
 
 impl Memory {
@@ -80,6 +87,12 @@ impl Memory {
 impl ObjectStore for Memory {
     fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
         let object = self.objects.lock().unwrap().get(key).cloned();
+        if let Some(bytes) = &object {
+            let mut gets = self.gets.lock().unwrap();
+            let entry = gets.entry(kind(key)).or_default();
+            entry.0 += 1;
+            entry.1 += bytes.len() as u64;
+        }
         Ok(object.map(|bytes| bytes.to_vec()))
     }
     fn get_range(
@@ -109,9 +122,8 @@ impl ObjectStore for Memory {
             return Err(Error::Exists(key.into()));
         }
         objects.insert(key.into(), Arc::new(value.to_vec()));
-        let kind = key.split('-').next().unwrap_or(key).to_owned();
         let mut creates = self.creates.lock().unwrap();
-        let entry = creates.entry(kind).or_default();
+        let entry = creates.entry(kind(key)).or_default();
         entry.0 += 1;
         entry.1 += value.len() as u64;
         Ok(())
@@ -404,7 +416,8 @@ fn update_wave(
         auto_recluster_factor: 0,
         ..SegmentedServingOptions::m31(std::path::PathBuf::new())
     };
-    let mut serving = SegmentedServing::open(store.clone(), config, options, serving_options)?;
+    let mut serving =
+        SegmentedServing::open(store.clone(), config, options.clone(), serving_options)?;
     let creates_before = store.creates.lock().unwrap().clone();
     let mut generation = vec![0_u64; rows];
     let (mut maintenance_ms, mut longest_round_ms) = (0_f64, 0_f64);
@@ -500,6 +513,32 @@ fn update_wave(
         eprintln!("after wave: {result}");
         results.push(result);
     }
+    let (tail_objects, runs, blocks) = (db.tail_objects(), db.run_count(), db.block_count());
+    let (layout, index_bytes) = (db.clustered_layout(), db.selective_index_bytes());
+    let counters = serving.counters();
+    serving.close()?;
+    let selected_root = {
+        let objects = store.objects.lock().unwrap();
+        let (key, bytes) = objects
+            .iter()
+            .rfind(|(key, _)| key.starts_with("sgroot-"))
+            .ok_or("no root")?;
+        json!({"key": key, "bytes": bytes.len()})
+    };
+    store.gets.lock().unwrap().clear();
+    store.take_reads();
+    let started = Instant::now();
+    let reopened = SegmentedDatabase::open_with_options(store.clone(), config, options)?;
+    let open_ms = started.elapsed().as_secs_f64() * 1e3;
+    let (open_ranges, open_range_bytes) = store.take_reads();
+    let open_gets: BTreeMap<String, Value> = store
+        .gets
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(kind, &(count, bytes))| (kind.clone(), json!({"gets": count, "bytes": bytes})))
+        .collect();
+    drop(reopened);
     Ok(json!({
         "rounds": rounds,
         "overwritten_rows": rounds * 400,
@@ -507,12 +546,15 @@ fn update_wave(
         "maintenance_ms": maintenance_ms,
         "longest_round_maintenance_ms": longest_round_ms,
         "creates_by_kind": creates,
-        "counters": serving.counters(),
-        "tail_objects": db.tail_objects(),
-        "runs": db.run_count(),
-        "blocks": db.block_count(),
-        "layout": db.clustered_layout(),
-        "index_bytes": db.selective_index_bytes(),
+        "counters": counters,
+        "tail_objects": tail_objects,
+        "runs": runs,
+        "blocks": blocks,
+        "layout": layout,
+        "index_bytes": index_bytes,
+        "selected_root": selected_root,
+        "reopen": {"open_ms": open_ms, "gets_by_kind": open_gets,
+            "range_reads": open_ranges, "range_bytes": open_range_bytes},
         "visible_pack_bytes": store.payload("sgpack-").1,
         "visible_bytes": store.payload("").1,
         "oracle_ms": oracle_ms,

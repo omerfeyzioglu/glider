@@ -470,7 +470,8 @@ impl<S: ObjectStore> SegmentedServing<S> {
         Ok(())
     }
 
-    /// Stage the current committed root, its referenced objects (packs carry
+    /// Stage the current committed root, its referenced objects (run
+    /// manifests, indexes and packs; packs carry
     /// their sketches), its clustered view's centroids, catalog and posting
     /// packs, and the acknowledged log tail into an empty, nonoverlapping
     /// destination.
@@ -489,8 +490,10 @@ impl<S: ObjectStore> SegmentedServing<S> {
         let mut keys = vec![root_key(0), root_key(db.root.generation)];
         keys.dedup();
         let mut packs = std::collections::BTreeMap::<&str, Vec<_>>::new();
+        let mut manifests = Vec::new();
         for run in &db.root.runs {
             keys.push(run.index_object.clone());
+            manifests.extend(run.manifest.iter());
             for block in &run.blocks {
                 packs.entry(block.object.as_str()).or_default().push(block);
             }
@@ -508,6 +511,10 @@ impl<S: ObjectStore> SegmentedServing<S> {
         };
         for key in &keys {
             copy(&mut destination, key)?;
+        }
+        // A root v5's run manifests are checked against its references.
+        for reference in manifests {
+            reference.authenticate(&copy(&mut destination, &reference.key)?)?;
         }
         let mut copied = std::collections::BTreeSet::new();
         for (pack, blocks) in &packs {

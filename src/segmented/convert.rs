@@ -20,8 +20,8 @@ use super::{
         Catalog, CatalogBlock, Center, Centroids, Cluster, ClusterIndex, Extent, ExtentKind,
         ObjectRef, PostingRole, ViewRef,
     },
-    codec, decode_block_bytes, encode, encode_pack_with_sketch, root_key, Block, BlockRecord,
-    BlockRef, SegmentedDatabase, MAX_PACK_BLOCKS, MAX_PACK_BYTES,
+    codec, decode_block_bytes, encode_pack_with_sketch, root_key, Block, BlockRecord, BlockRef,
+    SegmentedDatabase, MAX_PACK_BLOCKS, MAX_PACK_BYTES,
 };
 use crate::{
     ivf::{nearest_centers, train_bounded, TrainingSample},
@@ -787,8 +787,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 Phase::Root
             }
             (Phase::Root, None) => {
-                self.publish_conversion(state)?;
-                return Ok(true);
+                // A legacy root's runs first get their manifests, one create
+                // per step; the root itself is published on the last step.
+                if self.publish_conversion(state)? {
+                    return Ok(true);
+                }
+                Phase::Root
             }
             (_, Some(_)) => unreachable!("only sample, assign and gather steps read"),
         };
@@ -927,23 +931,25 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(())
     }
 
-    /// Publish the root v4 selecting the staged view over the current runs
+    /// Publish the root selecting the staged view over the current runs
     /// (the frozen ones plus any sealed since), then load it the way an
     /// open does. Versions sealed after the freeze have no posting copy and
     /// stay routed through their canonical packs. The previous view stays
-    /// readable by query views that still hold it.
-    fn publish_conversion(&mut self, state: &mut ConvertState) -> Result<()> {
-        let catalog_ref = state.catalog.take().expect("catalog staged");
-        let centroid_ref = state.centroid_object.take().expect("centroids staged");
+    /// readable by query views that still hold it. A legacy root's runs
+    /// first get their manifests, one create per call; returns true once the
+    /// root is published.
+    fn publish_conversion(&mut self, state: &mut ConvertState) -> Result<bool> {
         let mut root = self.next_root()?;
         root.clustered = Some(ViewRef {
             epoch: state.epoch,
-            centroid: centroid_ref,
-            catalog: catalog_ref,
+            centroid: state.centroid_object.clone().expect("centroids staged"),
+            catalog: state.catalog.clone().expect("catalog staged"),
         });
-        root.version = 4;
         root.validate(self.config)?;
-        let bytes = encode(&root)?;
+        if self.stage_manifest(&mut root)? {
+            return Ok(false);
+        }
+        let bytes = super::manifest::encode_root(&root)?;
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &bytes)?;
         state.summary.root_generation = root.generation;
@@ -962,7 +968,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         self.poisoned = false;
         self.schedule_obsolete();
-        Ok(())
+        Ok(true)
     }
 }
 

@@ -53,7 +53,7 @@ pub(super) struct ObjectRef {
 }
 
 impl ObjectRef {
-    fn validate(&self, prefix: &str, max: usize) -> Result<()> {
+    pub(super) fn validate(&self, prefix: &str, max: usize) -> Result<()> {
         if !valid_key(&self.key, prefix)
             || self.length == 0
             || self.length > max
