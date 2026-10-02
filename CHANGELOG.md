@@ -52,6 +52,17 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   streaming reads and IVF-Flat remain available as a library
   ([library guide](docs/LIBRARY.md)).
 
+### Fixed before release
+
+- A point too large for one block is rejected with `400` before it is
+  acknowledged. Previously it was acknowledged, sealing then failed
+  permanently, and after 64 unsealed log objects every write returned `503`.
+- The admission queue holds 1 MiB (the maximum request size) instead of
+  320 KiB, so a valid write between the two sizes is no longer refused with
+  `429` on every retry. A query over 1 MiB is now `400`, not `429`.
+- Framework rejections (malformed JSON, `404`, `405`, `413`, `415`, `422`)
+  return the same `{"error": ...}` JSON body as other errors.
+
 ### Known limitations
 
 - Single node: no replication, sharding, read replicas or standby; one
@@ -61,8 +72,9 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
 - At 1,000,000 vectors, peak RSS exceeds the 192 MiB target, and open
   time and write p95 on S3 exceed their targets
   ([benchmarks/M39.md](benchmarks/M39.md)).
-- A point larger than the 120 KiB block limit is acknowledged but blocks
-  sealing ([details](docs/API.md#known-issues)).
+- A point must fit in one 120 KiB storage block; a namespace that already
+  holds a larger point (written by a pre-release binary) cannot seal until
+  that point is deleted or replaced ([limits](docs/API.md#post-v1write)).
 - No TLS; use a reverse proxy.
 
 [1.0.0]: https://github.com/omerfeyzioglu/glider/tree/main

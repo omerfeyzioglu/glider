@@ -38,7 +38,8 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 
 ### Errors
 
-Errors produced by Glider have a JSON body:
+Every error response has a JSON body, including routing and parsing
+failures:
 
 ```json
 {"error": "k must be between 1 and 1000"}
@@ -46,21 +47,21 @@ Errors produced by Glider have a JSON body:
 
 | Status | Meaning | Retry? |
 |---|---|---|
-| `400` | Invalid input: wrong dimension, non-finite or zero cosine vector, `k` out of range, empty write, too many operations, malformed `request_id`, request boundary ahead of the collection's history, malformed JSON syntax, or a path segment that is not a number | No; fix the request |
+| `400` | Invalid input: wrong dimension, non-finite or zero cosine vector, `k` out of range, empty write, too many operations, malformed `request_id`, request boundary ahead of the collection's history, a request whose encoded form exceeds 1 MiB, a point too large for one block (see [limits](#post-v1write)), malformed JSON syntax, or a path segment that is not a number | No; fix the request |
 | `401` | Missing or invalid bearer token | No |
-| `404` | Point not found (JSON body), or unknown route (empty body) | No |
-| `405` | Wrong method for a route (empty body) | No |
+| `404` | Point not found, or unknown route | No |
+| `405` | Wrong method for a route (the `Allow` header is kept) | No |
 | `409` | Request ID reused with a different payload, or expired (older than 128 commits) | No; see [request IDs](#request-ids-and-retries) |
 | `413` | Body larger than 2 MiB | No; split the batch |
 | `415` | Missing `Content-Type: application/json` | No |
 | `422` | JSON does not match the schema (unknown field, wrong type, missing required field) | No |
-| `429` | Admission queue full (8 queued commands or 320 KiB of queued encoded requests) | Yes, with backoff; resend writes with the same `request_id` |
+| `429` | Admission queue full (8 queued commands or 1 MiB of queued encoded requests) | Yes, with backoff; resend writes with the same `request_id` |
 | `500` | Stored data failed validation (corruption) | No; investigate |
 | `503` | Storage error, worker stopped or failed, server shutting down | Yes for reads; for writes resolve the request ID first |
 
 Rejections produced by the HTTP framework before Glider sees the request
-(`400` for malformed JSON or path segments, `413`, `415`, `422`) have a
-plain-text body describing the problem.
+(malformed JSON, `413`, `415`, `422`, `405`, `404`) use the same shape; their
+message is the framework's diagnostic, or the status reason when it has none.
 
 ## `POST /v1/write`
 
@@ -78,11 +79,18 @@ Request:
 
 Limits: at least one and at most 100 operations (`upsert` plus `delete`)
 per write. Operations on the same ID apply in order, upserts before
-deletes. The admission queue charges a write its encoded size, and its
-byte limit is 320 KiB, so a single write whose encoded form exceeds
-320 KiB is always rejected with `429`; keep batches below that. Keep each
-point's encoded size (vector plus metadata) well below 120 KiB; see
-[known issues](#known-issues).
+deletes. Two byte limits apply:
+
+- A write whose JSON-encoded form exceeds 1 MiB is rejected with `400`. The
+  admission queue also holds 1 MiB, so any write that passes this check is
+  admitted when the queue has room, and `429` only means "retry later".
+- Each point must fit in one storage block: its stored size, which is 17
+  bytes plus 4 bytes per vector component plus 4 bytes plus, for every
+  metadata entry, 8 bytes plus the UTF-8 length of its key and value, must
+  not exceed 122,867 bytes. A larger point rejects the whole write with
+  `400` (`document <id> needs <n> raw bytes; at most 122867 fit in one
+  block`) before anything is published or acknowledged, so the collection
+  keeps accepting and sealing writes.
 
 ```sh
 curl -XPOST localhost:8080/v1/write -H 'content-type: application/json' \
@@ -197,7 +205,7 @@ Resolve a write whose response was lost, by its request ID.
 | Field | Meaning |
 |---|---|
 | `sequence` | Last acknowledged commit sequence |
-| `queued_commands`, `queued_bytes` | Admission queue occupancy (limits 8 and 320 KiB) |
+| `queued_commands`, `queued_bytes` | Admission queue occupancy (limits 8 and 1 MiB) |
 | `closed`, `failed` | The worker is shutting down, or failed after an uncertain write; restart the server |
 | `maintenance_errors` | Background maintenance units that failed without affecting acknowledged data (retried later) |
 | `cache.state` | `disabled` (no NVMe tier), `cold` (warm-up not started), `warming`, `warm` (every block of the current layout is local) or `partial` (the cache limit is below `namespace_bytes`) |
@@ -307,12 +315,3 @@ for attempt in range(5):
 - Unfiltered and non-resident filtered queries are approximate; their
   measured recall is in [BENCHMARKS.md](../BENCHMARKS.md). Exact search is
   available through the library (`search_exact`) as the oracle.
-
-## Known issues
-
-- A point whose encoded size exceeds the 120 KiB block limit (for example
-  very large metadata values) is accepted and acknowledged, but sealing then
-  fails: maintenance errors repeat, and once 64 unsealed log objects
-  accumulate every further write fails with `503`, also after a restart.
-  Deleting or overwriting the point before the next seal avoids this.
-  Keep points well below 120 KiB until this is fixed.

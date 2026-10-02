@@ -65,9 +65,11 @@ Known limitations:
   collection is created.
 - Plain HTTP with an optional static bearer token; terminate TLS in a
   reverse proxy.
-- A point larger than the 120 KiB block limit (for example, huge metadata)
-  is accepted but cannot be sealed, which eventually stops all writes
-  ([known issue](docs/API.md#known-issues)).
+- A point must fit in one 120 KiB storage block (vector plus metadata, about
+  122,000 bytes); larger points are rejected with `400`
+  ([limits](docs/API.md#post-v1write)). A namespace written by a binary that
+  accepted such a point cannot seal until that point is deleted or replaced,
+  and once 64 unsealed log objects accumulate it needs manual repair.
 - No built-in scheduled backups; use S3 Versioning and `glider-admin backup`.
 
 ## Quickstart
@@ -159,7 +161,7 @@ unset; an invalid value stops the server with an error.
 The server uses the 1,000,000-row serving profile
 (`SegmentedServingOptions::m31`): per query 12 candidate blocks, 8 remote
 range requests and 1 MiB, 32 cluster probes, 8 routing threads; at most 4
-concurrent queries; an admission queue of 8 commands and 320 KiB. These are
+concurrent queries; an admission queue of 8 commands and 1 MiB. These are
 not configurable through the environment.
 
 ## HTTP API
