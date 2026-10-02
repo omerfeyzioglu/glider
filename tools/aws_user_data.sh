@@ -1,5 +1,5 @@
 #!/bin/bash
-# EC2 user data for tools/aws_acceptance.py. Placeholders in @@...@@ are
+# EC2 user data for tools/aws_acceptance.py. Upper-case placeholders between double at-signs are
 # filled by the driver. The instance terminates itself (shutdown behavior
 # "terminate") when the run ends or when the hard time cap expires.
 set -u
