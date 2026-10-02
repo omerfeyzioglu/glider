@@ -355,6 +355,77 @@ and 87,000 IDs, so the 64-run root limit leaves room beyond 1,000,000 rows (a
 S3 backend issues up to 16 concurrently, and other backends default to serial
 reads. Opening uses them for run indexes, the log tail and sketch frames.
 
+### Clustered view (M37)
+
+A root v4 selects one immutable clustered view: a centroid object
+(`sgcentroid-*`, `GLCENT01`) and a catalog (`sgcluster-*`, `GLCLCAT1`), each
+bound by length and SHA-256 in the root, whose formats and validators are in
+`docs/M37_CLUSTERED_INDEX.md`. The catalog lists, per cluster, extents of
+cluster-contiguous posting packs. Posting packs are ordinary `sgpack-*` packs
+of `GLB2` blocks whose partition is the cluster ID, each block holding one
+cluster's rows sorted by ID (at most 170 rows, 12 blocks per pack), with a
+`GLSKT003` sketch frame: the `GLSKT001`/`GLSKT002` body (routed sections iff
+routed keys are declared) followed by, per block, the cluster ID (u32) and
+the center fingerprint (SHA-256 of metric byte, dimension u32, center ID u32
+and f32 coordinates), then per row the copied version's sequence (u64), all
+little-endian. Postings are derived copies: canonical runs, the latest-ID
+directory and the log tail stay authoritative for `get`, exact search,
+retry and recovery, and a posting row is current only if the directory holds
+exactly its `(ID, sequence)` as a live version and no tail write shadows it.
+
+The view's centroid object records its source root sequence, the view
+boundary. Every live version sealed at or below it has exactly one posting
+row; versions sealed later stay in per-seal packs and their sketches. Writes
+after a conversion are unchanged: logs acknowledge, seals publish per-seal
+runs, and consolidation, pruning, reclamation and cleanup carry the view into
+each new root unchanged (version 4). Routing loads the posting sketches and
+only the canonical sketches of packs holding live versions above the
+boundary, and canonical rows at or below it are never active, so each
+current version has one routing row. Posting rows shadowed after opening keep
+their bits; queries compare their `(ID, sequence)` with the directory and
+tail instead (in routing only when a row would lower its block's best score),
+and reopening compacts them away.
+
+A selective query on a view scores every centroid, probes the nearest
+`probes` clusters (default 16, ties by cluster ID), ranks every block of the
+probed postings that has a current row together with the per-seal
+candidates by five-bit sketch distance, and takes ranked blocks in order
+within the remote request and byte limits as before (cached blocks under the
+M35 local limit); every block inside a chosen span is reranked exactly,
+checking the full filter, and the tail is merged. The resident predicate
+stays exact from resident vectors of current posting and canonical rows.
+Probing every cluster with unbounded limits equals exact search.
+
+`convert_clustered` (`glider-admin convert`) builds a view under exclusive
+ownership in bounded steps: a sample pass keeps the 16,384 smallest
+`(sample_priority(seed, ID), ID)` live sealed rows, two Lloyd iterations
+train centers (about 4,000 rows per cluster by default; cosine centers are
+normalized), an assignment pass keeps two bytes per row, and gather passes
+each read every canonical pack once and buffer at most `gather_bytes` of
+clusters' rows before writing their posting packs. It then creates the
+centroid object, the catalog (after checking that posting rows equal live
+sealed rows) and the root v4 at the next generation; the sequence, retry
+state, runs and tail are unchanged. Root-changing maintenance waits for it;
+writes may continue. Before the root create the previous root (v1/v2, or the
+previous view's v4) serves and every staged object is an orphan that a
+reopen's cleanup removes; any create error poisons the handle, and reopen
+selects whichever root exists. After the root, the handle drops its routing
+state and loads the new view as an open does; the old view's packs stay
+pinned while a query view holds it, then become obsolete. Converting a
+converted namespace builds the next epoch. Backup copies the centroid
+object, catalog and posting packs, checked against the root and catalog
+digests.
+
+Opening authenticates the centroid object and catalog against the root,
+checks that every posting pack is listed, and loads posting sketches whose
+blocks, clusters, fingerprints and extent rows match the catalog; otherwise
+it rebuilds the sketch from blocks authenticated against the catalog digests.
+A missing or corrupt centroid object, catalog or posting pack leaves the
+view unavailable: exact search, reads and writes work, selective queries
+fail, cleanup removes nothing, `SegmentedServing` refuses to start, and a
+conversion rebuilds the view as a new epoch. A posting block that fails its
+digest at query time fails that query, as canonical blocks do.
+
 ### Group commit
 
 `SegmentedDatabase::apply_requests` publishes several independent requests in
@@ -416,7 +487,8 @@ segmented namespace; `SegmentedServing` serves it, and the declared M21
 250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
 measured 10,000-row independent-arrival boundary and alternatives are in
 `benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4, index v1,
-root v1/v2 (plus v3 fence markers), log v1/v2/v3 and block v1/v2. It acknowledges
+root v1/v2/v4 (plus v3 fence markers), centroid v1, catalog v1, log v1/v2/v3
+and block v1/v2. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
 requires reopen. It can coalesce adjacent small ID indexes through another root

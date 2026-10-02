@@ -1063,8 +1063,11 @@ step, and fencing tests prove a stale writer cannot publish.
 
 ## M37 — Global clustered index
 
-Status: design in `docs/M37_CLUSTERED_INDEX.md`; the stage 2 offline
-clustering probe is measured in `benchmarks/M37.md`. Per-seal locality cannot
+Status: design in `docs/M37_CLUSTERED_INDEX.md`; stages 1-3 (formats,
+offline probe, explicit conversion and clustered queries) are implemented,
+and static cold recall after conversion is 0.994 / 0.970 mean at 250,000 /
+1,000,000 rows within 8 requests and 1 MiB (`benchmarks/M37.md`). Next:
+clustered seals (stage 4). Per-seal locality cannot
 bound reads as data grows; Turbopuffer (SPFresh) and OpenData Vector (SPANN
 with LIRE) use global centroid partitions, and OpenData records rejecting
 per-segment indexes for this reason.

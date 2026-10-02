@@ -3,7 +3,13 @@
 //! Commands that open the collection acquire its writer lease and take over
 //! with fencing, exactly like a server start: they wait out a dead writer's
 //! lease and fail busy while a live server renews it.
+//!
+//! `convert [CENTROIDS]` seals the log tail, then builds (or rebuilds, as a
+//! new epoch) the M37 clustered view from the canonical runs and publishes
+//! it with one root; the server must be stopped. Without CENTROIDS the count
+//! targets about 4,000 live rows per cluster.
 use glider::{
+    segmented::ConvertOptions,
     server::{stage_segmented_namespace, ServerConfig, StoreConfig},
     store::ObjectStore,
     Error, Result,
@@ -73,11 +79,12 @@ fn disjoint(a: &StoreConfig, b: &StoreConfig) -> Result<()> {
     }
 }
 
+const USAGE: &str =
+    "usage: glider-admin status|backup <destination>|restore <backup>|convert [centroids]";
+
 fn run() -> Result<Value> {
     let mut args = env::args().skip(1);
-    let command = args.next().ok_or_else(|| {
-        Error::Invalid("usage: glider-admin status|backup <destination>|restore <backup>".into())
-    })?;
+    let command = args.next().ok_or_else(|| Error::Invalid(USAGE.into()))?;
     let argument = args.next();
     if args.next().is_some() || (command == "status" && argument.is_some()) {
         return Err(Error::Invalid("unexpected arguments".into()));
@@ -96,6 +103,8 @@ fn run() -> Result<Value> {
                     "metric": config.collection.metric,
                     "resident_filter": config.options.resident_filter,
                 },
+                "clustered_epoch": db.clustered_epoch(),
+                "clusters": db.cluster_count(),
                 "runs": db.run_count(),
                 "blocks": db.block_count(),
                 "tail_objects": db.tail_objects(),
@@ -147,9 +156,25 @@ fn run() -> Result<Value> {
                 "objects_copied":objects, "bytes_copied":bytes}),
             )
         }
-        _ => Err(Error::Invalid(
-            "usage: glider-admin status|backup <destination>|restore <backup>".into(),
-        )),
+        "convert" => {
+            let centroids = argument
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| Error::Invalid("centroid count must be an integer".into()))
+                })
+                .transpose()?;
+            let summary = config.with_database(|db| {
+                // Seal the log tail first so the view covers every acknowledged row.
+                db.seal_delta()?;
+                db.convert_clustered(ConvertOptions {
+                    centroids,
+                    ..ConvertOptions::default()
+                })
+            })?;
+            Ok(json!({"command":"convert", "summary": summary}))
+        }
+        _ => Err(Error::Invalid(USAGE.into())),
     }
 }
 

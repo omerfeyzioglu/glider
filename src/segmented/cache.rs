@@ -1,5 +1,5 @@
 //! Disposable, bounded cache for root-authenticated immutable vector blocks.
-use super::{authenticate, validate_block_ref, BlockRef, Root};
+use super::{authenticate, validate_block_ref, BlockRef};
 use crate::{Error, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -27,8 +27,10 @@ pub struct CacheStats {
     pub ram_entries: usize,
     pub nvme_entries: usize,
     pub nvme_limit: usize,
-    /// Cache charge of every block the selected root references, as of the
-    /// current warm-up pass (zero before the first warm-up unit).
+    /// Cache charge of every block queries on the selected root can route
+    /// (every referenced block, or with a clustered view its posting blocks
+    /// and newer canonical blocks), as of the current warm-up pass (zero
+    /// before the first warm-up unit).
     pub namespace_bytes: usize,
     /// Charge of those blocks the pass found in or added to the NVMe tier.
     pub warm_bytes: usize,
@@ -67,12 +69,13 @@ pub(super) struct BlockCache {
     warm: Option<WarmPass>,
 }
 
-/// One background pass copying the selected root's blocks into the NVMe tier.
+/// One background pass copying the selected root's routable blocks into
+/// the NVMe tier.
 struct WarmPass {
     generation: u64,
     lost: u64,
-    /// Root `(run, block)` locations ordered by pack and offset.
-    blocks: Vec<(usize, usize)>,
+    /// Blocks ordered by pack and offset.
+    blocks: Vec<BlockRef>,
     /// Start of each pack in `blocks`, then `blocks.len()`.
     packs: Vec<usize>,
     next: usize,
@@ -262,67 +265,49 @@ impl BlockCache {
     /// Plan one bounded warm-up unit: one range of the next pack's uncached
     /// blocks (at most `unit_bytes`, but at least one block). Packs already
     /// cached are skipped without I/O, at most 64 per unit. A new root
-    /// generation or a lost cached entry starts a new pass. The caller reads
-    /// the range without holding the cache, then calls `warm_admit`.
-    pub(super) fn warm_plan(&mut self, root: &Root, unit_bytes: usize) -> Result<WarmUnit> {
+    /// generation or a lost cached entry starts a new pass over `blocks()`,
+    /// the root's routable blocks. The caller reads the range without
+    /// holding the cache, then calls `warm_admit`.
+    pub(super) fn warm_plan<'a>(
+        &mut self,
+        generation: u64,
+        blocks: impl FnOnce() -> Vec<&'a BlockRef>,
+        unit_bytes: usize,
+    ) -> Result<WarmUnit> {
         if !self.nvme_available || self.nvme_limit == 0 {
             return Ok(WarmUnit::Done);
         }
         let mut pass = match self.warm.take() {
-            Some(pass) if pass.generation == root.generation && pass.lost == self.lost => pass,
-            _ => self.plan_warm(root),
+            Some(pass) if pass.generation == generation && pass.lost == self.lost => pass,
+            _ => self.plan_warm(generation, blocks()),
         };
-        let result = self.advance_warm(&mut pass, root, unit_bytes);
+        let result = self.advance_warm(&mut pass, unit_bytes);
         self.warm = Some(pass);
         result
     }
 
-    fn plan_warm(&mut self, root: &Root) -> WarmPass {
-        let mut blocks: Vec<_> = root
-            .runs
-            .iter()
-            .enumerate()
-            .flat_map(|(run, run_ref)| {
-                run_ref
-                    .blocks
-                    .iter()
-                    .enumerate()
-                    .map(move |(ordinal, block)| {
-                        (block.object.as_str(), block.offset, run, ordinal)
-                    })
-            })
-            .collect();
-        blocks.sort_unstable();
+    fn plan_warm(&mut self, generation: u64, blocks: Vec<&BlockRef>) -> WarmPass {
+        let mut blocks: Vec<BlockRef> = blocks.into_iter().cloned().collect();
+        blocks.sort_unstable_by(|a, b| (&a.object, a.offset).cmp(&(&b.object, b.offset)));
         let mut packs: Vec<usize> = (0..blocks.len())
-            .filter(|&index| index == 0 || blocks[index - 1].0 != blocks[index].0)
+            .filter(|&index| index == 0 || blocks[index - 1].object != blocks[index].object)
             .collect();
         packs.push(blocks.len());
-        let namespace_bytes = blocks
-            .iter()
-            .map(|&(_, _, run, ordinal)| disk_charge(root.runs[run].blocks[ordinal].length))
-            .sum();
+        let namespace_bytes = blocks.iter().map(|block| disk_charge(block.length)).sum();
         self.stats.namespace_bytes = namespace_bytes;
         self.stats.warm_bytes = 0;
         self.stats.warm_complete = false;
         WarmPass {
-            generation: root.generation,
+            generation,
             lost: self.lost,
-            blocks: blocks
-                .into_iter()
-                .map(|(_, _, run, ordinal)| (run, ordinal))
-                .collect(),
+            blocks,
             packs,
             next: 0,
             evict: namespace_bytes <= self.nvme_limit,
         }
     }
 
-    fn advance_warm(
-        &mut self,
-        pass: &mut WarmPass,
-        root: &Root,
-        unit_bytes: usize,
-    ) -> Result<WarmUnit> {
+    fn advance_warm(&mut self, pass: &mut WarmPass, unit_bytes: usize) -> Result<WarmUnit> {
         if self.stats.warm_complete {
             return Ok(WarmUnit::Done);
         }
@@ -331,10 +316,7 @@ impl BlockCache {
                 self.stats.warm_complete = true;
                 return Ok(WarmUnit::Done);
             };
-            let blocks: Vec<&BlockRef> = pass.blocks[first..end]
-                .iter()
-                .map(|&(run, ordinal)| &root.runs[run].blocks[ordinal])
-                .collect();
+            let blocks: Vec<&BlockRef> = pass.blocks[first..end].iter().collect();
             let mut missing = Vec::new();
             for &reference in &blocks {
                 validate_block_ref(reference)?;

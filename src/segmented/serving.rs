@@ -124,6 +124,13 @@ impl<S: ObjectStore> SegmentedServing<S> {
             ));
         }
         let mut db = SegmentedDatabase::take_over_with_options(store, config, segmented)?;
+        // Serving fails closed rather than answer queries without the
+        // selected view; a conversion rebuilds it from the canonical runs.
+        if let Some(error) = db.clustered_view_error() {
+            return Err(Error::Corrupt(format!(
+                "clustered view unavailable ({error}); run glider-admin convert"
+            )));
+        }
         if db.selective_index_bytes() > options.max_index_bytes {
             return Err(Error::Invalid(
                 "segmented sketches exceed the serving index budget".into(),
@@ -281,11 +288,12 @@ impl<S: ObjectStore> SegmentedServing<S> {
     }
 
     /// Stage the current committed root, its referenced objects (packs carry
-    /// their sketches) and the acknowledged log tail into an empty,
-    /// nonoverlapping destination.
-    /// Every copied pack is checked against the root's block digests before
-    /// its PUT. Metadata is written last; the destination is then opened and
-    /// compared. Destination failure does not poison this handle, and a failed
+    /// their sketches), its clustered view's centroids, catalog and posting
+    /// packs, and the acknowledged log tail into an empty, nonoverlapping
+    /// destination.
+    /// Every copied pack is checked against the root's or catalog's block
+    /// digests before its PUT. Metadata is written last; the destination is
+    /// then opened and compared. Destination failure does not poison this handle, and a failed
     /// destination must not be promoted or reused.
     pub fn backup_to<D: ObjectStore>(&mut self, mut destination: D) -> Result<()> {
         if self.db.poisoned {
@@ -336,6 +344,33 @@ impl<S: ObjectStore> SegmentedServing<S> {
             }
             destination.create(pack, &bytes)?;
         }
+        if let Some(view) = &db.root.clustered {
+            let cluster = db.cluster.as_ref().ok_or_else(|| {
+                Error::Corrupt("backup source clustered view is unavailable".into())
+            })?;
+            for reference in [&view.centroid, &view.catalog] {
+                reference.authenticate(&copy(&mut destination, &reference.key)?)?;
+            }
+            // Posting packs are checked against the catalog's block digests.
+            for (pack, layout) in cluster.pack_blocks() {
+                let bytes = db
+                    .store
+                    .get(pack)?
+                    .ok_or_else(|| Error::Corrupt(format!("backup source missing: {pack}")))?;
+                let valid = bytes.len() == layout.payload_len
+                    && layout.blocks.iter().all(|&(offset, length, digest)| {
+                        bytes
+                            .get(offset..offset + length)
+                            .is_some_and(|block| Sha256::digest(block).as_slice() == digest)
+                    });
+                if !valid {
+                    return Err(Error::Corrupt(format!(
+                        "backup posting pack digest mismatch: {pack}"
+                    )));
+                }
+                destination.create(pack, &bytes)?;
+            }
+        }
         copy(&mut destination, "metadata")?;
         let restored =
             SegmentedDatabase::open_with_options(destination, db.config, (*db.options).clone())?;
@@ -343,6 +378,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
             || restored.root.generation != db.root.generation
             || restored.latest.len() != db.latest.len()
             || restored.tail.len() != db.tail.len()
+            || restored.cluster.is_some() != db.cluster.is_some()
         {
             return Err(Error::Corrupt(
                 "backup does not match its source view".into(),
