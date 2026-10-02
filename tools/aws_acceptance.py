@@ -109,7 +109,10 @@ def main():
         if args.cleanup_datasets:
             subprocess.run(["aws", "s3", "rm", "--only-show-errors", "--recursive",
                             f"s3://{args.bucket}/{args.prefix}/datasets/"], capture_output=True)
-        left = aws("s3", "ls", "--recursive", f"s3://{args.bucket}/{args.prefix}/{run_id}")
+        # `aws s3 ls` exits non-zero when nothing matches, which is the goal.
+        left = subprocess.run(["aws", "s3", "ls", "--recursive",
+                               f"s3://{args.bucket}/{args.prefix}/{run_id}"],
+                              capture_output=True, text=True).stdout
         print(f"remaining run objects: {len(left.splitlines())}", flush=True)
     print(f"{run_id}: {outcome}", flush=True)
     sys.exit(0 if outcome == "done" else 1)
