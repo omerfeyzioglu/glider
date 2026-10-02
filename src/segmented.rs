@@ -18,7 +18,7 @@ mod clustered;
 mod codec;
 use clustered::{ClusterIndex, ExtentKind};
 mod convert;
-pub use convert::{ConversionProgress, ConversionSummary, ConvertOptions};
+pub use convert::{automatic_centroids, ConversionProgress, ConversionSummary, ConvertOptions};
 mod directory;
 use directory::Directory;
 mod merge;
@@ -27,7 +27,7 @@ mod serving;
 pub use cache::CacheStats;
 pub use serving::{
     ClusteringState, SegmentedServing, SegmentedServingOptions, ServingCounters,
-    DEFAULT_AUTO_CLUSTER_ROWS,
+    DEFAULT_AUTO_CLUSTER_ROWS, DEFAULT_AUTO_RECLUSTER_FACTOR,
 };
 mod sketch;
 use sketch::{frame, unframe, Framed, PackSketch, SketchSet, FRAME_PREFIX_READ, MAX_SKETCH_BYTES};
@@ -1629,17 +1629,15 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     }
 
     /// Whether a seal or run consolidation must wait. Both may publish
-    /// while a conversion builds a namespace's first view: they only append
-    /// or merge runs newer than the ones it froze, and the view it then
-    /// publishes routes the newer versions through their canonical packs.
-    /// With a selected view a seal would add posting extents of the old
-    /// epoch, so they wait for the conversion.
+    /// while a conversion is staged: they only append or merge runs newer
+    /// than the ones it froze, and the view it then publishes routes the
+    /// newer versions through their canonical packs (a clustered seal's
+    /// packs, extents of the previous epoch, are not in the new catalog).
     fn root_maintenance_blocked(&self) -> bool {
         self.seal.is_some()
             || self.reclaim.is_some()
             || self.prune.is_some()
             || self.merge.is_some()
-            || (self.convert.is_some() && self.root.clustered.is_some())
     }
 
     /// Live (not deleted) IDs of the sealed runs, excluding the log tail.

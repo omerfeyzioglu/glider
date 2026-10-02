@@ -290,8 +290,9 @@ fn serving_options(cache: Option<PathBuf>) -> SegmentedServingOptions {
         .unwrap_or(256 * 1024 * 1024);
     options.cache = cache.map(|directory| (directory, 0, nvme));
     // The per-seal runs measure per-seal routing; `--clustered` converts
-    // explicitly after the load.
+    // explicitly after the load and measures that view.
     options.auto_cluster_rows = 0;
+    options.auto_recluster_factor = 0;
     // `GLIDER_M24_PROBES` overrides the clustered probe count.
     if let Some(probes) = env::var("GLIDER_M24_PROBES")
         .ok()

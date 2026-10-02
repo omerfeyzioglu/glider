@@ -45,8 +45,14 @@ pub struct SegmentedServingOptions {
     /// Convert a namespace without a clustered view once its sealed runs
     /// hold this many live rows, as idle maintenance units; 0 disables.
     pub auto_cluster_rows: usize,
-    /// How an automatic conversion builds the view.
+    /// How an automatic conversion builds the view. A rebuild always uses
+    /// the automatic centroid count for the new size.
     pub auto_cluster: ConvertOptions,
+    /// Rebuild a clustered view as a new epoch once the sealed runs hold
+    /// more than this factor times the rows its centroid count was sized
+    /// for (4,000 per centroid) and the automatic count for the current
+    /// size is larger; 0 disables.
+    pub auto_recluster_factor: usize,
 }
 
 /// Default [`SegmentedServingOptions::auto_cluster_rows`]. Per-seal routing
@@ -56,6 +62,10 @@ pub struct SegmentedServingOptions {
 /// while a view converted at 250,000 rows measured 0.994 / 0.9 static and
 /// 0.977 / 0.9 after the update wave (`benchmarks/M37.md`).
 pub const DEFAULT_AUTO_CLUSTER_ROWS: usize = 250_000;
+
+/// Default [`SegmentedServingOptions::auto_recluster_factor`]: a view sized
+/// for 250,000 rows (64 centroids) is rebuilt with 256 above 1,024,000.
+pub const DEFAULT_AUTO_RECLUSTER_FACTOR: usize = 4;
 
 impl SegmentedServingOptions {
     /// The M21 250,000-row envelope: 64 MiB engine RSS and a 256 MiB NVMe
@@ -86,6 +96,7 @@ impl SegmentedServingOptions {
                 gather_bytes: 16 * 1024 * 1024,
                 ..ConvertOptions::default()
             },
+            auto_recluster_factor: DEFAULT_AUTO_RECLUSTER_FACTOR,
         }
     }
 
@@ -124,6 +135,9 @@ pub struct ServingCounters {
     /// M37 posting merge rounds started and their steps.
     pub merge_starts: u64,
     pub merge_steps: u64,
+    /// Automatic rebuilds of a clustered view as a new epoch started (also
+    /// counted in `conversion_starts`).
+    pub recluster_starts: u64,
     /// Automatic clustered conversions started and their steps; published
     /// conversions (automatic or explicit); automatic ones abandoned by an
     /// error other than a read.
@@ -369,17 +383,13 @@ impl<S: ObjectStore> SegmentedServing<S> {
             }
             return Ok(true);
         }
-        let threshold = self.options.auto_cluster_rows;
-        if threshold > 0
-            && !self.auto_failed
-            && db.root.clustered.is_none()
-            && self.auto_checked != Some(db.root.generation)
-        {
+        if !self.auto_failed && self.auto_checked != Some(db.root.generation) {
             self.last_unit = "conversion_plan";
             self.auto_checked = Some(db.root.generation);
-            if db.sealed_live_rows() >= threshold {
-                db.start_conversion(self.options.auto_cluster)?;
+            if let Some((options, rebuild)) = auto_conversion(&self.options, db) {
+                db.start_conversion(options)?;
                 counters.conversion_starts += 1;
+                counters.recluster_starts += u64::from(rebuild);
                 return Ok(true);
             }
         }
@@ -417,6 +427,12 @@ impl<S: ObjectStore> SegmentedServing<S> {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Options this handle's configuration would start an automatic
+    /// conversion with now, if any.
+    pub fn auto_conversion_due(&self) -> Option<ConvertOptions> {
+        auto_conversion(&self.options, &self.db).map(|(options, _)| options)
     }
 
     /// At the hard log-tail bound, finish any staged maintenance and a seal
@@ -558,6 +574,42 @@ impl<S: ObjectStore> SegmentedServing<S> {
         }
         Ok(())
     }
+}
+
+/// The automatic conversion due for `db`, and whether it rebuilds a
+/// selected view: a first view once the sealed runs hold
+/// `auto_cluster_rows` live rows, or a new epoch once they hold more than
+/// `auto_recluster_factor` times the 4,000 rows per centroid the loaded
+/// view was sized for and the automatic count for that size is larger
+/// (so a rebuild always changes the count). The row count at conversion is
+/// not persisted; the view's centroid count stands for it, which for an
+/// automatic count is within a factor of sqrt(2). An unavailable view is
+/// left to an explicit conversion.
+fn auto_conversion<S: ObjectStore>(
+    options: &SegmentedServingOptions,
+    db: &SegmentedDatabase<S>,
+) -> Option<(ConvertOptions, bool)> {
+    if db.root.clustered.is_none() {
+        let threshold = options.auto_cluster_rows;
+        return (threshold > 0 && db.sealed_live_rows() >= threshold)
+            .then_some((options.auto_cluster, false));
+    }
+    let centroids = db.cluster_count()?;
+    let factor = options.auto_recluster_factor;
+    if factor == 0 {
+        return None;
+    }
+    let rows = db.sealed_live_rows();
+    let sized = centroids.saturating_mul(super::convert::TARGET_CLUSTER_ROWS);
+    (rows > sized.saturating_mul(factor) && super::automatic_centroids(rows) > centroids).then_some(
+        (
+            ConvertOptions {
+                centroids: None,
+                ..options.auto_cluster
+            },
+            true,
+        ),
+    )
 }
 
 /// A published view with the serving read budget, for queries that run
@@ -739,6 +791,17 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
                     progress.posting_packs as u64,
                 ),
                 ("glider_conversion_rows", progress.rows),
+                ("glider_conversion_epoch", progress.epoch),
+                ("glider_conversion_centroids", progress.centroids as u64),
+                (
+                    "glider_clustered_centroids",
+                    self.db.cluster_count().unwrap_or(0) as u64,
+                ),
+                (
+                    "glider_auto_recluster_factor",
+                    self.options.auto_recluster_factor as u64,
+                ),
+                ("glider_recluster_starts_total", counters.recluster_starts),
                 ("glider_cache_ram_hits_total", cache.ram_hits),
                 ("glider_cache_nvme_hits_total", cache.nvme_hits),
                 ("glider_cache_remote_fetches_total", cache.remote_fetches),

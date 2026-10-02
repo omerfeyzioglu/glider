@@ -10,8 +10,8 @@ use glider::{
     admission::{Engine, Limits, Service, Shutdown},
     retry::{Request, RequestId},
     segmented::{
-        ClusteringState, ConvertOptions, ReadBudget, SegmentedDatabase, SegmentedOptions,
-        SegmentedServing, SegmentedServingOptions,
+        automatic_centroids, ClusteringState, ConvertOptions, ReadBudget, SegmentedDatabase,
+        SegmentedOptions, SegmentedServing, SegmentedServingOptions,
     },
     store::ObjectStore,
     Config, Error, Metric, Mutation, Neighbor, Result,
@@ -64,6 +64,7 @@ fn serving_options(threshold: usize, seed: u64) -> SegmentedServingOptions {
             seed,
             gather_bytes: 8 * 1024,
         },
+        auto_recluster_factor: 0,
     }
 }
 
@@ -307,7 +308,7 @@ fn check_serving(
 /// namespace equal the model.
 fn check_database(db: &SegmentedDatabase<TestStore>, model: &Model, rng: &mut Rng, context: &str) {
     assert!(db.clustered_view_error().is_none(), "{context}");
-    for id in (0..2_000).step_by(7) {
+    for id in (0..12_000).step_by(7) {
         let found = db.get(id).unwrap().map(|document| document.vector);
         assert_eq!(found.as_ref(), model.get(&id), "{context}: id {id}");
     }
@@ -845,4 +846,315 @@ fn zero_threshold_disables_automatic_conversion() {
         &format!("seed {seed:#x}, explicit"),
     );
     serving.close().unwrap();
+}
+
+/// Rebuild tests: the first view has one centroid (sized for 4,000 rows),
+/// so with factor 2 more than 8,000 live sealed rows rebuild it with the
+/// automatic count (2 up to about 11,300 rows). 64 KiB gather passes keep
+/// the rebuild's step count small.
+fn growth_options(factor: usize, seed: u64) -> SegmentedServingOptions {
+    SegmentedServingOptions {
+        auto_cluster: ConvertOptions {
+            centroids: Some(1),
+            seed,
+            gather_bytes: 64 * 1024,
+        },
+        auto_recluster_factor: factor,
+        ..serving_options(THRESHOLD, seed)
+    }
+}
+
+fn open_growth(store: &TestStore, factor: usize, seed: u64) -> Result<SegmentedServing<TestStore>> {
+    SegmentedServing::open(
+        store.clone(),
+        config(),
+        SegmentedOptions::default(),
+        growth_options(factor, seed),
+    )
+}
+
+/// Puts of `count` fresh IDs from `next`, and one overwrite.
+fn fresh(rng: &mut Rng, next: &mut u64, count: u64) -> Vec<Mutation> {
+    let mut mutations: Vec<Mutation> = (*next..*next + count)
+        .map(|id| Mutation::Put {
+            id,
+            vector: rng.vector(),
+            metadata: BTreeMap::new(),
+        })
+        .collect();
+    *next += count;
+    mutations.push(Mutation::Put {
+        id: rng.next() % *next,
+        vector: rng.vector(),
+        metadata: BTreeMap::new(),
+    });
+    mutations
+}
+
+fn write(serving: &mut SegmentedServing<TestStore>, nonce: u64, batch: &[Mutation]) -> Result<()> {
+    let boundary = serving.database().sequence();
+    serving
+        .apply_requests(vec![request(nonce, boundary, batch.to_vec())])
+        .pop()
+        .unwrap()
+        .map(|_| ())
+}
+
+/// Growth past the factor rebuilds the view as epoch 2 with the automatic
+/// centroid count for its frozen rows, in idle units between writes and
+/// clustered seals; full-budget queries equal exact search after every
+/// unit, and the rebuilt view reopens.
+#[test]
+fn growth_past_the_factor_rebuilds_the_view_as_a_new_epoch() {
+    let seed = 0x0a17_0c10_0007_u64;
+    println!("seed {seed:#x}");
+    let mut rng = Rng(seed);
+    let store = TestStore::new();
+    let mut serving = open_growth(&store, 2, seed).unwrap();
+    let (mut model, mut next) = (Model::new(), 0);
+    let (mut rebuild_rows, mut seals_while_rebuilding, mut rebuild_units) = (None, 0, 0);
+    for round in 0..200_u64 {
+        let context = format!("seed {seed:#x}, round {round}");
+        let batch = fresh(&mut rng, &mut next, 60);
+        write(&mut serving, round, &batch).unwrap();
+        apply(&mut model, &batch);
+        for unit in 0..3 {
+            let before = serving.clustering();
+            let seals = serving.counters().seal_starts;
+            serving.maintenance_step().unwrap();
+            let after = serving.clustering();
+            if let ClusteringState::Converting(progress) = &after {
+                if progress.epoch == 2 {
+                    if !matches!(before, ClusteringState::Converting(_)) {
+                        assert_eq!(before, ClusteringState::Clustered { epoch: 1 }, "{context}");
+                        assert!(
+                            serving.database().sealed_live_rows() > 2 * 4_000,
+                            "{context}: rebuilt below the factor"
+                        );
+                        rebuild_rows = Some(progress.rows);
+                    } else {
+                        rebuild_units += 1;
+                        seals_while_rebuilding += serving.counters().seal_starts - seals;
+                    }
+                }
+            }
+            if serving.clustering() == (ClusteringState::Clustered { epoch: 1 }) {
+                assert_eq!(serving.database().cluster_count(), Some(1), "{context}");
+            }
+            check_serving(
+                &mut serving,
+                &model,
+                &mut rng,
+                &format!("{context}, unit {unit}"),
+            );
+        }
+        if matches!(
+            serving.clustering(),
+            ClusteringState::Clustered { epoch: 2 }
+        ) {
+            break;
+        }
+    }
+    drain(&mut serving);
+    let rows = rebuild_rows.expect("no rebuild started") as usize;
+    assert_eq!(
+        serving.clustering(),
+        ClusteringState::Clustered { epoch: 2 }
+    );
+    assert_eq!(
+        serving.database().cluster_count(),
+        Some(automatic_centroids(rows))
+    );
+    assert!(automatic_centroids(rows) > 1);
+    assert!(
+        seals_while_rebuilding > 0 && rebuild_units > 10,
+        "seed {seed:#x}: {seals_while_rebuilding} seals in {rebuild_units} rebuild units"
+    );
+    let counters = serving.counters();
+    assert_eq!(
+        (counters.conversion_starts, counters.recluster_starts),
+        (2, 1)
+    );
+    assert_eq!(counters.conversions, 2);
+    assert!(serving.auto_conversion_due().is_none());
+    check_serving(&mut serving, &model, &mut rng, "rebuilt");
+    serving.close().unwrap();
+    assert_eq!(store.count("sgcentroid-"), 1);
+    assert_eq!(store.count("sgcluster-"), 1);
+    let db = SegmentedDatabase::open(store.clone(), config())
+        .unwrap()
+        .with_cluster_probes(usize::MAX);
+    assert_eq!(db.clustered_epoch(), Some(2));
+    check_database(&db, &model, &mut rng, "reopened");
+}
+
+/// With factor 0 a view sized for 4,000 rows is never rebuilt.
+#[test]
+fn zero_factor_disables_rebuilds() {
+    let seed = 0x0a17_0c10_0008_u64;
+    println!("seed {seed:#x}");
+    let mut rng = Rng(seed);
+    let store = TestStore::new();
+    let mut serving = open_growth(&store, 0, seed).unwrap();
+    let (mut model, mut next) = (Model::new(), 0);
+    for round in 0..300_u64 {
+        let batch = fresh(&mut rng, &mut next, 60);
+        write(&mut serving, round, &batch).unwrap();
+        apply(&mut model, &batch);
+        drain(&mut serving);
+    }
+    assert!(serving.database().sealed_live_rows() > 16_000);
+    assert_eq!(
+        serving.clustering(),
+        ClusteringState::Clustered { epoch: 1 }
+    );
+    assert_eq!(serving.database().cluster_count(), Some(1));
+    assert_eq!(serving.counters().recluster_starts, 0);
+    check_serving(&mut serving, &model, &mut rng, &format!("seed {seed:#x}"));
+    serving.close().unwrap();
+}
+
+/// A clustered namespace of about 7,900 rows with a one-centroid view,
+/// built without faults, its model and next fresh ID.
+fn grown_base(seed: u64) -> (TestStore, Model, u64) {
+    let mut rng = Rng(seed);
+    let store = TestStore::new();
+    let mut serving = open_growth(&store, 0, seed).unwrap();
+    let (mut model, mut next) = (Model::new(), 0);
+    for round in 0..130_u64 {
+        let batch = fresh(&mut rng, &mut next, 60);
+        write(&mut serving, round, &batch).unwrap();
+        apply(&mut model, &batch);
+        drain(&mut serving);
+    }
+    assert_eq!(
+        serving.clustering(),
+        ClusteringState::Clustered { epoch: 1 }
+    );
+    assert!(serving.database().sealed_live_rows() < 8_000);
+    serving.close().unwrap();
+    (store, model, next)
+}
+
+/// The rebuild workload over a copy of the base: fresh rows past the
+/// factor with two units per write, then idle maintenance to completion.
+/// Returns the acknowledged model, its sequence, an uncertain write and
+/// the seals started while a rebuild was staged.
+fn rebuild_run(
+    serving: &mut SegmentedServing<TestStore>,
+    seed: u64,
+    mut model: Model,
+    mut next: u64,
+) -> (Model, u64, Option<Vec<Mutation>>, u64) {
+    let mut rng = Rng(seed ^ 0x9e3);
+    let mut seals = 0;
+    for round in 0..30_u64 {
+        let batch = fresh(&mut rng, &mut next, 40);
+        let boundary = serving.database().sequence();
+        if write(serving, 1_000 + round, &batch).is_err() {
+            return (model, boundary, Some(batch), seals);
+        }
+        apply(&mut model, &batch);
+        for _ in 0..2 {
+            let rebuilding = matches!(serving.clustering(), ClusteringState::Converting(_));
+            let before = serving.counters().seal_starts;
+            if serving.maintenance_step().is_err() {
+                return (model, serving.database().sequence(), None, seals);
+            }
+            if rebuilding {
+                seals += serving.counters().seal_starts - before;
+            }
+        }
+    }
+    while let Ok(true) = serving.maintenance_step() {}
+    (model, serving.database().sequence(), None, seals)
+}
+
+/// Every create and remove of the rebuild path (logs, clustered seals and
+/// consolidation between its steps, centroid object, posting packs,
+/// catalog, root and cleanup) fails before landing or after: reopening
+/// keeps the acknowledged state with epoch 1 or 2 selected, and a new owner
+/// finishes the rebuild and removes the orphans.
+#[test]
+fn every_rebuild_failure_recovers_and_rebuilds_again() {
+    let seed = 0x0a17_0c10_0009_u64;
+    println!("seed {seed:#x}");
+    let (base, base_model, next) = grown_base(seed);
+    let copy = |plan: Plan| {
+        let store = TestStore::new().with_plan(plan);
+        *store.objects.lock().unwrap() = base.objects.lock().unwrap().clone();
+        store
+    };
+    let clean = copy(Plan::default());
+    let mut serving = open_growth(&clean, 2, seed).unwrap();
+    let (model, _, _, seals) = rebuild_run(&mut serving, seed, base_model.clone(), next);
+    assert_eq!(
+        serving.clustering(),
+        ClusteringState::Clustered { epoch: 2 }
+    );
+    assert_eq!(serving.counters().recluster_starts, 1);
+    assert!(seals > 0, "no seal between rebuild steps");
+    check_serving(&mut serving, &model, &mut Rng(seed), "clean run");
+    serving.close().unwrap();
+    let operations = clean.plan.lock().unwrap().operations;
+    assert!(operations > 50, "workload too small: {operations}");
+    let stride: usize = std::env::var("GLIDER_CRASH_STRIDE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let mut rng = Rng(seed ^ 0xc4ec);
+    for at in (0..operations).step_by(stride.max(1)) {
+        for after in [false, true] {
+            let context = format!("seed {seed:#x}, operation {at} of {operations}, after {after}");
+            let store = copy(Plan {
+                fail_at: Some((at, after)),
+                ..Plan::default()
+            });
+            let (mut acknowledged, sequence, uncertain, _) = match open_growth(&store, 2, seed) {
+                Ok(mut serving) => rebuild_run(&mut serving, seed, base_model.clone(), next),
+                Err(_) => (base_model.clone(), 0, None, 0),
+            };
+            assert!(
+                store.plan.lock().unwrap().fired,
+                "{context}: fault not reached"
+            );
+            let store = store.with_plan(Plan::default());
+            let db = SegmentedDatabase::open(store.clone(), config())
+                .unwrap()
+                .with_cluster_probes(usize::MAX);
+            if let Some(batch) = uncertain {
+                if db.sequence() > sequence {
+                    apply(&mut acknowledged, &batch);
+                }
+            }
+            assert!(matches!(db.clustered_epoch(), Some(1 | 2)), "{context}");
+            check_database(&db, &acknowledged, &mut rng, &context);
+            drop(db);
+            let mut serving = open_growth(&store, 2, seed).unwrap();
+            drain(&mut serving);
+            let expected = if serving.database().sealed_live_rows() > 8_000 {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                serving.clustering(),
+                ClusteringState::Clustered { epoch: expected },
+                "{context}"
+            );
+            check_serving(&mut serving, &acknowledged, &mut rng, &context);
+            serving.close().unwrap();
+            assert_eq!(store.count("sgcentroid-"), 1, "{context}");
+            assert_eq!(store.count("sgcluster-"), 1, "{context}");
+            let db = SegmentedDatabase::open(store.clone(), config())
+                .unwrap()
+                .with_cluster_probes(usize::MAX);
+            check_database(
+                &db,
+                &acknowledged,
+                &mut rng,
+                &format!("{context}, reopened"),
+            );
+        }
+    }
 }

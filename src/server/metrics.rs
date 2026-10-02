@@ -108,8 +108,10 @@ fn sample(engine: &admission::EngineMetrics, name: &str) -> u64 {
 /// Clustered-view state from the engine's samples: `none` (per-seal
 /// routing), `converting` (an automatic or explicit conversion is staged;
 /// queries use the previous root until it publishes) or `clustered`.
-/// `auto_cluster_rows` is the automatic conversion threshold (0 disabled)
-/// and `progress` the running conversion's phase and counters.
+/// `auto_cluster_rows` is the automatic conversion threshold and
+/// `auto_recluster_factor` the growth that rebuilds a view as a new epoch
+/// (0 disables either); `progress` is the running conversion's phase,
+/// counters and the epoch it builds.
 pub(super) fn clustering_status(engine: &admission::EngineMetrics) -> Value {
     let sample = |name: &str| sample(engine, name);
     let progress = match sample("glider_clustered_state") {
@@ -129,6 +131,8 @@ pub(super) fn clustering_status(engine: &admission::EngineMetrics) -> Value {
             "passes": sample("glider_conversion_passes"),
             "posting_packs": sample("glider_conversion_posting_packs"),
             "rows": sample("glider_conversion_rows"),
+            "epoch": sample("glider_conversion_epoch"),
+            "centroids": sample("glider_conversion_centroids"),
         })),
         _ => None,
     };
@@ -139,7 +143,10 @@ pub(super) fn clustering_status(engine: &admission::EngineMetrics) -> Value {
             _ => "none",
         },
         "epoch": sample("glider_clustered_epoch"),
+        "centroids": sample("glider_clustered_centroids"),
         "auto_cluster_rows": sample("glider_auto_cluster_rows"),
+        "auto_recluster_factor": sample("glider_auto_recluster_factor"),
+        "reclusters": sample("glider_recluster_starts_total"),
         "progress": progress,
         "conversions": sample("glider_conversions_total"),
         "conversion_failures": sample("glider_conversion_failures_total"),

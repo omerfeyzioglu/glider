@@ -447,15 +447,16 @@ gathered rows, and the frozen live sealed rows when no seal intervened) and
 the root v4 at the next generation; the sequence, retry state, runs and
 tail are unchanged. The conversion freezes the selected root's runs and
 their live sealed puts. Writes may continue. Pruning, reclamation and
-merges wait for it. Without a selected view, seals (per-seal layout) and
-consolidation of runs sealed after the freeze may publish between its
-steps: frozen runs keep their positions, so frozen `(run, block)`
-locations stay valid; a frozen put a later seal shadows is not gathered
-(assignments are kept for every put of a source block, so passes stay
-aligned); and the published root carries the newer runs, whose versions
-no posting covers and stay routed through their canonical packs. The
-root create waits for a staged seal. With a selected view, seals and
-consolidation wait too. Before the root create the previous root (v1/v2,
+merges wait for it. Seals and consolidation of runs sealed after the
+freeze may publish between its steps: frozen runs keep their positions,
+so frozen `(run, block)` locations stay valid; a frozen put a later seal
+shadows is not gathered (assignments are kept for every put of a source
+block, so passes stay aligned); and the published root carries the newer
+runs, whose versions no posting covers and stay routed through their
+canonical packs. With a selected view those seals are clustered seals of
+the old epoch: their packs are canonical extents of its catalog until the
+new root and plain uncovered canonical packs under the new view. The
+root create waits for a staged seal. Before the root create the previous root (v1/v2,
 or the previous view's v4) serves and every staged object is an orphan:
 cleanup retains it while the conversion is staged, a reopen's cleanup
 removes it, and so does cleanup after an abandoned attempt. A failed
@@ -537,12 +538,29 @@ per-seal layout reaches its quality gate (M24, 250,000 rows: static p5
 recall@10 exactly 0.80 and one update-wave run at 0.899 / 0.70) and fails
 it at 1,000,000 rows (M31), while a view converted at 250,000 rows measured
 0.994 / 0.9 static and 0.977 / 0.9 after the update wave
-(`benchmarks/M37.md`). Nothing re-trains a view as the namespace grows:
-the centroid count is fixed at conversion (about 4,000 rows per cluster
-then), and a larger count needs an explicit conversion to a new epoch.
-`/v1/status` reports `clustering` (`none`, `converting` with the phase and
-pass/source counters, or `clustered` with its epoch); metrics carry the
-same values and conversion counters.
+(`benchmarks/M37.md`).
+
+Automatic rebuild (`auto_recluster_factor`, `GLIDER_AUTO_RECLUSTER_FACTOR`,
+default 4; 0 disables): a view's centroid count is fixed at conversion, so
+with a loaded view the same check starts the next epoch's conversion, with
+the automatic centroid count, once the sealed runs hold more than the
+factor times 4,000 rows per centroid of the view and the automatic count
+for the current size exceeds the view's (so a rebuild always changes the
+count and cannot repeat at one size). The rows at conversion are not
+persisted (no format change); the centroid count stands for them, within a
+factor of sqrt(2) for an automatic count, and an explicit count is treated
+the same way. The default rebuilds a view converted at 250,000 rows (64
+centroids) above 1,024,000 rows with 256. It runs as the same idle units
+with the same publication, crash and cleanup rules; until its root the old
+epoch serves and clustered seals and merges continue on it (merges wait
+while it is staged). An unavailable view is not rebuilt automatically
+(serving refuses to start on one). At 1,000,000 SIFT rows, a 64-centroid
+view measured 0.953 / 0.8 mean / p5 recall@10 at the M31 budget and 32
+probes against 0.981 / 0.9 for 256 centroids (`benchmarks/M37.md`).
+`/v1/status` reports `clustering` (`none`, `converting` with the phase,
+pass/source counters and the epoch and centroid count being built, or
+`clustered` with its epoch and centroid count) and both settings; metrics
+carry the same values and conversion and rebuild counters.
 
 `backup_to` copies root zero, the selected root, its indexes, packs (each
 verified against the root's block digests before its PUT; packs carry their

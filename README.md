@@ -63,6 +63,11 @@ equality-filter keys, fixed at namespace creation), and the local cache:
   (see Operations). Writes and queries continue meanwhile; queries switch to
   the view when it is published. The default is where per-seal routing
   reaches its recall gate (`benchmarks/M37.md`, `DESIGN.md`).
+- `GLIDER_AUTO_RECLUSTER_FACTOR` (default 4; `0` disables): once the
+  namespace holds more than this factor times the rows its clustered view
+  was sized for (4,000 per cluster), the server rebuilds the view with more
+  clusters the same way; the old view serves until the new one is
+  published.
 - `GLIDER_LOCAL_BLOCKS` (default 24): cached blocks a query may rerank
   locally in addition to its remote budget (12 candidates, 8 range requests,
   1 MiB), which is charged only for uncached blocks. A warm cache therefore
@@ -78,7 +83,7 @@ API (JSON except `/metrics`):
 | `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?,"include_metadata":false,"include_vector":false}`; either optional flag adds that field to each hit. Unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, keys in `GLIDER_ROUTED_KEYS` restrict sketch routing, and other equality predicates are checked during reranking (approximate, may return fewer than k) |
 | `GET /v1/points/{id}` | Current vector and metadata, or 404 |
 | `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
-| `GET /v1/status`, `GET /healthz` | Sequence, queue state, cache warm-up (`cache.state`: `disabled`, `cold`, `warming`, `warm` or `partial`, with cached and namespace bytes) and clustered view (`clustering.state`: `none`, `converting` with `progress` phase and pass/source counters, or `clustered` with its `epoch`); liveness |
+| `GET /v1/status`, `GET /healthz` | Sequence, queue state, cache warm-up (`cache.state`: `disabled`, `cold`, `warming`, `warm` or `partial`, with cached and namespace bytes) and clustered view (`clustering.state`: `none`, `converting` with `progress` phase, pass/source counters and the epoch being built, or `clustered` with its `epoch` and `centroids`); liveness |
 | `GET /metrics` | Prometheus text metrics for requests, admission, maintenance, cache and sketches; no bearer token required |
 
 A write is acknowledged only after durable publication; resend an uncertain
@@ -116,8 +121,9 @@ The server converts a namespace to the clustered view automatically at
 restart during the conversion loses nothing: the previous layout keeps
 serving and the next start begins a new conversion and removes the
 interrupted one's objects. The view's cluster count is fixed when it is
-built (about 4,000 rows per cluster), so after the collection has grown
-several times larger, rebuild it with `convert`.
+built (about 4,000 rows per cluster); after the collection grows past
+`GLIDER_AUTO_RECLUSTER_FACTOR` times that size the server rebuilds it as a
+new epoch, and `convert` rebuilds it on demand.
 
 `convert [CENTROIDS]` seals the log tail of the stopped namespace, builds the
 M37 clustered view from its sealed rows (or rebuilds it as a new epoch,

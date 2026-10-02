@@ -115,6 +115,9 @@ impl ServerConfig {
     /// - `GLIDER_AUTO_CLUSTER_ROWS` (default 250,000): live sealed rows at
     ///   which a namespace without a clustered view converts to one as idle
     ///   maintenance; 0 disables
+    /// - `GLIDER_AUTO_RECLUSTER_FACTOR` (default 4): rebuild a clustered view
+    ///   as a new epoch once the namespace holds more than this factor times
+    ///   the rows its centroid count was sized for; 0 disables
     pub fn from_env() -> crate::Result<Self> {
         let invalid = |name: &str| Error::Invalid(format!("invalid {name}"));
         let dimensions = required("GLIDER_DIMENSIONS")?
@@ -170,6 +173,11 @@ impl ServerConfig {
             serving.auto_cluster_rows = rows
                 .parse()
                 .map_err(|_| invalid("GLIDER_AUTO_CLUSTER_ROWS"))?;
+        }
+        if let Some(factor) = env("GLIDER_AUTO_RECLUSTER_FACTOR") {
+            serving.auto_recluster_factor = factor
+                .parse()
+                .map_err(|_| invalid("GLIDER_AUTO_RECLUSTER_FACTOR"))?;
         }
         Ok(Self {
             listen: env("GLIDER_LISTEN")

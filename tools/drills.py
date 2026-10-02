@@ -287,6 +287,7 @@ def drill(seed):
             process = start(env, log)
             status = request(port, "GET", "/v1/status")["clustering"]
             assert status["state"] == "clustered" and status["epoch"] == 1, status
+            assert status["centroids"] == 1 and status["auto_recluster_factor"] == 4, status
             verify_auto()
             stop(process)
             process = None

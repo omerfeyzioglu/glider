@@ -357,3 +357,8 @@ rejected; instead seals and consolidation of runs newer than the frozen ones
 publish between its steps, and their versions stay routed through canonical
 packs under the new view, which open already supported. Failed reads keep
 the attempt; staged objects are retained from cleanup until its root.
+Because the centroid count is fixed per epoch, a view is rebuilt as the next
+epoch once the namespace holds more than `auto_recluster_factor` (default
+4) times the 4,000 rows per centroid it was sized for; at 1,000,000 rows a
+64-centroid view measured 0.953 / 0.8 against 0.981 / 0.9 for 256
+centroids at the M31 budget.

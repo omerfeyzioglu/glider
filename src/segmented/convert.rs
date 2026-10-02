@@ -39,7 +39,7 @@ use std::{
 
 /// The automatic centroid count targets about this many live rows per
 /// cluster (`benchmarks/M37.md`: 256 centroids at 1,000,000 rows).
-const TARGET_CLUSTER_ROWS: f64 = 4_000.;
+pub(super) const TARGET_CLUSTER_ROWS: usize = 4_000;
 /// Bounded training profile: sample rows and Lloyd iterations.
 const SAMPLE_ROWS: usize = 16_384;
 const ITERATIONS: usize = 2;
@@ -140,6 +140,10 @@ pub struct ConversionProgress {
     pub posting_packs: usize,
     /// Live sealed puts frozen when the conversion started.
     pub rows: u64,
+    /// The epoch being built: 1 for a first view, higher for a rebuild.
+    pub epoch: u64,
+    /// Its centroid count, 0 until training.
+    pub centroids: usize,
 }
 
 impl ConversionProgress {
@@ -197,9 +201,10 @@ pub(super) struct ConvertState {
     summary: ConversionSummary,
 }
 
-/// `2^round(log2(rows / 4,000))`, at least one.
-fn automatic_centroids(rows: usize) -> usize {
-    let exponent = (rows as f64 / TARGET_CLUSTER_ROWS).log2().round();
+/// The centroid count a conversion without an explicit count chooses for
+/// `rows` live sealed rows: `2^round(log2(rows / 4,000))`, from 1 to 4,096.
+pub fn automatic_centroids(rows: usize) -> usize {
+    let exponent = (rows as f64 / TARGET_CLUSTER_ROWS as f64).log2().round();
     if exponent <= 0. {
         1
     } else {
@@ -376,6 +381,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             passes: state.ranges.len(),
             posting_packs: state.summary.posting_packs,
             rows: state.frozen_rows,
+            epoch: state.epoch,
+            centroids: state.summary.centroids,
         })
     }
 
