@@ -54,7 +54,13 @@ environment variables.
 The editable [runtime](architecture/runtime.drawio) and
 [AWS](architecture/aws.drawio) sources open in
 [diagrams.net](https://app.diagrams.net/). Export each page as SVG with
-embedded images to update the corresponding image in this directory.
+embedded images to update the corresponding image in this directory. Then
+inline the icon paths for GitHub's SVG content policy:
+
+```sh
+python3 docs/architecture/flatten_svg_icons.py docs/architecture/runtime.svg docs/architecture/aws.svg
+```
+
 The AWS diagram uses the official
 [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/) package
 (July 2026 release). Generic runtime icons are from
