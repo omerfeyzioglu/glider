@@ -100,14 +100,13 @@ curl -XPOST localhost:8080/v1/write -H 'content-type: application/json' \
 Response `200`:
 
 ```json
-{"conflict":null,"request_id":{"boundary":1,"nonce":"ecd721367d3720c6b60de32f814c7097"},"sequence":2}
+{"request_id":{"boundary":1,"nonce":"ecd721367d3720c6b60de32f814c7097"},"sequence":2}
 ```
 
 | Field | Type | Notes |
 |---|---|---|
 | `sequence` | u64 | Commit sequence of this write |
 | `request_id` | object | The ID this write was recorded under; resend with it to retry |
-| `conflict` | null or string | Always `null` over HTTP (conditional writes are a library feature: `stale_revision`, `expired_revision`) |
 
 ## `POST /v1/query`
 
@@ -183,7 +182,7 @@ Resolve a write whose response was lost, by its request ID.
 | `ahead` | The ID's boundary is later than this collection's history (for example after restoring an older backup) | Reconcile with the restored state |
 
 ```json
-{"outcome":{"conflict":null,"request_id":{"boundary":2,"nonce":"0123456789abcdef0123456789abcdef"},"sequence":3},"state":"retained"}
+{"outcome":{"request_id":{"boundary":2,"nonce":"0123456789abcdef0123456789abcdef"},"sequence":3},"state":"retained"}
 ```
 
 ## `GET /v1/status`

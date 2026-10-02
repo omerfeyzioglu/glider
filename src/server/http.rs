@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     admission::Client,
-    retry::{Conflict, Lookup, Outcome, Request, RequestId},
+    retry::{Lookup, Outcome, Request, RequestId},
     segmented::QueryOptions,
     Mutation,
 };
@@ -107,15 +107,17 @@ struct WriteBody {
     request_id: Option<RequestIdJson>,
 }
 
-fn outcome_json(outcome: Outcome, id: RequestId) -> Value {
-    json!({
+fn outcome_json(outcome: Outcome, id: RequestId) -> Result<Value, ApiError> {
+    if outcome.conflict.is_some() {
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "conditional write outcome cannot be represented over HTTP".into(),
+        ));
+    }
+    Ok(json!({
         "sequence": outcome.sequence,
         "request_id": RequestIdJson::from_id(id),
-        "conflict": outcome.conflict.map(|conflict| match conflict {
-            Conflict::StaleRevision => "stale_revision",
-            Conflict::ExpiredRevision => "expired_revision",
-        }),
-    })
+    }))
 }
 
 /// `POST /v1/write`: one atomic batch of upserts then deletes.
@@ -157,7 +159,7 @@ async fn write(
             })?
             .wait()?
             .value;
-        Ok(Json(outcome_json(outcome, id)))
+        Ok(Json(outcome_json(outcome, id)?))
     })
     .await
 }
@@ -261,7 +263,7 @@ async fn request(
     blocking(move || {
         Ok(Json(match client.lookup(id)?.wait()?.value {
             Lookup::Retained(outcome) => {
-                json!({ "state": "retained", "outcome": outcome_json(outcome, id) })
+                json!({ "state": "retained", "outcome": outcome_json(outcome, id)? })
             }
             Lookup::Unknown => json!({ "state": "unknown" }),
             Lookup::Expired => json!({ "state": "expired" }),
