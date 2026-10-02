@@ -44,6 +44,9 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   read-your-writes.
 - Disposable local block cache (RAM and SSD), authenticated against the
   selected root and warmed in the background.
+- Open reads run indexes and sketch frames with up to 32 requests in
+  flight and keeps digest-verified copies in the local cache for the next
+  open (1,000,000 vectors on S3: open 3.15 s, reopen 4.00 s).
 - Distances: squared Euclidean, Manhattan and cosine. Filters: one exact
   resident predicate, up to four routed keys, other equality filters
   post-filtered.
@@ -71,7 +74,7 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
 - Equality filters only; non-resident filters are approximate and may
   return fewer than `k` results.
 - At 1,000,000 vectors, peak RSS exceeds the 192 MiB target, and open
-  time and write p95 on S3 exceed their targets
+  time on S3 exceeds its target
   ([benchmarks/M39.md](benchmarks/M39.md)).
 - A point must fit in one 120 KiB storage block; larger points are rejected
   with `400` ([limits](docs/API.md#post-v1write)).
