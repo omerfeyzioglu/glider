@@ -14,10 +14,11 @@ use std::{
 
 mod cache;
 use cache::BlockCache;
-mod codec;
-// M37 stage 1 defines the formats before the clustered serving path uses them.
-#[allow(dead_code)]
 mod clustered;
+mod codec;
+use clustered::ClusterIndex;
+mod convert;
+pub use convert::{ConversionSummary, ConvertOptions};
 mod directory;
 use directory::Directory;
 mod serving;
@@ -38,6 +39,9 @@ const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONSOLIDATION_INDEX_BYTES: usize = 2 * 1024 * 1024;
 const INDEX_MAGIC: &[u8; 8] = b"GLRIDX01";
 const MAX_TAIL_OBJECTS: usize = 64;
+/// Postings a clustered query probes unless configured otherwise: the M37
+/// stage 2 measurements reached the quality gates with 16.
+pub const DEFAULT_CLUSTER_PROBES: usize = 16;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -585,17 +589,19 @@ pub(crate) fn encode_pack(
 }
 
 /// Encode a pack that starts with the sketch frame for its blocks; block
-/// offsets follow the frame.
+/// offsets follow the frame. A posting pack passes its centers'
+/// fingerprints by cluster ID and gets a `GLSKT003` sketch.
 fn encode_pack_with_sketch(
     object: &str,
     config: Config,
     options: &SegmentedOptions,
     options_digest: &[u8; 32],
     blocks: &[Block],
+    fingerprints: Option<&BTreeMap<u32, [u8; 32]>>,
 ) -> Result<(Vec<u8>, Vec<BlockRef>, PackSketch)> {
     let (payload, mut references) = encode_pack(object, config, blocks)?;
     let pairs: Vec<_> = references.iter().zip(blocks).collect();
-    let sketch = PackSketch::build(config, options, object, &pairs)?;
+    let sketch = PackSketch::build_with(config, options, object, &pairs, fingerprints)?;
     let encoded = sketch.encode(config, options_digest);
     if encoded.len() > MAX_SKETCH_BYTES {
         return Err(Error::Invalid(
@@ -611,6 +617,7 @@ fn encode_pack_with_sketch(
         reference.offset += shift;
         reference.payload_len = bytes.len();
     }
+    sketch.relocate_posting(&references);
     Ok((bytes, references, sketch))
 }
 
@@ -672,13 +679,7 @@ fn authenticate(reference: &BlockRef, bytes: &[u8]) -> Result<()> {
 /// Decode an authenticated block of version 2 (binary) or 1 (JSON).
 fn decode_block_bytes(config: Config, reference: &BlockRef, bytes: &[u8]) -> Result<Block> {
     authenticate(reference, bytes)?;
-    let block = if codec::is_v2(bytes) {
-        codec::decode(config, bytes)?
-    } else {
-        let block: Block = decode(bytes)?;
-        block.validate(config)?;
-        block
-    };
+    let block = decode_block(config, bytes)?;
     if block.partition != reference.partition
         || block.records.len() != reference.rows
         || block.records.first().unwrap().id() != reference.first_id
@@ -687,6 +688,17 @@ fn decode_block_bytes(config: Config, reference: &BlockRef, bytes: &[u8]) -> Res
         return Err(Error::Corrupt("segmented block reference mismatch".into()));
     }
     Ok(block)
+}
+
+/// Decode block bytes the caller has already authenticated.
+fn decode_block(config: Config, bytes: &[u8]) -> Result<Block> {
+    if codec::is_v2(bytes) {
+        codec::decode(config, bytes)
+    } else {
+        let block: Block = decode(bytes)?;
+        block.validate(config)?;
+        Ok(block)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1195,6 +1207,14 @@ pub struct SegmentedDatabase<S> {
     seal: Option<SealState>,
     reclaim: Option<ReclaimState>,
     prune: Option<PruneState>,
+    convert: Option<convert::ConvertState>,
+    /// The selected root's decoded clustered view, if it has one and it
+    /// loaded; `cluster_error` says why a selected view did not load.
+    cluster: Option<Arc<ClusterIndex>>,
+    cluster_error: Option<String>,
+    /// Replaced views; one that a query view still holds pins its packs.
+    retired_views: Vec<Weak<ClusterIndex>>,
+    probes: usize,
     poisoned: bool,
 }
 
@@ -1214,6 +1234,8 @@ pub(crate) struct View<S> {
     latest: Arc<Directory>,
     tail: Arc<Tail>,
     sketches: Arc<SketchSet>,
+    cluster: Option<Arc<ClusterIndex>>,
+    probes: usize,
 }
 
 /// Remote range reads and payload bytes caused by one query.
@@ -1442,7 +1464,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
         root.fences = self.fences.clone();
-        root.version = if root.fences.is_empty() { 1 } else { 2 };
+        root.version = if root.clustered.is_some() {
+            4
+        } else if root.fences.is_empty() {
+            1
+        } else {
+            2
+        };
         Ok(root)
     }
 
@@ -1493,7 +1521,46 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             latest: self.latest.clone(),
             tail: self.tail.clone(),
             sketches: self.sketches.clone(),
+            cluster: self.cluster.clone(),
+            probes: self.probes,
         }
+    }
+
+    fn maintenance_active(&self) -> bool {
+        self.seal.is_some()
+            || self.reclaim.is_some()
+            || self.prune.is_some()
+            || self.convert.is_some()
+    }
+
+    /// Postings a clustered selective query probes (default
+    /// [`DEFAULT_CLUSTER_PROBES`]); at least the number of clusters probes
+    /// them all.
+    pub fn with_cluster_probes(mut self, probes: usize) -> Self {
+        self.set_cluster_probes(probes);
+        self
+    }
+
+    pub fn set_cluster_probes(&mut self, probes: usize) {
+        self.probes = probes.max(1);
+    }
+
+    /// Epoch of the selected root's clustered view, if it has one.
+    pub fn clustered_epoch(&self) -> Option<u64> {
+        self.root.clustered.as_ref().map(|view| view.epoch)
+    }
+
+    /// Clusters of the loaded clustered view.
+    pub fn cluster_count(&self) -> Option<usize> {
+        self.cluster.as_ref().map(|cluster| cluster.ids.len())
+    }
+
+    /// Why the selected root's clustered view could not be loaded (a
+    /// missing or corrupt centroid, catalog or posting object). Selective
+    /// queries then fail until a conversion rebuilds the view; exact
+    /// search, reads and writes still work.
+    pub fn clustered_view_error(&self) -> Option<&str> {
+        self.cluster_error.as_deref()
     }
 
     /// Reclaim a mostly dead pack only if it frees at least this many
@@ -1568,7 +1635,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Ok(false);
         };
         // A separate statement releases the lock before the remote read.
-        let unit = lock_cache(cache)?.warm_plan(&self.root, unit_bytes)?;
+        let unit = lock_cache(cache)?.warm_plan(
+            self.root.generation,
+            || self.sketches.routable_blocks(&self.root),
+            unit_bytes,
+        )?;
         let read = match unit {
             cache::WarmUnit::Done => return Ok(false),
             cache::WarmUnit::Skipped => return Ok(true),
@@ -1654,11 +1725,6 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 Error::Exists(_) => Error::Corrupt("selected segmented root missing".into()),
                 error => error,
             })?;
-        if root.clustered.is_some() {
-            return Err(Error::Corrupt(
-                "clustered root v4 requires clustered serving support".into(),
-            ));
-        }
         let mut fences = root.fences.clone();
         fences.roots.extend(markers);
         let mut latest = Directory::default();
@@ -1728,6 +1794,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             seal: None,
             reclaim: None,
             prune: None,
+            convert: None,
+            cluster: None,
+            cluster_error: None,
+            retired_views: Vec::new(),
+            probes: DEFAULT_CLUSTER_PROBES,
             poisoned: false,
         };
         // Takeover records hold no request, so only request objects count
@@ -1767,36 +1838,238 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 db.tail_objects += 1;
             }
         }
-        db.load_sketches()?;
+        db.load_routing()?;
         db.schedule_obsolete();
         Ok(db)
     }
 
-    /// Load the derived sketch of every referenced pack. A missing or invalid
-    /// sketch is rebuilt in memory from that pack's authenticated blocks.
-    fn load_sketches(&mut self) -> Result<()> {
+    /// Load the routing state the selected root needs. Without a clustered
+    /// view that is the sketch of every referenced pack. With one, it is the
+    /// view's centroids, catalog and posting sketches, plus the sketches of
+    /// the canonical packs holding sealed versions newer than the view; the
+    /// view's own canonical sources are not routed, so each current version
+    /// has exactly one routing row. A missing or corrupt derived view object
+    /// leaves the view unavailable (`clustered_view_error`); other storage
+    /// errors fail. Invalid sketch frames are rebuilt from authenticated
+    /// blocks.
+    fn load_routing(&mut self) -> Result<()> {
+        Arc::make_mut(&mut self.sketches).clear();
+        self.cluster = None;
+        self.cluster_error = None;
+        if let Some(view) = self.root.clustered.clone() {
+            match self.load_view(&view) {
+                Ok(index) => self.cluster = Some(Arc::new(index)),
+                Err(Error::Corrupt(message)) => {
+                    Arc::make_mut(&mut self.sketches).clear();
+                    self.cluster_error = Some(message);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let boundary = self.cluster.as_ref().map(|cluster| cluster.boundary);
         let mut packs: BTreeMap<String, Vec<BlockRef>> = BTreeMap::new();
-        for run in &self.root.runs {
-            for block in &run.blocks {
+        if self.root.clustered.is_none() {
+            for run in &self.root.runs {
+                for block in &run.blocks {
+                    packs
+                        .entry(block.object.clone())
+                        .or_default()
+                        .push(block.clone());
+                }
+            }
+        } else if let Some(boundary) = boundary {
+            let mut blocks = BTreeSet::new();
+            for (_, location) in self.latest.iter() {
+                if !location.entry.deleted && location.entry.sequence > boundary {
+                    blocks.insert((location.run, location.entry.block as usize));
+                }
+            }
+            for (run, block) in blocks {
+                let block = &self.root.runs[run].blocks[block];
                 packs
                     .entry(block.object.clone())
                     .or_default()
                     .push(block.clone());
             }
+            // A pack's sketch covers every block of it the root references.
+            for run in &self.root.runs {
+                for block in &run.blocks {
+                    if let Some(references) = packs.get_mut(&block.object) {
+                        if !references.iter().any(|known| known.offset == block.offset) {
+                            references.push(block.clone());
+                        }
+                    }
+                }
+            }
         }
         let packs: Vec<_> = packs.into_iter().collect();
+        let keys: Vec<_> = packs
+            .iter()
+            .map(|(pack, references)| (pack.as_str(), references[0].payload_len))
+            .collect();
+        let decoded = self.read_sketch_frames(&keys, false)?;
+        for ((pack, references), decoded) in packs.iter().zip(decoded) {
+            let sketch = match decoded {
+                Some(sketch) => sketch,
+                None => {
+                    let mut references = references.clone();
+                    references.sort_by_key(|reference| reference.offset);
+                    let blocks = references
+                        .iter()
+                        .map(|reference| read_block(&*self.store, self.config, reference))
+                        .collect::<Result<Vec<_>>>()?;
+                    let pairs: Vec<_> = references.iter().zip(&blocks).collect();
+                    Arc::make_mut(&mut self.sketches).rebuilt += 1;
+                    PackSketch::build(self.config, &self.options, pack, &pairs)?
+                }
+            };
+            Arc::make_mut(&mut self.sketches).install(sketch);
+        }
+        Arc::make_mut(&mut self.sketches).refresh(&self.root, self.root.clustered.is_some())?;
+        self.activate_sketches(None);
+        let (latest, tail) = (&self.latest, &self.tail);
+        Arc::make_mut(&mut self.sketches)
+            .activate_postings(|id, sequence| sketch::posting_current(tail, latest, id, sequence));
+        Arc::make_mut(&mut self.sketches).compact_all();
+        Ok(())
+    }
+
+    /// Decode and authenticate the clustered view `view` selects and load
+    /// its posting sketches. `Error::Corrupt` means a derived object is
+    /// missing or invalid.
+    fn load_view(&mut self, view: &clustered::ViewRef) -> Result<ClusterIndex> {
+        let read = |key: &str| {
+            self.store
+                .get(key)?
+                .ok_or_else(|| Error::Corrupt(format!("clustered object missing: {key}")))
+        };
+        let centroids = view.decode_centroids(self.config, &read(&view.centroid.key)?)?;
+        if centroids.source_generation >= self.root.generation
+            || centroids.source_sequence > self.root.sequence
+        {
+            return Err(Error::Corrupt("clustered view source is not older".into()));
+        }
+        let catalog = view.decode_catalog(&centroids, &read(&view.catalog.key)?)?;
+        let index = ClusterIndex::new(&centroids, catalog);
+        if let Some(pack) = index
+            .packs
+            .keys()
+            .find(|pack| !self.known_keys.contains(*pack))
+        {
+            return Err(Error::Corrupt(format!("posting pack missing: {pack}")));
+        }
+        let layouts = index.pack_blocks();
+        let keys: Vec<_> = layouts
+            .iter()
+            .map(|(pack, layout)| (*pack, layout.payload_len))
+            .collect();
+        let decoded = self.read_sketch_frames(&keys, true)?;
+        let mut sketches = Vec::with_capacity(layouts.len());
+        for ((pack, layout), decoded) in layouts.iter().zip(decoded) {
+            sketches.push(self.posting_sketch(&index, pack, layout, decoded)?);
+        }
+        let set = Arc::make_mut(&mut self.sketches);
+        for sketch in sketches {
+            set.install(sketch);
+        }
+        Ok(index)
+    }
+
+    /// A posting pack's sketch: the decoded frame if it matches the catalog
+    /// and the view's centers, else rebuilt from the pack's blocks after
+    /// authenticating them against the catalog digests.
+    fn posting_sketch(
+        &mut self,
+        index: &ClusterIndex,
+        pack: &str,
+        layout: &clustered::PackLayout,
+        decoded: Option<PackSketch>,
+    ) -> Result<PackSketch> {
+        let matches = |sketch: &PackSketch| {
+            let Some(posting) = sketch.posting() else {
+                return false;
+            };
+            let rows: Vec<_> = sketch.block_rows().collect();
+            layout
+                .extents
+                .iter()
+                .all(|&(first, count, extent_rows, cluster)| {
+                    let blocks = first..first + count;
+                    rows.get(blocks.clone()).map(|rows| rows.iter().sum()) == Some(extent_rows)
+                        && blocks.into_iter().all(|block| {
+                            posting.clusters.get(block) == Some(&cluster)
+                                && index.fingerprints.get(&cluster)
+                                    == posting.fingerprints.get(block)
+                        })
+                })
+        };
+        if let Some(mut sketch) = decoded {
+            if sketch
+                .bind_posting(layout.payload_len, &layout.blocks)
+                .is_ok()
+                && matches(&sketch)
+            {
+                return Ok(sketch);
+            }
+        }
+        let mut references = Vec::with_capacity(layout.blocks.len());
+        let mut blocks = Vec::with_capacity(layout.blocks.len());
+        for &(offset, length, digest) in &layout.blocks {
+            let bytes = self
+                .store
+                .get_range(pack, offset, length, layout.payload_len)?
+                .ok_or_else(|| Error::Corrupt(format!("posting pack missing: {pack}")))?;
+            if Sha256::digest(&bytes).as_slice() != digest {
+                return Err(Error::Corrupt(format!(
+                    "posting block digest mismatch: {pack}"
+                )));
+            }
+            let block = decode_block(self.config, &bytes)?;
+            references.push(BlockRef {
+                object: pack.to_owned(),
+                payload_len: layout.payload_len,
+                offset,
+                length,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                partition: block.partition,
+                first_id: block.records[0].id(),
+                last_id: block.records.last().unwrap().id(),
+                rows: block.records.len(),
+            });
+            blocks.push(block);
+        }
+        let pairs: Vec<_> = references.iter().zip(&blocks).collect();
+        let sketch = PackSketch::build_with(
+            self.config,
+            &self.options,
+            pack,
+            &pairs,
+            Some(&index.fingerprints),
+        )?;
+        if !matches(&sketch) {
+            return Err(Error::Corrupt(format!(
+                "catalog disagrees with posting pack: {pack}"
+            )));
+        }
+        Arc::make_mut(&mut self.sketches).rebuilt += 1;
+        Ok(sketch)
+    }
+
+    /// Read and decode the sketch frame of each `(pack, payload length)`,
+    /// eight prefix reads at a time. `None` marks a pack whose frame is
+    /// absent or invalid, or whose range the store reported corrupt.
+    fn read_sketch_frames(
+        &self,
+        packs: &[(&str, usize)],
+        posting: bool,
+    ) -> Result<Vec<Option<PackSketch>>> {
+        let mut decoded = Vec::with_capacity(packs.len());
         // At most eight prefix reads (2 MiB) are in flight at once.
         for chunk in packs.chunks(8) {
             let requests: Vec<_> = chunk
                 .iter()
-                .map(|(pack, references)| {
-                    let payload_len = references[0].payload_len;
-                    (
-                        pack.as_str(),
-                        0,
-                        FRAME_PREFIX_READ.min(payload_len),
-                        payload_len,
-                    )
+                .map(|&(pack, payload_len)| {
+                    (pack, 0, FRAME_PREFIX_READ.min(payload_len), payload_len)
                 })
                 .collect();
             // A store-reported corrupt range fails the batch; read that chunk
@@ -1815,26 +2088,26 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .collect::<Result<Vec<_>>>()?,
                 Err(error) => return Err(error),
             };
-            for (index, (pack, references)) in chunk.iter().enumerate() {
-                let payload_len = references[0].payload_len;
-                let mut decoded = None;
+            for (index, &(pack, payload_len)) in chunk.iter().enumerate() {
+                let mut sketch = None;
                 for _ in 0..2 {
                     let Some(bytes) = prefixes[index].as_deref() else {
                         break;
                     };
                     match unframe(bytes, payload_len) {
-                        Framed::Sketch(sketch) => {
-                            decoded = PackSketch::decode(
-                                sketch,
+                        Framed::Sketch(bytes) => {
+                            sketch = PackSketch::decode_with(
+                                bytes,
                                 self.config,
                                 &self.options_digest,
                                 pack,
                                 &self.options.routed_keys,
+                                posting,
                             )
                             .ok()
-                            .map(|mut decoded| {
-                                decoded.frame_len = Some(sketch::FRAME_HEADER + sketch.len());
-                                decoded
+                            .map(|mut sketch| {
+                                sketch.frame_len = Some(sketch::FRAME_HEADER + bytes.len());
+                                sketch
                             });
                             break;
                         }
@@ -1849,37 +2122,24 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     }
                 }
                 prefixes[index] = None;
-                let sketch = match decoded {
-                    Some(sketch) => sketch,
-                    None => {
-                        let mut references = references.clone();
-                        references.sort_by_key(|reference| reference.offset);
-                        let blocks = references
-                            .iter()
-                            .map(|reference| read_block(&*self.store, self.config, reference))
-                            .collect::<Result<Vec<_>>>()?;
-                        let pairs: Vec<_> = references.iter().zip(&blocks).collect();
-                        Arc::make_mut(&mut self.sketches).rebuilt += 1;
-                        PackSketch::build(self.config, &self.options, pack, &pairs)?
-                    }
-                };
-                Arc::make_mut(&mut self.sketches).install(sketch);
+                decoded.push(sketch);
             }
         }
-        Arc::make_mut(&mut self.sketches).refresh(&self.root)?;
-        self.activate_sketches(None);
-        Arc::make_mut(&mut self.sketches).compact_all();
-        Ok(())
+        Ok(decoded)
     }
 
+    /// Recompute canonical row liveness. With a clustered view, versions it
+    /// covers are routed through their postings instead.
     fn activate_sketches(&mut self, packs: Option<&BTreeSet<String>>) {
         let (latest, tail) = (&self.latest, &self.tail);
+        let boundary = self.cluster.as_ref().map(|cluster| cluster.boundary);
         Arc::make_mut(&mut self.sketches).activate(packs, |id, run, block| {
             !tail.contains_key(&id)
                 && latest.get(&id).is_some_and(|location| {
                     location.run == run
                         && location.entry.block as usize == block
                         && !location.entry.deleted
+                        && boundary.is_none_or(|boundary| location.entry.sequence > boundary)
                 })
         });
     }
@@ -1905,6 +2165,17 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .iter()
                 .map(|&generation| root_key(generation)),
         );
+        if let Some(view) = &self.root.clustered {
+            let Some(cluster) = &self.cluster else {
+                // An unreadable catalog does not name its packs: remove
+                // nothing until a conversion rebuilds the view.
+                self.obsolete.clear();
+                return;
+            };
+            retained.insert(view.centroid.key.clone());
+            retained.insert(view.catalog.key.clone());
+            retained.extend(cluster.packs.keys().cloned());
+        }
         self.obsolete = self.known_keys.difference(&retained).cloned().collect();
     }
 
@@ -1938,6 +2209,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             &self.options,
             &self.options_digest,
             blocks,
+            None,
         )?;
         self.create_staged(key, &bytes)?;
         Ok((references, sketch))
@@ -2265,7 +2537,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
+        if self.maintenance_active() {
             return Err(Error::MaintenanceRequired);
         }
         if self.tail_objects == 0 {
@@ -2466,7 +2738,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
+        if self.maintenance_active() {
             return Err(Error::MaintenanceRequired);
         }
         let runs = &self.root.runs;
@@ -2588,7 +2860,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Rebind sketches after a root change. Liveness of retained rows does not
     /// change; only newly installed packs need activation.
     fn refresh_sketches(&mut self, new_packs: Option<&BTreeSet<String>>) -> Result<()> {
-        if let Err(error) = Arc::make_mut(&mut self.sketches).refresh(&self.root) {
+        let covered = self.root.clustered.is_some();
+        if let Err(error) = Arc::make_mut(&mut self.sketches).refresh(&self.root, covered) {
             self.poisoned = true;
             return Err(error);
         }
@@ -2605,7 +2878,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
+        if self.maintenance_active() {
             return Err(Error::MaintenanceRequired);
         }
         let mut live_counts: Vec<Vec<usize>> = self
@@ -2738,7 +3011,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.seal.is_some() || self.reclaim.is_some() || self.prune.is_some() {
+        if self.maintenance_active() {
             return Err(Error::MaintenanceRequired);
         }
         let mut live_counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
@@ -2961,9 +3234,16 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if max_objects == 0 {
             return Err(Error::Invalid("cleanup step must allow an object".into()));
         }
-        // A query on an older view may still read a pack its root references.
+        // A query on an older view may still read a pack its root or its
+        // clustered view references.
         self.retired.retain(|root| root.strong_count() > 0);
+        self.retired_views.retain(|view| view.strong_count() > 0);
         let pinned: Vec<_> = self.retired.iter().filter_map(Weak::upgrade).collect();
+        let pinned_views: Vec<_> = self
+            .retired_views
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
         let keys: Vec<_> = self
             .obsolete
             .iter()
@@ -2972,12 +3252,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     root.runs
                         .iter()
                         .any(|run| run.blocks.iter().any(|block| &block.object == *key))
-                })
+                }) && !pinned_views
+                    .iter()
+                    .any(|view| view.packs.contains_key(key.as_str()))
             })
             .take(max_objects)
             .cloned()
             .collect();
-        drop(pinned);
+        drop((pinned, pinned_views));
         if keys.is_empty() {
             return Ok(0);
         }
@@ -3567,8 +3849,16 @@ mod tests {
             .create(&root_key(0), &encode(&Root::empty(config)).unwrap())
             .unwrap();
         store.create(&root_key(1), &bytes).unwrap();
+        // The view's objects are missing: exact reads work, but selective
+        // queries fail until a conversion rebuilds the view.
+        let db = SegmentedDatabase::open(store, config).unwrap();
+        assert!(db
+            .clustered_view_error()
+            .is_some_and(|error| error.contains("missing")));
+        assert_eq!(db.clustered_epoch(), Some(1));
+        assert!(db.search_exact(&[0., 0.], 1, &[]).unwrap().is_empty());
         assert!(matches!(
-            SegmentedDatabase::open(store, config),
+            db.search_selective(&[0., 0.], 1, 1, &[]),
             Err(Error::Corrupt(_))
         ));
         let temp = tempfile::tempdir().unwrap();

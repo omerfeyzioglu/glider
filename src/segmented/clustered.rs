@@ -597,6 +597,113 @@ impl Catalog {
     }
 }
 
+/// Identity of one center that posting sketches bind to: SHA-256 of the
+/// metric byte, the dimension (u32), the center ID (u32) and the f32
+/// coordinates, all little-endian. A posting block is valid for a view only
+/// if this matches the view's center for its cluster.
+pub(super) fn fingerprint(metric: Metric, center: &Center) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update([metric_byte(metric)]);
+    hash.update((center.coordinates.len() as u32).to_le_bytes());
+    hash.update(center.id.to_le_bytes());
+    for value in &center.coordinates {
+        hash.update(value.to_le_bytes());
+    }
+    hash.finalize().into()
+}
+
+/// The decoded clustered view a root v4 selects: centers in cluster-ID order
+/// and the catalog. `boundary` is the source root sequence: every live
+/// sealed version with a sequence at or below it has a posting copy, and
+/// newer sealed versions are routed through their canonical packs.
+pub(super) struct ClusterIndex {
+    pub(super) boundary: u64,
+    pub(super) ids: Vec<u32>,
+    centers: Vec<Vec<f32>>,
+    pub(super) fingerprints: BTreeMap<u32, [u8; 32]>,
+    pub(super) catalog: Catalog,
+    /// Posting pack keys and payload lengths.
+    pub(super) packs: BTreeMap<String, u32>,
+}
+
+impl ClusterIndex {
+    pub(super) fn new(centroids: &Centroids, catalog: Catalog) -> Self {
+        let mut centers: Vec<_> = centroids.centers.iter().collect();
+        centers.sort_by_key(|center| center.id);
+        let mut packs = BTreeMap::new();
+        for extent in catalog.clusters.iter().flat_map(|cluster| &cluster.extents) {
+            packs.insert(extent.pack.clone(), extent.payload_len);
+        }
+        Self {
+            boundary: centroids.source_sequence,
+            ids: centers.iter().map(|center| center.id).collect(),
+            fingerprints: centers
+                .iter()
+                .map(|center| (center.id, fingerprint(centroids.config.metric, center)))
+                .collect(),
+            centers: centers
+                .into_iter()
+                .map(|center| center.coordinates.clone())
+                .collect(),
+            catalog,
+            packs,
+        }
+    }
+
+    /// IDs of the `count` clusters nearest to `query`, ordered by
+    /// `(routing score, cluster ID)`.
+    pub(super) fn probe(&self, metric: Metric, query: &[f32], count: usize) -> Vec<u32> {
+        crate::ivf::nearest_centers(metric, query, &self.centers, count)
+            .into_iter()
+            .map(|(index, _)| self.ids[index])
+            .collect()
+    }
+
+    /// Each posting pack's catalog blocks in offset order, as
+    /// `(offset, length, SHA-256)`, with the extent rows they must hold.
+    pub(super) fn pack_blocks(&self) -> BTreeMap<&str, PackLayout> {
+        let mut packs: BTreeMap<&str, PackLayout> = BTreeMap::new();
+        for extent in self.catalog.clusters.iter().flat_map(|c| &c.extents) {
+            let layout = packs.entry(&extent.pack).or_default();
+            layout.payload_len = extent.payload_len as usize;
+            layout.extents.push((
+                layout.blocks.len(),
+                extent.blocks.len(),
+                extent.rows as usize,
+                extent.cluster_id,
+            ));
+            for block in &extent.blocks {
+                layout
+                    .blocks
+                    .push((block.offset as usize, block.length as usize, block.sha256));
+            }
+        }
+        for layout in packs.values_mut() {
+            let mut order: Vec<usize> = (0..layout.blocks.len()).collect();
+            order.sort_by_key(|&index| layout.blocks[index].0);
+            let position: BTreeMap<usize, usize> = order
+                .iter()
+                .enumerate()
+                .map(|(at, &index)| (index, at))
+                .collect();
+            layout.blocks = order.iter().map(|&index| layout.blocks[index]).collect();
+            for extent in &mut layout.extents {
+                extent.0 = position[&extent.0];
+            }
+        }
+        packs
+    }
+}
+
+/// One posting pack's catalog layout: blocks in offset order and, per
+/// extent, `(first block, block count, rows, cluster ID)`.
+#[derive(Default)]
+pub(super) struct PackLayout {
+    pub(super) payload_len: usize,
+    pub(super) blocks: Vec<(usize, usize, [u8; 32])>,
+    pub(super) extents: Vec<(usize, usize, usize, u32)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

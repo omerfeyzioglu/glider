@@ -2,8 +2,9 @@
 //! reader. Each immutable pack starts with a derived sketch frame bound to the
 //! digests of its blocks; the root and logs remain authoritative.
 use super::{
-    authenticate, cache::Source, codec, consider, consider_with, decode_block_bytes, lock_cache,
-    Block, BlockRef, QueryHit, QueryOptions, Ranked, RemoteReads, Root, SegmentedDatabase, View,
+    authenticate, cache::Source, codec, consider, consider_with, decode_block_bytes,
+    directory::Directory, lock_cache, Block, BlockRef, QueryHit, QueryOptions, Ranked, RemoteReads,
+    Root, SegmentedDatabase, Tail, View,
 };
 use crate::{store::ObjectStore, Config, Error, Metric, Mutation, Neighbor, Result};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,9 @@ const BITS: usize = 5;
 const LEVELS: f64 = 31.;
 const MAGIC: &[u8; 8] = b"GLSKT001";
 const ROUTED_MAGIC: &[u8; 8] = b"GLSKT002";
+/// M37 posting packs: the `GLSKT001`/`GLSKT002` body (routed sections iff
+/// routed keys are declared) followed by a posting trailer.
+const POSTING_MAGIC: &[u8; 8] = b"GLSKT003";
 
 /// Blocks a routed selective query reads. Routing ranks
 /// `max(blocks, local_blocks)` candidates. In rank order, a candidate whose
@@ -34,6 +38,12 @@ const ROUTED_MAGIC: &[u8; 8] = b"GLSKT002";
 /// `local_blocks > 0` the result depends on cache contents: a warm cache
 /// reads up to `local_blocks` cached candidates in addition to the remote
 /// spans, while losing the cache returns queries to the cold choice.
+///
+/// With a clustered view the ranking keeps as many candidates as the probed
+/// postings have blocks plus the usual count, mixing posting blocks with
+/// canonical blocks sealed after the view, and every ranked candidate may
+/// widen a span: spans grow in rank order until the request and byte limits
+/// stop them, so `blocks` does not limit posting blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadBudget {
     pub blocks: usize,
@@ -348,6 +358,21 @@ pub(super) struct PackSketch {
     resident_rows: Vec<u32>,
     resident_vectors: Vec<f32>,
     routed: Vec<RoutedKey>,
+    /// Present only in M37 posting packs (`GLSKT003`).
+    posting: Option<Posting>,
+}
+
+/// The posting trailer of a `GLSKT003` sketch: per block its cluster ID and
+/// center fingerprint (`clustered::fingerprint`), per row the committed
+/// sequence of the copied version, so a copy is current exactly when the
+/// latest-ID directory holds that `(ID, sequence)`. `references` is not
+/// persisted: the loader derives it from the authenticated catalog.
+#[derive(Clone)]
+pub(super) struct Posting {
+    pub(super) clusters: Vec<u32>,
+    pub(super) fingerprints: Vec<[u8; 32]>,
+    sequences: Vec<u64>,
+    pub(super) references: Arc<[BlockRef]>,
 }
 
 fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Result<&'a [u8]> {
@@ -389,6 +414,19 @@ impl PackSketch {
         options: &SegmentedOptions,
         pack: &str,
         blocks: &[(&BlockRef, &Block)],
+    ) -> Result<Self> {
+        Self::build_with(config, options, pack, blocks, None)
+    }
+
+    /// `build`, adding a posting trailer when `fingerprints` maps each
+    /// block's partition (its cluster ID) to that center's fingerprint.
+    /// Posting blocks hold only puts.
+    pub(super) fn build_with(
+        config: Config,
+        options: &SegmentedOptions,
+        pack: &str,
+        blocks: &[(&BlockRef, &Block)],
+        fingerprints: Option<&BTreeMap<u32, [u8; 32]>>,
     ) -> Result<Self> {
         let dimensions = config.dimensions;
         let mut minima = vec![f64::INFINITY; dimensions];
@@ -446,6 +484,37 @@ impl PackSketch {
                     codes: Vec::new(),
                 })
                 .collect(),
+            posting: None,
+        };
+        let mut posting = match fingerprints {
+            Some(fingerprints) => {
+                let mut clusters = Vec::with_capacity(blocks.len());
+                let mut prints = Vec::with_capacity(blocks.len());
+                for (_, block) in blocks {
+                    let print = fingerprints.get(&block.partition).ok_or_else(|| {
+                        Error::Corrupt(format!("posting block cluster unknown in {pack}"))
+                    })?;
+                    if block
+                        .records
+                        .iter()
+                        .any(|record| matches!(record.mutation, Mutation::Delete { .. }))
+                    {
+                        return Err(Error::Corrupt(format!("posting tombstone in {pack}")));
+                    }
+                    clusters.push(block.partition);
+                    prints.push(*print);
+                }
+                Some(Posting {
+                    clusters,
+                    fingerprints: prints,
+                    sequences: Vec::new(),
+                    references: blocks
+                        .iter()
+                        .map(|(reference, _)| (*reference).clone())
+                        .collect(),
+                })
+            }
+            None => None,
         };
         for routed in &mut sketch.routed {
             let values: BTreeSet<_> = puts()
@@ -467,6 +536,9 @@ impl PackSketch {
                 };
                 let row = ids.len();
                 ids.push(*id);
+                if let Some(posting) = posting.as_mut() {
+                    posting.sequences.push(record.sequence);
+                }
                 for routed in &mut sketch.routed {
                     let code = match metadata.get(&routed.key) {
                         None => 254,
@@ -506,6 +578,7 @@ impl PackSketch {
             });
         }
         sketch.ids = Ids::new(ids);
+        sketch.posting = posting;
         Ok(sketch)
     }
 
@@ -515,7 +588,9 @@ impl PackSketch {
     /// minima/scales f32, ids u64, packed codes, resident rows u32 and vectors.
     pub(super) fn encode(&self, config: Config, options_digest: &[u8; 32]) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(if self.routed.is_empty() {
+        bytes.extend_from_slice(if self.posting.is_some() {
+            POSTING_MAGIC
+        } else if self.routed.is_empty() {
             MAGIC
         } else {
             ROUTED_MAGIC
@@ -565,20 +640,45 @@ impl PackSketch {
                 bytes.extend_from_slice(&routed.codes);
             }
         }
+        if let Some(posting) = &self.posting {
+            for (cluster, print) in posting.clusters.iter().zip(&posting.fingerprints) {
+                bytes.extend_from_slice(&cluster.to_le_bytes());
+                bytes.extend_from_slice(print);
+            }
+            for sequence in &posting.sequences {
+                bytes.extend_from_slice(&sequence.to_le_bytes());
+            }
+        }
         bytes
     }
 
+    #[cfg(test)]
     pub(super) fn decode(
-        mut bytes: &[u8],
+        bytes: &[u8],
         config: Config,
         options_digest: &[u8; 32],
         pack: &str,
         routed_keys: &[String],
     ) -> Result<Self> {
+        Self::decode_with(bytes, config, options_digest, pack, routed_keys, false)
+    }
+
+    /// `decode` of a `GLSKT003` posting sketch when `posting` is set; its
+    /// references stay empty until `bind_posting` binds the catalog.
+    pub(super) fn decode_with(
+        mut bytes: &[u8],
+        config: Config,
+        options_digest: &[u8; 32],
+        pack: &str,
+        routed_keys: &[String],
+        posting: bool,
+    ) -> Result<Self> {
         let invalid = || Error::Corrupt(format!("invalid segmented sketch for {pack}"));
         let input = &mut bytes;
         if take(input, 8)?
-            != (if routed_keys.is_empty() {
+            != (if posting {
+                POSTING_MAGIC
+            } else if routed_keys.is_empty() {
                 MAGIC
             } else {
                 ROUTED_MAGIC
@@ -693,6 +793,32 @@ impl PackSketch {
                 codes,
             });
         }
+        let posting = if posting {
+            let mut clusters = Vec::with_capacity(sketch_blocks.len());
+            let mut fingerprints = Vec::with_capacity(sketch_blocks.len());
+            for _ in 0..sketch_blocks.len() {
+                clusters.push(take_u32(input)?);
+                fingerprints.push(take(input, 32)?.try_into().unwrap());
+            }
+            let sequences: Vec<_> = take(input, rows.checked_mul(8).ok_or_else(invalid)?)?
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|part| u64::from_le_bytes(*part))
+                .collect();
+            if sequences.contains(&0) || sketch_blocks.iter().any(|block| block.start == block.end)
+            {
+                return Err(invalid());
+            }
+            Some(Posting {
+                clusters,
+                fingerprints,
+                sequences,
+                references: Arc::from(Vec::new()),
+            })
+        } else {
+            None
+        };
         if !input.is_empty() {
             return Err(invalid());
         }
@@ -707,7 +833,61 @@ impl PackSketch {
             resident_rows,
             resident_vectors,
             routed,
+            posting,
         })
+    }
+
+    pub(super) fn posting(&self) -> Option<&Posting> {
+        self.posting.as_ref()
+    }
+
+    /// Bind a decoded posting sketch to its catalog blocks in pack order,
+    /// given as `(offset, length, SHA-256)`, and its pack's payload length.
+    /// Fails unless the sketch blocks carry exactly these digests.
+    pub(super) fn bind_posting(
+        &mut self,
+        payload_len: usize,
+        blocks: &[(usize, usize, [u8; 32])],
+    ) -> Result<()> {
+        let invalid = || Error::Corrupt(format!("posting sketch mismatch for {}", self.pack));
+        let posting = self.posting.as_ref().ok_or_else(invalid)?;
+        if blocks.len() != self.blocks.len() {
+            return Err(invalid());
+        }
+        let mut references = Vec::with_capacity(blocks.len());
+        for ((block, &(offset, length, digest)), &cluster) in
+            self.blocks.iter().zip(blocks).zip(&posting.clusters)
+        {
+            if block.digest != digest || block.start == block.end {
+                return Err(invalid());
+            }
+            references.push(BlockRef {
+                object: self.pack.clone(),
+                payload_len,
+                offset,
+                length,
+                sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+                partition: cluster,
+                first_id: self.ids.get(block.start),
+                last_id: self.ids.get(block.end - 1),
+                rows: block.end - block.start,
+            });
+        }
+        self.posting.as_mut().unwrap().references = references.into();
+        Ok(())
+    }
+
+    /// Replace a built posting sketch's block references with the final
+    /// ones, whose offsets follow the sketch frame.
+    pub(super) fn relocate_posting(&mut self, references: &[BlockRef]) {
+        if let Some(posting) = self.posting.as_mut() {
+            posting.references = references.into();
+        }
+    }
+
+    /// Put rows of each sketch block, in pack order.
+    pub(super) fn block_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.blocks.iter().map(|block| block.end - block.start)
     }
 
     pub(super) fn pack(&self) -> &str {
@@ -734,6 +914,20 @@ impl PackSketch {
                         + key.dictionary.iter().map(String::capacity).sum::<usize>()
                 })
                 .sum::<usize>()
+            + self.posting.as_ref().map_or(0, |posting| {
+                posting.clusters.capacity() * size_of::<u32>()
+                    + posting.fingerprints.capacity() * 32
+                    + posting.sequences.capacity() * size_of::<u64>()
+                    + posting
+                        .references
+                        .iter()
+                        .map(|reference| {
+                            size_of::<BlockRef>()
+                                + reference.object.capacity()
+                                + reference.sha256.capacity()
+                        })
+                        .sum::<usize>()
+            })
     }
 
     /// Drop rows whose `live` bit is clear and return the number kept.
@@ -765,6 +959,9 @@ impl PackSketch {
                     kept_resident += 1;
                 }
                 self.ids.copy(row, kept);
+                if let Some(posting) = self.posting.as_mut() {
+                    posting.sequences[kept] = posting.sequences[row];
+                }
                 for routed in &mut self.routed {
                     routed.codes[kept] = routed.codes[row];
                 }
@@ -776,6 +973,10 @@ impl PackSketch {
             block.end = kept;
         }
         self.ids.truncate(kept);
+        if let Some(posting) = self.posting.as_mut() {
+            posting.sequences.truncate(kept);
+            posting.sequences.shrink_to_fit();
+        }
         self.codes.truncate(kept * width);
         self.codes.shrink_to_fit();
         for routed in &mut self.routed {
@@ -838,14 +1039,6 @@ impl LoadedSketch {
         }
     }
 
-    /// Live rows of one block of this pack.
-    fn live_rows(&self, block: usize) -> usize {
-        let block = &self.sketch.blocks[block];
-        (block.start..block.end)
-            .filter(|&row| self.is_live(row))
-            .count()
-    }
-
     fn is_live(&self, row: usize) -> bool {
         self.live[row / 64] & (1 << (row % 64)) != 0
     }
@@ -859,14 +1052,19 @@ fn set_bit(bits: &mut [u64], row: usize, value: bool) {
     }
 }
 
-/// Loaded sketches for every pack referenced by the selected root. A row is
-/// live when it is the current committed version of its ID and no acknowledged
-/// log-tail mutation shadows it.
+/// Loaded sketches for the packs queries route: every pack the selected root
+/// references or, with a clustered view, the view's posting packs and the
+/// canonical packs holding sealed versions newer than the view. A canonical
+/// row is live when it is the current committed version of its ID, no
+/// acknowledged log-tail mutation shadows it and no posting covers it. A
+/// posting row's bit only records that it was current when loaded; queries
+/// also compare its `(ID, sequence)` with the directory and the tail.
 #[derive(Clone, Default)]
 pub(super) struct SketchSet {
     packs: Vec<LoadedSketch>,
-    /// Root `(run, block)` to `(pack slot, block within pack)`.
-    locations: Vec<Vec<(usize, usize)>>,
+    /// Root `(run, block)` to `(pack slot, block within pack)`; `None` for a
+    /// canonical block that a clustered view covers and no sketch routes.
+    locations: Vec<Vec<Option<(usize, usize)>>>,
     pub(super) rebuilt: usize,
 }
 
@@ -879,7 +1077,7 @@ impl SketchSet {
             + self
                 .locations
                 .iter()
-                .map(|run| run.capacity() * size_of::<(usize, usize)>())
+                .map(|run| run.capacity() * size_of::<Option<(usize, usize)>>())
                 .sum::<usize>()
     }
 
@@ -921,20 +1119,26 @@ impl SketchSet {
         self.packs.push(LoadedSketch::new(sketch));
     }
 
-    /// Bind loaded sketches to the root. Every referenced block must have a
-    /// sketch block with the same digest; unreferenced packs are dropped.
-    pub(super) fn refresh(&mut self, root: &Root) -> Result<()> {
+    /// Bind loaded canonical sketches to the root; posting sketches are kept.
+    /// Every referenced block of a loaded pack must have a sketch block with
+    /// the same digest; unreferenced canonical packs are dropped. Without a
+    /// clustered view (`covered` false) every referenced pack must be loaded;
+    /// with one, a pack the view covers may be absent and its blocks are not
+    /// routed.
+    pub(super) fn refresh(&mut self, root: &Root, covered: bool) -> Result<()> {
         let referenced: BTreeSet<&str> = root
             .runs
             .iter()
             .flat_map(|run| run.blocks.iter().map(|block| block.object.as_str()))
             .collect();
-        self.packs
-            .retain(|loaded| referenced.contains(loaded.sketch.pack.as_str()));
+        self.packs.retain(|loaded| {
+            loaded.sketch.posting.is_some() || referenced.contains(loaded.sketch.pack.as_str())
+        });
         let slots: BTreeMap<&str, usize> = self
             .packs
             .iter()
             .enumerate()
+            .filter(|(_, loaded)| loaded.sketch.posting.is_none())
             .map(|(slot, loaded)| (loaded.sketch.pack.as_str(), slot))
             .collect();
         let mut locations = Vec::with_capacity(root.runs.len());
@@ -942,9 +1146,16 @@ impl SketchSet {
         for (run, run_ref) in root.runs.iter().enumerate() {
             let mut blocks = Vec::with_capacity(run_ref.blocks.len());
             for (block, reference) in run_ref.blocks.iter().enumerate() {
-                let slot = *slots.get(reference.object.as_str()).ok_or_else(|| {
-                    Error::Corrupt(format!("segmented sketch missing: {}", reference.object))
-                })?;
+                let Some(&slot) = slots.get(reference.object.as_str()) else {
+                    if covered {
+                        blocks.push(None);
+                        continue;
+                    }
+                    return Err(Error::Corrupt(format!(
+                        "segmented sketch missing: {}",
+                        reference.object
+                    )));
+                };
                 let digest = digest_bytes(&reference.sha256)?;
                 let sketch = &self.packs[slot].sketch;
                 let sketch_block = sketch
@@ -957,7 +1168,7 @@ impl SketchSet {
                     })
                     .ok_or_else(|| Error::Corrupt("segmented sketch block mismatch".into()))?;
                 bound.push((slot, sketch_block, run, block));
-                blocks.push((slot, sketch_block));
+                blocks.push(Some((slot, sketch_block)));
             }
             locations.push(blocks);
         }
@@ -981,7 +1192,8 @@ impl SketchSet {
     /// Set or clear the row for an ID stored in root block `(run, block)`.
     /// Tombstones have no sketch row.
     pub(super) fn mark(&mut self, run: usize, block: usize, id: u64, live: bool) {
-        let Some(&(slot, sketch_block)) = self.locations.get(run).and_then(|r| r.get(block)) else {
+        let Some(&Some((slot, sketch_block))) = self.locations.get(run).and_then(|r| r.get(block))
+        else {
             return;
         };
         let loaded = &mut self.packs[slot];
@@ -991,14 +1203,17 @@ impl SketchSet {
         }
     }
 
-    /// Recompute liveness for the named packs, or all packs when `None`.
+    /// Recompute liveness for the named canonical packs, or all of them
+    /// when `None`.
     pub(super) fn activate(
         &mut self,
         packs: Option<&BTreeSet<String>>,
         mut current: impl FnMut(u64, usize, usize) -> bool,
     ) {
         for loaded in &mut self.packs {
-            if packs.is_some_and(|names| !names.contains(&loaded.sketch.pack)) {
+            if loaded.sketch.posting.is_some()
+                || packs.is_some_and(|names| !names.contains(&loaded.sketch.pack))
+            {
                 continue;
             }
             let LoadedSketch {
@@ -1014,6 +1229,47 @@ impl SketchSet {
                 }
             }
         }
+    }
+
+    /// Set each posting row's bit from `current(ID, sequence)`.
+    pub(super) fn activate_postings(&mut self, mut current: impl FnMut(u64, u64) -> bool) {
+        for loaded in &mut self.packs {
+            let LoadedSketch { sketch, live, .. } = loaded;
+            let Some(posting) = &sketch.posting else {
+                continue;
+            };
+            for (row, &sequence) in posting.sequences.iter().enumerate() {
+                set_bit(live, row, current(sketch.ids.get(row), sequence));
+            }
+        }
+    }
+
+    /// Drop every sketch, before loading a new view.
+    pub(super) fn clear(&mut self) {
+        let rebuilt = self.rebuilt;
+        *self = Self {
+            rebuilt,
+            ..Self::default()
+        };
+    }
+
+    /// Blocks queries can route, grouped by pack: rooted canonical blocks
+    /// and every posting block.
+    pub(super) fn routable_blocks<'a>(&'a self, root: &'a Root) -> Vec<&'a BlockRef> {
+        let mut blocks = Vec::new();
+        for loaded in &self.packs {
+            match &loaded.sketch.posting {
+                Some(posting) => blocks.extend(posting.references.iter()),
+                None => blocks.extend(
+                    loaded
+                        .roots
+                        .iter()
+                        .flatten()
+                        .map(|&(run, ordinal)| &root.runs[run].blocks[ordinal]),
+                ),
+            }
+        }
+        blocks
     }
 }
 
@@ -1107,6 +1363,11 @@ impl<S: ObjectStore> View<S> {
         if k == 0 {
             return Ok((Vec::new(), RemoteReads::default()));
         }
+        if self.root.clustered.is_some() && self.cluster.is_none() {
+            return Err(Error::Corrupt(
+                "clustered view unavailable; rebuild it with a conversion".into(),
+            ));
+        }
         let mut heap = BinaryHeap::new();
         let mut resident = false;
         let mut reads = match filter {
@@ -1123,7 +1384,8 @@ impl<S: ObjectStore> View<S> {
                 for loaded in &self.sketches.packs {
                     let sketch = &loaded.sketch;
                     for (index, &row) in sketch.resident_rows.iter().enumerate() {
-                        if loaded.is_live(row as usize) {
+                        let row = row as usize;
+                        if self.row_current(loaded, row) {
                             let vector = &sketch.resident_vectors
                                 [index * dimensions..(index + 1) * dimensions];
                             consider(
@@ -1131,7 +1393,7 @@ impl<S: ObjectStore> View<S> {
                                 k,
                                 self.config,
                                 &query,
-                                sketch.ids.get(row as usize),
+                                sketch.ids.get(row),
                                 vector,
                             );
                         }
@@ -1189,6 +1451,28 @@ impl<S: ObjectStore> View<S> {
         Ok((results, reads))
     }
 
+    /// Whether a loaded sketch row is a current version queries may return.
+    fn row_current(&self, loaded: &LoadedSketch, row: usize) -> bool {
+        loaded.is_live(row)
+            && loaded.sketch.posting.as_ref().is_none_or(|posting| {
+                posting_current(
+                    &self.tail,
+                    &self.latest,
+                    loaded.sketch.ids.get(row),
+                    posting.sequences[row],
+                )
+            })
+    }
+
+    /// The root block or posting block a sketch block describes.
+    fn block_ref(&self, slot: usize, index: usize) -> Option<&BlockRef> {
+        let loaded = &self.sketches.packs[slot];
+        match &loaded.sketch.posting {
+            Some(posting) => posting.references.get(index),
+            None => loaded.roots[index].map(|(run, ordinal)| &self.root.runs[run].blocks[ordinal]),
+        }
+    }
+
     fn route_and_rerank(
         &self,
         query: &[f32],
@@ -1204,23 +1488,66 @@ impl<S: ObjectStore> View<S> {
             ));
         }
         // Without a cache no candidate can be read locally.
-        let ranked = match self.cache {
-            Some(_) => self.route(query, budget.blocks.max(budget.local_blocks), filter),
-            None => self.route(query, budget.blocks, filter),
+        let candidates = match self.cache {
+            Some(_) => budget.blocks.max(budget.local_blocks),
+            None => budget.blocks,
         };
-        self.rerank(query, k, &ranked, budget, (filter, options), heap)
+        let (ranked, remote) = match &self.cluster {
+            // Every live block of the probed postings is a candidate, ranked
+            // with the canonical candidates newer than the view.
+            Some(cluster) => {
+                let probed = cluster.probe(self.config.metric, query, self.probes);
+                let postings: usize = self
+                    .sketches
+                    .packs
+                    .iter()
+                    .filter_map(|loaded| loaded.sketch.posting.as_ref())
+                    .flat_map(|posting| &posting.clusters)
+                    .filter(|cluster| probed.contains(cluster))
+                    .count();
+                let ranked =
+                    self.route_within(query, postings.saturating_add(candidates), filter, &probed);
+                let remote = ranked.len();
+                (ranked, remote)
+            }
+            None => (
+                self.route_within(query, candidates, filter, &[]),
+                budget.blocks,
+            ),
+        };
+        self.rerank(query, k, &ranked, (budget, remote), (filter, options), heap)
     }
 
     /// The `max_blocks` rooted blocks with the smallest minimum approximate
     /// live-row distance, ordered by (distance, pack slot, block).
+    #[cfg(test)]
     fn route(
         &self,
         query: &[f32],
         max_blocks: usize,
         filter: &[(&str, &str)],
     ) -> Vec<(f64, usize, usize)> {
+        self.route_within(query, max_blocks, filter, &[])
+    }
+
+    /// The `max_blocks` routable blocks with the smallest minimum approximate
+    /// current-row distance, ordered by (distance, pack slot, block). Rooted
+    /// canonical blocks and the posting blocks of the `probed` clusters are
+    /// routable.
+    fn route_within(
+        &self,
+        query: &[f32],
+        max_blocks: usize,
+        filter: &[(&str, &str)],
+        probed: &[u32],
+    ) -> Vec<(f64, usize, usize)> {
         let packs = &self.sketches.packs;
         let (config, query) = (self.config, query);
+        let (tail, latest) = (&*self.tail, &*self.latest);
+        let eligible = |loaded: &LoadedSketch, index: usize| match &loaded.sketch.posting {
+            Some(posting) => probed.contains(&posting.clusters[index]),
+            None => loaded.roots[index].is_some(),
+        };
         let level = |minimum: f32, scale: f32, axis: usize, code: usize| {
             let difference =
                 f64::from(minimum) + f64::from(scale) * code as f64 - f64::from(query[axis]);
@@ -1234,6 +1561,7 @@ impl<S: ObjectStore> View<S> {
         let mut order: Vec<(f64, usize)> = packs
             .iter()
             .enumerate()
+            .filter(|(_, loaded)| (0..loaded.sketch.blocks.len()).any(|i| eligible(loaded, i)))
             .map(|(slot, loaded)| {
                 let sketch = &loaded.sketch;
                 let bound = (0..config.dimensions)
@@ -1254,7 +1582,7 @@ impl<S: ObjectStore> View<S> {
             })
             .collect();
         order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        let threads = self.query_threads.clamp(1, packs.len().max(1));
+        let threads = self.query_threads.clamp(1, order.len().max(1));
         let order_by = |a: &(f64, usize, usize), b: &(f64, usize, usize)| {
             a.0.total_cmp(&b.0).then((a.1, a.2).cmp(&(b.1, b.2)))
         };
@@ -1262,10 +1590,12 @@ impl<S: ObjectStore> View<S> {
         // its partial sum exceeds both its block's best and the current last
         // kept block; sums of nonnegative terms never decrease, so kept block
         // scores equal those of a full scan and the selection is identical.
+        // A posting row's directory check runs only when it would lower its
+        // block's best, so stale copies cost little.
         let score = |thread: usize| {
             let width = code_bytes(config.dimensions);
             let mut table = vec![[0_f64; 32]; config.dimensions];
-            let mut top: Vec<(f64, usize, usize)> = Vec::with_capacity(max_blocks + 1);
+            let mut top: Vec<(f64, usize, usize)> = Vec::new();
             for &(bound, slot) in order.iter().skip(thread).step_by(threads) {
                 let threshold = |top: &Vec<(f64, usize, usize)>| {
                     if top.len() < max_blocks {
@@ -1303,7 +1633,7 @@ impl<S: ObjectStore> View<S> {
                     }
                 }
                 for (index, block) in sketch.blocks.iter().enumerate() {
-                    if loaded.roots[index].is_none() {
+                    if !eligible(loaded, index) {
                         continue;
                     }
                     let limit = threshold(&top);
@@ -1319,7 +1649,16 @@ impl<S: ObjectStore> View<S> {
                                 &table,
                                 best.min(limit),
                             ) {
-                                best = best.min(distance);
+                                if sketch.posting.as_ref().is_none_or(|posting| {
+                                    posting_current(
+                                        tail,
+                                        latest,
+                                        sketch.ids.get(row),
+                                        posting.sequences[row],
+                                    )
+                                }) {
+                                    best = best.min(distance);
+                                }
                             }
                         }
                     }
@@ -1353,29 +1692,39 @@ impl<S: ObjectStore> View<S> {
         ranked
     }
 
+    /// Read and exactly rerank ranked blocks. In rank order, cached
+    /// candidates are read locally up to `budget.local_blocks`; the other
+    /// candidates among the first `remote` are charged against the remote
+    /// request and byte limits, and every routable block inside a chosen
+    /// span is reranked too.
     fn rerank(
         &self,
         query: &[f32],
         k: usize,
         ranked: &[(f64, usize, usize)],
-        budget: ReadBudget,
+        (budget, remote_candidates): (ReadBudget, usize),
         selection: (&[(&str, &str)], QueryOptions),
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<RemoteReads> {
         let (filter, options) = selection;
-        // In rank order, cached candidates are read locally up to the local
-        // limit; the other candidates among the first `budget.blocks` are
-        // charged against the remote request and byte limits.
-        let mut targets = Vec::new();
+        // Each target is `(pack slot, sketch block, current rows)`.
+        let mut targets: Vec<(usize, usize, usize)> = Vec::new();
         let mut references = Vec::new();
         let mut fetched = Vec::new();
         let mut remote = Vec::new();
+        let current_rows = |slot: usize, index: usize| {
+            let loaded = &self.sketches.packs[slot];
+            let block = &loaded.sketch.blocks[index];
+            (block.start..block.end)
+                .filter(|&row| self.row_current(loaded, row))
+                .count()
+        };
         {
             let mut cache = self.cache.as_deref().map(lock_cache).transpose()?;
             for (rank, &(_, slot, index)) in ranked.iter().enumerate() {
-                let loaded = &self.sketches.packs[slot];
-                let (run, ordinal) = loaded.roots[index].expect("routed blocks are rooted");
-                let reference = &self.root.runs[run].blocks[ordinal];
+                let reference = self
+                    .block_ref(slot, index)
+                    .expect("routed blocks are routable");
                 let hit = match cache.as_mut() {
                     Some(cache) if fetched.len() < budget.local_blocks => {
                         cache.lookup(reference)?
@@ -1384,18 +1733,18 @@ impl<S: ObjectStore> View<S> {
                 };
                 match hit {
                     Some((bytes, source)) => {
-                        targets.push((run, ordinal, loaded.live_rows(index)));
+                        targets.push((slot, index, current_rows(slot, index)));
                         references.push(reference);
                         fetched.push((super::Slice::from(bytes), source));
                     }
-                    None if rank < budget.blocks => remote.push(reference),
+                    None if rank < remote_candidates => remote.push(reference),
                     None => {}
                 }
             }
         }
         let local = targets.len();
         let ranges = choose(&remote, budget);
-        // Every rooted block inside a chosen span and not already read
+        // Every routable block inside a chosen span and not already read
         // locally, in span and offset order.
         for &(object, offset, length, _) in &ranges {
             let slot = ranked
@@ -1404,74 +1753,91 @@ impl<S: ObjectStore> View<S> {
                 .map(|&(_, slot, _)| slot)
                 .expect("each span comes from a candidate");
             let loaded = &self.sketches.packs[slot];
-            let mut inside: Vec<_> = loaded
-                .roots
-                .iter()
-                .enumerate()
-                .filter_map(|(index, root)| {
-                    let (run, ordinal) = (*root)?;
-                    let reference = &self.root.runs[run].blocks[ordinal];
+            let mut inside: Vec<_> = (0..loaded.sketch.blocks.len())
+                .filter_map(|index| {
+                    let reference = self.block_ref(slot, index)?;
                     (reference.offset >= offset
                         && reference.offset + reference.length <= offset + length
                         && !targets[..local]
                             .iter()
-                            .any(|&(r, o, _)| (r, o) == (run, ordinal)))
-                    .then(|| {
-                        (
-                            reference.offset,
-                            (run, ordinal, loaded.live_rows(index)),
-                            reference,
-                        )
-                    })
+                            .any(|&(s, i, _)| (s, i) == (slot, index)))
+                    .then_some((reference.offset, index, reference))
                 })
                 .collect();
             inside.sort_by_key(|&(at, _, _)| at);
-            for (_, target, reference) in inside {
-                targets.push(target);
+            for (_, index, reference) in inside {
+                targets.push((slot, index, current_rows(slot, index)));
                 references.push(reference);
             }
         }
         let mut reads = RemoteReads::default();
         fetched.extend(self.fetch_blocks(&references[local..], &ranges, &mut reads)?);
         let (config, latest, tail) = (self.config, &self.latest, &self.tail);
+        let packs = &self.sketches.packs;
+        let boundary = self.cluster.as_ref().map(|cluster| cluster.boundary);
+        // Whether a record of target `index` with this ID and sequence is a
+        // current version to score: `Ok(Some(true))` for a live put,
+        // `Ok(Some(false))` for its current tombstone, `Ok(None)` to skip.
+        let current = |index: usize, id: u64, sequence: u64, put: bool| -> Result<Option<bool>> {
+            let (slot, block, _) = targets[index];
+            let disagree = || {
+                Err(Error::Corrupt(
+                    "selective block disagrees with latest-ID directory".into(),
+                ))
+            };
+            if tail.contains_key(&id) {
+                return Ok(None);
+            }
+            let Some(location) = latest.get(&id) else {
+                return Ok(None);
+            };
+            if location.entry.sequence != sequence {
+                return Ok(None);
+            }
+            let loaded = &packs[slot];
+            match loaded.sketch.posting {
+                // A posting copy is a put of exactly its committed version.
+                Some(_) if !put || location.entry.deleted => disagree(),
+                Some(_) => Ok(Some(true)),
+                None => {
+                    let (run, ordinal) = loaded.roots[block].expect("targets are routable");
+                    if location.run != run || location.entry.block as usize != ordinal {
+                        return Ok(None);
+                    }
+                    if put == location.entry.deleted {
+                        return disagree();
+                    }
+                    // A clustered view's postings serve versions it covers.
+                    if boundary.is_some_and(|boundary| sequence <= boundary) {
+                        return Ok(None);
+                    }
+                    Ok(Some(put))
+                }
+            }
+        };
         // Current records of one authenticated block, as a local top-k.
         let scan = |index: usize, block: Block| -> Result<Vec<Ranked>> {
-            let (run, ordinal, live) = targets[index];
+            let (_, _, live) = targets[index];
             let mut local = BinaryHeap::new();
             let mut seen = 0;
             for record in block.records {
                 let id = record.id();
-                if tail.contains_key(&id) {
+                let put = matches!(record.mutation, Mutation::Put { .. });
+                if current(index, id, record.sequence, put)? != Some(true) {
                     continue;
                 }
-                let Some(location) = latest.get(&id) else {
-                    continue;
-                };
-                if location.run != run
-                    || location.entry.block as usize != ordinal
-                    || location.entry.sequence != record.sequence
+                seen += 1;
+                if let Mutation::Put {
+                    vector, metadata, ..
+                } = record.mutation
                 {
-                    continue;
-                }
-                match record.mutation {
-                    Mutation::Put {
-                        vector, metadata, ..
-                    } if !location.entry.deleted => {
-                        seen += 1;
-                        if crate::matches_filter(&metadata, filter) {
-                            consider_with(&mut local, k, config, query, id, &vector, || {
-                                (
-                                    options.include_metadata.then(|| metadata.clone()),
-                                    options.include_vector.then(|| vector.clone()),
-                                )
-                            });
-                        }
-                    }
-                    Mutation::Delete { .. } if location.entry.deleted => {}
-                    _ => {
-                        return Err(Error::Corrupt(
-                            "selective block disagrees with latest-ID directory".into(),
-                        ))
+                    if crate::matches_filter(&metadata, filter) {
+                        consider_with(&mut local, k, config, query, id, &vector, || {
+                            (
+                                options.include_metadata.then(|| metadata.clone()),
+                                options.include_vector.then(|| vector.clone()),
+                            )
+                        });
                     }
                 }
             }
@@ -1485,7 +1851,7 @@ impl<S: ObjectStore> View<S> {
         // Version 2 blocks stream records from a reused buffer; version 1
         // blocks decode to a `Block` first.
         let stream = |index: usize, bytes: &[u8]| -> Result<Vec<Ranked>> {
-            let (run, ordinal, live) = targets[index];
+            let (_, _, live) = targets[index];
             let reference = references[index];
             let mut local = BinaryHeap::new();
             let (mut seen, mut first, mut last) = (0, None, 0);
@@ -1493,39 +1859,21 @@ impl<S: ObjectStore> View<S> {
             let (partition, count) = codec::visit(config, bytes, |view| {
                 first.get_or_insert(view.id);
                 last = view.id;
-                if tail.contains_key(&view.id) {
+                if current(index, view.id, view.sequence, view.put.is_some())? != Some(true) {
                     return Ok(());
                 }
-                let Some(location) = latest.get(&view.id) else {
-                    return Ok(());
-                };
-                if location.run != run
-                    || location.entry.block as usize != ordinal
-                    || location.entry.sequence != view.sequence
-                {
-                    return Ok(());
-                }
-                match view.put {
-                    Some((components, entries, metadata)) if !location.entry.deleted => {
-                        seen += 1;
-                        if codec::metadata_matches(entries, metadata, filter) {
-                            codec::components(components, &mut vector);
-                            consider_with(&mut local, k, config, query, view.id, &vector, || {
-                                (
-                                    options
-                                        .include_metadata
-                                        .then(|| codec::metadata(entries, metadata)),
-                                    options.include_vector.then(|| vector.clone()),
-                                )
-                            });
-                        }
-                    }
-                    None if location.entry.deleted => {}
-                    _ => {
-                        return Err(Error::Corrupt(
-                            "selective block disagrees with latest-ID directory".into(),
-                        ))
-                    }
+                seen += 1;
+                let (components, entries, metadata) = view.put.expect("current puts");
+                if codec::metadata_matches(entries, metadata, filter) {
+                    codec::components(components, &mut vector);
+                    consider_with(&mut local, k, config, query, view.id, &vector, || {
+                        (
+                            options
+                                .include_metadata
+                                .then(|| codec::metadata(entries, metadata)),
+                            options.include_vector.then(|| vector.clone()),
+                        )
+                    });
                 }
                 Ok(())
             })?;
@@ -1600,6 +1948,16 @@ impl<S: ObjectStore> View<S> {
         }
         Ok(reads)
     }
+}
+
+/// Whether a posting copy of `(id, sequence)` is the current version: no
+/// acknowledged tail write shadows it and the latest-ID directory holds
+/// exactly that live version.
+pub(super) fn posting_current(tail: &Tail, latest: &Directory, id: u64, sequence: u64) -> bool {
+    !tail.contains_key(&id)
+        && latest
+            .get(&id)
+            .is_some_and(|location| location.entry.sequence == sequence && !location.entry.deleted)
 }
 
 #[cfg(test)]
@@ -1895,6 +2253,146 @@ mod tests {
                 ),
                 "seed {seed} length {length}"
             );
+        }
+    }
+
+    /// `GLSKT003` posting sketches round trip, carry per-block clusters and
+    /// fingerprints and per-row sequences, bind only to matching catalog
+    /// digests, and reject truncation, appended bytes and other magics.
+    #[test]
+    fn posting_sketches_round_trip_and_reject_mutations() {
+        let seed = 0x3703_5ce7_c400_0003_u64;
+        let mut rng = Rng(seed);
+        for (case, routed) in [false, true].into_iter().enumerate() {
+            let config = Config {
+                dimensions: 5,
+                metric: Metric::SquaredEuclidean,
+            };
+            let options = SegmentedOptions {
+                resident_filter: Some(("kind".into(), "resident".into())),
+                routed_keys: if routed {
+                    vec!["kind".into()]
+                } else {
+                    Vec::new()
+                },
+            };
+            let pack = format!("sgpack-posting-{case}");
+            let blocks: Vec<_> = [4_u32, 9, 9]
+                .iter()
+                .enumerate()
+                .map(|(index, &cluster)| {
+                    let records = (0..1 + rng.next() % 6)
+                        .map(|row| BlockRecord {
+                            sequence: 1 + rng.next() % 1_000,
+                            mutation: Mutation::Put {
+                                id: index as u64 * 1_000 + row * 7,
+                                vector: (0..5).map(|_| rng.value()).collect(),
+                                metadata: if row % 2 == 0 {
+                                    BTreeMap::from([("kind".into(), "resident".into())])
+                                } else {
+                                    BTreeMap::new()
+                                },
+                            },
+                        })
+                        .collect();
+                    Block::new(config, cluster, records).unwrap()
+                })
+                .collect();
+            let (_, refs) = encode_pack(&pack, config, &blocks).unwrap();
+            let pairs: Vec<_> = refs.iter().zip(&blocks).collect();
+            let fingerprints = BTreeMap::from([(4, [4; 32]), (9, [9; 32])]);
+            let digest = [case as u8; 32];
+            let sketch =
+                PackSketch::build_with(config, &options, &pack, &pairs, Some(&fingerprints))
+                    .unwrap();
+            let bytes = sketch.encode(config, &digest);
+            assert_eq!(&bytes[..8], POSTING_MAGIC, "seed {seed:#x}");
+            let decode = |candidate: &[u8], posting: bool| {
+                PackSketch::decode_with(
+                    candidate,
+                    config,
+                    &digest,
+                    &pack,
+                    &options.routed_keys,
+                    posting,
+                )
+            };
+            let mut decoded = decode(&bytes, true).unwrap();
+            assert_eq!(decoded.encode(config, &digest), bytes, "seed {seed:#x}");
+            let posting = decoded.posting().unwrap();
+            assert_eq!(posting.clusters, [4, 9, 9]);
+            assert_eq!(posting.fingerprints[1], [9; 32]);
+            let expected: Vec<u64> = blocks
+                .iter()
+                .flat_map(|block| block.records.iter().map(|record| record.sequence))
+                .collect();
+            assert_eq!(posting.sequences, expected, "seed {seed:#x}");
+            assert!(decode(&bytes, false).is_err(), "seed {seed:#x}");
+            for length in 0..bytes.len() {
+                assert!(decode(&bytes[..length], true).is_err(), "seed {seed:#x}");
+            }
+            let mut appended = bytes.clone();
+            appended.push(0);
+            assert!(decode(&appended, true).is_err(), "seed {seed:#x}");
+            for flip in 0..64 {
+                let mut changed = bytes.clone();
+                let offset = rng.next() as usize % changed.len();
+                changed[offset] ^= 1 << (rng.next() % 8);
+                let outcome = std::panic::catch_unwind(|| decode(&changed, true));
+                let decoded = outcome.unwrap_or_else(|_| {
+                    panic!("posting sketch panicked: seed {seed:#x}, flip {flip} at {offset}")
+                });
+                if let Ok(sketch) = decoded {
+                    assert_eq!(sketch.encode(config, &digest), changed, "seed {seed:#x}");
+                }
+            }
+            let layout: Vec<_> = refs
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.offset,
+                        reference.length,
+                        digest_bytes(&reference.sha256).unwrap(),
+                    )
+                })
+                .collect();
+            let mut wrong = layout.clone();
+            wrong[2].2[0] ^= 1;
+            assert!(decoded.clone().bind_posting(1_000, &wrong).is_err());
+            assert!(decoded.clone().bind_posting(1_000, &layout[..2]).is_err());
+            decoded.bind_posting(1_000, &layout).unwrap();
+            let bound = &decoded.posting().unwrap().references;
+            for (reference, original) in bound.iter().zip(&refs) {
+                assert_eq!(
+                    (reference.first_id, reference.last_id, reference.rows),
+                    (original.first_id, original.last_id, original.rows)
+                );
+                assert_eq!(reference.partition, original.partition);
+                assert_eq!(reference.sha256, original.sha256);
+            }
+            // A tombstone or an unknown cluster cannot form a posting.
+            let unknown = BTreeMap::from([(4, [4; 32])]);
+            assert!(
+                PackSketch::build_with(config, &options, &pack, &pairs, Some(&unknown)).is_err()
+            );
+            let tombstone = Block::new(
+                config,
+                4,
+                vec![BlockRecord {
+                    sequence: 3,
+                    mutation: Mutation::Delete { id: 1 },
+                }],
+            )
+            .unwrap();
+            let (_, refs) = encode_pack(&pack, config, std::slice::from_ref(&tombstone)).unwrap();
+            assert!(PackSketch::build_with(
+                config,
+                &options,
+                &pack,
+                &[(&refs[0], &tombstone)],
+                Some(&fingerprints)
+            )
+            .is_err());
         }
     }
 

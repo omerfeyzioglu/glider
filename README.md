@@ -86,7 +86,7 @@ writer at the object store, so a paused old process can never commit again
 ## Operations
 
 `glider-admin` uses the server's `GLIDER_*` storage, collection and cache
-settings. Stop the server before running `status` or `backup` against its
+settings. Stop the server before running `status`, `backup` or `convert` against its
 namespace: each command acquires the writer lease and takes the collection
 over like a server start, so while a server renews the lease it waits one
 lease duration and then fails with a lease error. Each command prints one JSON object. Backup destinations must be
@@ -105,13 +105,22 @@ GLIDER_DATA_DIR=./restored GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red 
 python3 tools/drills.py --seed 29
 ```
 
+`convert [CENTROIDS]` seals the log tail of the stopped namespace, builds the
+M37 clustered view from its sealed rows (or rebuilds it as a new epoch,
+which also repairs a missing or corrupt view) and publishes it with one
+root; the server then
+answers selective queries from cluster postings
+([design](docs/M37_CLUSTERED_INDEX.md)). Without CENTROIDS the count targets
+about 4,000 live rows per cluster.
+
 `restore` copies a backup or stopped namespace into a fresh empty destination
 and validates it; the first server start there takes it over. Never reuse a
 failed destination. A crash needs no restore. The local drill builds release
 binaries offline, kills the server during writes and restarts it on the same
 directory, freezes a server while a second one takes over and checks the
 resumed one cannot write, tests cache loss, then backs up and restores the
-acknowledged state; it reports PASS/FAIL with its seed.
+acknowledged state, converts the restored copy and serves it; it reports
+PASS/FAIL with its seed.
 
 - [Design](DESIGN.md): current architecture, guarantees and target direction.
 - [Roadmap](ROADMAP.md): milestone status, acceptance criteria and next work.
