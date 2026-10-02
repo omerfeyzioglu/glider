@@ -252,7 +252,12 @@ New blocks use block format version 2: the magic `GLB2`, the raw length as
 u32, then a zstd frame of a binary layout (dimensions, metric, partition,
 record count; per record ID, sequence, kind, little-endian f32 components and
 length-prefixed UTF-8 metadata in key order). Raw layouts are at most 120 KiB
-so a compressed block stays within 128 KiB. Readers accept version 1 JSON
+so a compressed block stays within 128 KiB. A put whose row alone exceeds
+that limit can never be sealed, so the write path refuses it with `Invalid`
+before acknowledgement, sizing the row with the same function the seal
+planner uses; recovery still replays such rows from logs written by older
+binaries, and a seal containing one fails until a later write supersedes it
+in the tail. Readers accept version 1 JSON
 blocks and version 2 by magic; both are authenticated by the root's block
 digest before decoding, and version 2 decoding validates configuration, ID
 order, sequences, finite components, metadata encoding and length. SIFT
@@ -1356,7 +1361,9 @@ through the `admission::Engine` trait) to a single blocking committer thread.
 Cloneable clients share a FIFO of writes, exact queries, revision observations
 and result lookups; an engine that publishes views runs queries and document
 reads on reader threads instead (M34 below). At most eight commands and
-320 KiB of encoded payload are admitted by default, including active work. Count and byte exhaustion returns
+1 MiB of encoded payload (`retry::MAX_REQUEST_BYTES`, so every valid request is
+admissible when nothing else is charged) are admitted by default, including
+active work. Count and byte exhaustion returns
 `Overloaded` before retaining a normalized payload; inputs are validated and
 caller-controlled spare capacities are discarded. The queue lock covers bounded
 normalization and bookkeeping, never storage or search. Encoded bytes are an
@@ -1585,9 +1592,9 @@ also erase the only remaining state without a detectable gap. Detecting such ext
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-Independently searchable persisted ANN partitions, metadata indexes, automatic
-exact-versus-IVF planning, sharding, replication, distributed consensus,
-multi-node execution, quantization, networking, SQL compatibility,
-authentication/authorization, production hardening, and GPU execution are outside
-the current implementation. These are not permanent restrictions; additions
+Metadata indexes beyond the declared resident predicate and routed keys,
+automatic exact-versus-IVF planning, sharding, replication, read replicas,
+distributed consensus, multi-node execution, quantization beyond the routing
+sketches, SQL compatibility, authorization beyond one static bearer token, TLS
+and GPU execution are outside the current implementation. These are not permanent restrictions; additions
 require justified design decisions and must preserve the invariants above.
