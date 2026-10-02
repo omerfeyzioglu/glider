@@ -125,7 +125,10 @@ impl Directory {
         let mut push = |slot: Slot, pages: &mut Vec<Arc<Vec<Slot>>>| {
             page.push(slot);
             if page.len() == PAGE_SLOTS {
-                pages.push(Arc::new(std::mem::replace(&mut page, Vec::with_capacity(PAGE_SLOTS))));
+                pages.push(Arc::new(std::mem::replace(
+                    &mut page,
+                    Vec::with_capacity(PAGE_SLOTS),
+                )));
             }
         };
         let mut fresh = fresh.into_iter().peekable();
@@ -152,7 +155,6 @@ impl Directory {
             previous = Some(id);
             push(Slot::new(id, location), &mut pages);
         }
-        drop(push);
         if !page.is_empty() {
             pages.push(Arc::new(page));
         }
@@ -240,7 +242,7 @@ mod tests {
 
     #[test]
     fn linear_and_incremental_merges_agree() {
-        let seed = 0x0d1e_c7u64;
+        let seed = 0x000d_1ec7_u64;
         let mut state = seed;
         let mut next = move || {
             state ^= state << 13;
@@ -261,9 +263,10 @@ mod tests {
             }
             assert_eq!(linear.len(), incremental.len(), "seed {seed:#x} run {run}");
             assert!(
-                linear.iter().map(|(id, l)| (id, l.run)).eq(incremental
+                linear
                     .iter()
-                    .map(|(id, l)| (id, l.run))),
+                    .map(|(id, l)| (id, l.run))
+                    .eq(incremental.iter().map(|(id, l)| (id, l.run))),
                 "seed {seed:#x} run {run}"
             );
             assert!(linear.pages.iter().all(|page| !page.is_empty()));
