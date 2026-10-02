@@ -91,6 +91,9 @@ pub struct ServingCounters {
     pub forced_seals: u64,
     pub sketch_compactions: u64,
     pub warm_steps: u64,
+    /// M37 posting merge rounds started and their steps.
+    pub merge_starts: u64,
+    pub merge_steps: u64,
 }
 
 pub struct SegmentedServing<S: ObjectStore> {
@@ -99,6 +102,9 @@ pub struct SegmentedServing<S: ObjectStore> {
     maintenance_time: Duration,
     /// A root changed since prune/reclaim last found no candidate.
     scan_pending: bool,
+    /// A seal or merge changed the clustered catalog since the last merge
+    /// plan found nothing due.
+    merge_pending: bool,
     counters: ServingCounters,
     last_unit: &'static str,
 }
@@ -145,6 +151,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
             options,
             maintenance_time: Duration::ZERO,
             scan_pending: true,
+            merge_pending: true,
             counters: ServingCounters::default(),
             last_unit: "none",
         })
@@ -193,6 +200,15 @@ impl<S: ObjectStore> SegmentedServing<S> {
             db.seal_step()?;
             counters.seal_steps += 1;
             self.scan_pending |= db.seal.is_none();
+            self.merge_pending |= db.seal.is_none();
+            return Ok(true);
+        }
+        if db.merge.is_some() {
+            self.last_unit = "merge_step";
+            db.merge_step()?;
+            counters.merge_steps += 1;
+            self.scan_pending |= db.merge.is_none();
+            self.merge_pending |= db.merge.is_none();
             return Ok(true);
         }
         if db.prune.is_some() {
@@ -227,6 +243,14 @@ impl<S: ObjectStore> SegmentedServing<S> {
             counters.consolidations += 1;
             self.scan_pending = true;
             return Ok(true);
+        }
+        if self.merge_pending {
+            self.last_unit = "merge_plan";
+            if db.start_merge()? {
+                counters.merge_starts += 1;
+                return Ok(true);
+            }
+            self.merge_pending = false;
         }
         if self.scan_pending {
             self.last_unit = "prune_reclaim_scan";
@@ -271,6 +295,9 @@ impl<S: ObjectStore> SegmentedServing<S> {
             while self.db.reclaim.is_some() {
                 self.db.reclaim_step()?;
             }
+            while self.db.merge.is_some() {
+                self.db.merge_step()?;
+            }
             // Finish a seal started while idle; it may already free the
             // tail. Only then start another.
             while self.db.seal.is_some() {
@@ -284,6 +311,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         self.maintenance_time += started.elapsed();
         result?;
         self.scan_pending = true;
+        self.merge_pending = true;
         Ok(())
     }
 
@@ -326,6 +354,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
         for key in &keys {
             copy(&mut destination, key)?;
         }
+        let mut copied = std::collections::BTreeSet::new();
         for (pack, blocks) in &packs {
             let bytes = db
                 .store
@@ -343,6 +372,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
                 }
             }
             destination.create(pack, &bytes)?;
+            copied.insert(*pack);
         }
         if let Some(view) = &db.root.clustered {
             let cluster = db.cluster.as_ref().ok_or_else(|| {
@@ -368,7 +398,10 @@ impl<S: ObjectStore> SegmentedServing<S> {
                         "backup posting pack digest mismatch: {pack}"
                     )));
                 }
-                destination.create(pack, &bytes)?;
+                // A clustered seal's packs are canonical and posting packs.
+                if !copied.contains(pack) {
+                    destination.create(pack, &bytes)?;
+                }
             }
         }
         copy(&mut destination, "metadata")?;
@@ -531,6 +564,8 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
                     counters.sketch_compactions,
                 ),
                 ("glider_segmented_warm_steps_total", counters.warm_steps),
+                ("glider_segmented_merge_starts_total", counters.merge_starts),
+                ("glider_segmented_merge_steps_total", counters.merge_steps),
                 ("glider_cache_ram_hits_total", cache.ram_hits),
                 ("glider_cache_nvme_hits_total", cache.nvme_hits),
                 ("glider_cache_remote_fetches_total", cache.remote_fetches),

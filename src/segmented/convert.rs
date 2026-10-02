@@ -155,7 +155,7 @@ fn object_ref(key: String, bytes: &[u8]) -> ObjectRef {
 }
 
 /// Nearest center of each vector, on up to eight scoped threads.
-fn assign(metric: Metric, centers: &[Vec<f32>], vectors: &[&[f32]]) -> Vec<u16> {
+pub(super) fn assign(metric: Metric, centers: &[Vec<f32>], vectors: &[&[f32]]) -> Vec<u16> {
     let threads = std::thread::available_parallelism()
         .map_or(1, |threads| threads.get())
         .clamp(1, 8);
@@ -176,50 +176,46 @@ fn assign(metric: Metric, centers: &[Vec<f32>], vectors: &[&[f32]]) -> Vec<u16> 
     })
 }
 
-/// Split each cluster's ID-sorted rows into blocks of at most 170 rows and
-/// the raw block limit, then place clusters in ID order into packs of at
-/// most 12 blocks and the raw pack bound. A cluster that does not fit the
-/// open pack's remaining room starts a new pack, so it spans packs only if
-/// it exceeds one; its blocks are contiguous either way.
-fn layout(
-    config: crate::Config,
-    buffers: Vec<(u32, Vec<BlockRecord>)>,
-) -> Result<VecDeque<Vec<Block>>> {
+/// One planned posting block: an index into the planned clusters and the
+/// range of that cluster's ID-sorted rows it holds.
+pub(super) type PlannedBlock = (usize, Range<usize>);
+
+/// Split each cluster's ID-sorted rows, given as raw record lengths, into
+/// blocks of at most 170 rows and the raw block limit, then place clusters in
+/// the given order into packs of at most 12 blocks and the raw pack bound.
+/// A cluster that does not fit the open pack's remaining room starts a new
+/// pack, so it spans packs only if it exceeds one; its blocks are contiguous
+/// either way. Empty clusters get no block.
+pub(super) fn plan_layout(clusters: &[Vec<usize>]) -> Result<Vec<Vec<PlannedBlock>>> {
     let empty = codec::block_len([]);
-    let mut packs = VecDeque::new();
+    let mut packs = Vec::new();
     let (mut open, mut open_raw) = (Vec::new(), 0);
-    for (cluster, mut rows) in buffers {
+    for (cluster, rows) in clusters.iter().enumerate() {
         if rows.is_empty() {
             continue;
         }
-        rows.sort_unstable_by_key(BlockRecord::id);
         let mut blocks = Vec::new();
-        let (mut current, mut raw) = (Vec::new(), empty);
-        for record in rows {
-            let length = codec::record_len(&record);
-            if !current.is_empty()
-                && (current.len() == BLOCK_ROWS || raw + length > codec::MAX_RAW_BLOCK_BYTES)
+        let (mut start, mut raw) = (0, empty);
+        for (row, &length) in rows.iter().enumerate() {
+            if row > start
+                && (row - start == BLOCK_ROWS || raw + length > codec::MAX_RAW_BLOCK_BYTES)
             {
-                blocks.push((Block::new(config, cluster, mem::take(&mut current))?, raw));
-                raw = empty;
+                blocks.push(((cluster, start..row), raw));
+                (start, raw) = (row, empty);
             }
             if empty + length > codec::MAX_RAW_BLOCK_BYTES {
-                return Err(Error::Invalid(format!(
-                    "segmented row {} exceeds block limit",
-                    record.id()
-                )));
+                return Err(Error::Invalid("segmented row exceeds block limit".into()));
             }
             raw += length;
-            current.push(record);
         }
-        blocks.push((Block::new(config, cluster, current)?, raw));
+        blocks.push(((cluster, start..rows.len()), raw));
         let total: usize = blocks.iter().map(|(_, raw)| raw).sum();
         let mut fits =
             open.len() + blocks.len() <= MAX_PACK_BLOCKS && open_raw + total <= MAX_PACK_RAW_BYTES;
         for (block, raw) in blocks {
             if !fits || open.len() == MAX_PACK_BLOCKS || open_raw + raw > MAX_PACK_RAW_BYTES {
                 if !open.is_empty() {
-                    packs.push_back(mem::take(&mut open));
+                    packs.push(mem::take(&mut open));
                     open_raw = 0;
                 }
                 fits = true;
@@ -229,7 +225,37 @@ fn layout(
         }
     }
     if !open.is_empty() {
-        packs.push_back(open);
+        packs.push(open);
+    }
+    Ok(packs)
+}
+
+/// [`plan_layout`] over owned records: sorts each cluster's rows by ID and
+/// returns the packs' blocks, each block's partition its cluster ID.
+pub(super) fn layout(
+    config: crate::Config,
+    mut buffers: Vec<(u32, Vec<BlockRecord>)>,
+) -> Result<VecDeque<Vec<Block>>> {
+    for (_, rows) in &mut buffers {
+        rows.sort_unstable_by_key(BlockRecord::id);
+    }
+    let lengths: Vec<Vec<usize>> = buffers
+        .iter()
+        .map(|(_, rows)| rows.iter().map(codec::record_len).collect())
+        .collect();
+    let plan = plan_layout(&lengths)?;
+    let mut rows: Vec<VecDeque<BlockRecord>> = buffers
+        .iter_mut()
+        .map(|(_, rows)| mem::take(rows).into())
+        .collect();
+    let mut packs = VecDeque::with_capacity(plan.len());
+    for planned in plan {
+        let mut blocks = Vec::with_capacity(planned.len());
+        for (cluster, range) in planned {
+            let records: Vec<_> = rows[cluster].drain(..range.len()).collect();
+            blocks.push(Block::new(config, buffers[cluster].0, records)?);
+        }
+        packs.push_back(blocks);
     }
     Ok(packs)
 }
