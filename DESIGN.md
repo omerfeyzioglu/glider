@@ -1330,8 +1330,19 @@ without changing the engine API; callers use blocking threads. Each S3 handle
 keeps one runtime worker active between synchronous calls so HTTP connection
 tasks process peer closure and pool expiration while the caller is idle. A
 current-thread runtime would suspend those tasks outside `block_on`, permitting
-stale pooled connections to survive a long idle period. This does not add
-automatic request retries or alter write acknowledgement and recovery.
+stale pooled connections to survive a long idle period. Write acknowledgement
+and recovery remain unchanged.
+
+The backend disables the client's global request retries. Each read (`get`,
+range and batched reads, and `list`) makes at most three complete attempts.
+It retries only transport request failures without a response (including closed
+connections and pre-response timeouts), response-body I/O failures, and HTTP
+500/502/503/504. A failed body discards its partial bytes and starts a fresh
+request; full GET envelopes and range results are validated before return.
+Listing starts from its first page again after a retryable page failure and
+never exposes partial results. HTTP 4xx, validation, corruption, and read-limit
+errors are not retried. The two retry delays use jitter around 50 ms and
+200 ms. Exhausted reads return the last error without poisoning the store.
 
 One bucket plus a nonempty, nonoverlapping namespace prefix identifies a database. The caller
 provisions the bucket, credentials and exclusive namespace ownership. The service
@@ -1379,7 +1390,8 @@ API; deployments must opt in and validate their serving/RSS budgets. This change
 no persisted format, write acknowledgement or publication protocol.
 
 Cloneable request metrics count transport-level GET, listing-page, PUT, DELETE and other
-attempts, request body bytes, HTTP error responses and transport errors. These
+attempts, request body bytes, HTTP error responses, transport errors, and
+additional read attempts (`read_retries`). These
 are not device I/O or latency measurements. MinIO integration tests exercise
 conditional creation, pagination, namespace isolation, response-loss uncertainty,
 late conditional requests, corruption, client process exit and abrupt server restart. They do not prove

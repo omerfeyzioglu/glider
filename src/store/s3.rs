@@ -16,6 +16,7 @@ use object_store::{
     RetryConfig,
 };
 use std::{
+    cell::Cell,
     future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -23,6 +24,52 @@ use std::{
     },
 };
 use tokio::runtime::{Builder, Runtime};
+
+tokio::task_local! {
+    static READ_FAILURE: Cell<Option<ReadFailure>>;
+}
+
+#[derive(Clone, Copy)]
+enum ReadFailure {
+    Transport(object_store::client::HttpErrorKind),
+    Status(u16),
+    Body,
+}
+
+fn retryable_read_failure(failure: Option<ReadFailure>) -> bool {
+    match failure {
+        Some(ReadFailure::Transport(kind)) => matches!(
+            kind,
+            object_store::client::HttpErrorKind::Connect
+                | object_store::client::HttpErrorKind::Request
+                | object_store::client::HttpErrorKind::Timeout
+                | object_store::client::HttpErrorKind::Interrupted
+        ),
+        Some(ReadFailure::Status(status)) => matches!(status, 500 | 502 | 503 | 504),
+        Some(ReadFailure::Body) => true,
+        None => false,
+    }
+}
+
+fn read_remote_error(error: object_store::Error) -> Error {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    let mut body_io = false;
+    while let Some(current) = source {
+        if current.downcast_ref::<HttpError>().is_some() {
+            body_io = true;
+            break;
+        }
+        source = current.source();
+    }
+    if body_io {
+        READ_FAILURE.with(|failure| {
+            if failure.get().is_none() {
+                failure.set(Some(ReadFailure::Body));
+            }
+        });
+    }
+    remote_error(error)
+}
 
 /// HTTP attempts, including failed requests and every listing page. Bytes are
 /// attempted request bodies (including envelopes), not physical storage traffic.
@@ -38,6 +85,8 @@ pub struct RequestCounts {
     /// HTTP client call failures; excludes later response-body consumption errors.
     pub transport_errors: u64,
     pub http_errors: u64,
+    /// Additional complete read attempts after retryable failures.
+    pub read_retries: u64,
 }
 /// Clone before giving the store to Database to observe request deltas afterward.
 #[derive(Debug, Default, Clone)]
@@ -106,7 +155,18 @@ impl HttpService for MeteredService {
             }
             counts.request_body_bytes += request.body().content_length() as u64;
         }
+        let is_read = request.method() == "GET";
         let response = self.inner.execute(request).await;
+        if is_read {
+            let failure = match &response {
+                Err(error) => Some(ReadFailure::Transport(error.kind())),
+                Ok(response) if !response.status().is_success() => {
+                    Some(ReadFailure::Status(response.status().as_u16()))
+                }
+                _ => None,
+            };
+            let _ = READ_FAILURE.try_with(|slot| slot.set(failure));
+        }
         let mut counts = self.metrics.0.lock().unwrap();
         match &response {
             Err(_) => counts.transport_errors += 1,
@@ -134,13 +194,13 @@ pub struct S3Store {
 }
 impl S3Store {
     /// Configure endpoint/region/credentials with the builder. This method forces
-    /// conditional writes, disables automatic retries and installs request metrics.
+    /// conditional writes, disables SDK retries and installs request metrics.
     /// It performs no requests; Database::open validates the namespace remotely.
     pub fn open(builder: AmazonS3Builder, namespace: &str) -> Result<Self> {
         Self::with_connector(builder, namespace, ReqwestConnector::default())
     }
     /// Supply a transport for bounded probes or fault injection. Conditional
-    /// publication, disabled retries and request metrics are still enforced.
+    /// publication, read-only retries and request metrics are still enforced.
     pub fn with_connector<C: HttpConnector>(
         builder: AmazonS3Builder,
         namespace: &str,
@@ -244,14 +304,43 @@ impl S3Store {
     /// Concurrent reads issued by one batched call.
     const READ_CONCURRENCY: usize = 16;
 
+    async fn retry_read<T, F, Fut>(&self, mut attempt: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        for retry in 0..3 {
+            if retry > 0 {
+                let base_ms = if retry == 1 { 50 } else { 200 };
+                let mut random = [0_u8; 1];
+                let _ = getrandom::getrandom(&mut random);
+                let delay_ms = base_ms / 2 + u64::from(random[0]) * base_ms / 255;
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                self.metrics.0.lock().unwrap().read_retries += 1;
+            }
+            let (result, failure) = READ_FAILURE
+                .scope(Cell::new(None), async {
+                    let result = attempt().await;
+                    let failure = READ_FAILURE.with(Cell::get);
+                    (result, failure)
+                })
+                .await;
+            match result {
+                Err(_) if retry < 2 && retryable_read_failure(failure) => {}
+                other => return other,
+            }
+        }
+        unreachable!("three read attempts return on the final iteration")
+    }
+
     async fn get_async(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.ready()?;
         let path = self.path(key)?;
-        {
+        self.retry_read(|| async {
             let result = match self.remote.get(&path).await {
                 Ok(result) => result,
                 Err(object_store::Error::NotFound { .. }) => return Ok(None),
-                Err(error) => return Err(remote_error(error)),
+                Err(error) => return Err(read_remote_error(error)),
             };
             if let Some(limits) = self.read_limits {
                 if result.meta.size > limits.object_bytes as u64 {
@@ -259,7 +348,7 @@ impl S3Store {
                 }
                 let mut stream = result.into_stream();
                 let mut bytes = Vec::new();
-                while let Some(chunk) = stream.try_next().await.map_err(remote_error)? {
+                while let Some(chunk) = stream.try_next().await.map_err(read_remote_error)? {
                     if chunk.len() > limits.object_bytes.saturating_sub(bytes.len()) {
                         return Err(read_limit("object body bytes"));
                     }
@@ -267,10 +356,11 @@ impl S3Store {
                 }
                 decode_envelope(&bytes, key).map(Some)
             } else {
-                let bytes = result.bytes().await.map_err(remote_error)?;
+                let bytes = result.bytes().await.map_err(read_remote_error)?;
                 decode_envelope(&bytes, key).map(Some)
             }
-        }
+        })
+        .await
     }
 
     async fn get_range_async(
@@ -305,7 +395,7 @@ impl S3Store {
             .and_then(|n| n.checked_add(16))
             .ok_or_else(|| Error::Invalid("range end overflow".into()))?;
         let path = self.path(key)?;
-        {
+        self.retry_read(|| async {
             let result = match self
                 .remote
                 .get_opts(&path, GetOptions::new().with_range(Some(start..end)))
@@ -313,14 +403,14 @@ impl S3Store {
             {
                 Ok(result) => result,
                 Err(object_store::Error::NotFound { .. }) => return Ok(None),
-                Err(error) => return Err(remote_error(error)),
+                Err(error) => return Err(read_remote_error(error)),
             };
             if result.meta.size != envelope_len as u64 {
                 return Err(Error::Corrupt(format!("object length mismatch: {key}")));
             }
             let mut stream = result.into_stream();
             let mut bytes = Vec::with_capacity(length);
-            while let Some(chunk) = stream.try_next().await.map_err(remote_error)? {
+            while let Some(chunk) = stream.try_next().await.map_err(read_remote_error)? {
                 if chunk.len() > length.saturating_sub(bytes.len()) {
                     return Err(Error::Corrupt(format!("oversized range response: {key}")));
                 }
@@ -330,7 +420,8 @@ impl S3Store {
                 return Err(Error::Corrupt(format!("short range response: {key}")));
             }
             Ok(Some(bytes))
-        }
+        })
+        .await
     }
 }
 
@@ -371,36 +462,39 @@ impl ObjectStore for S3Store {
         let prefix = format!("{}/", self.namespace);
         // Consume pages incrementally. Never expose a partial listing, including
         // when a limit or a later page fails. SDK page/transport buffers remain.
-        self.runtime.as_ref().unwrap().block_on(async {
-            let mut objects = self.remote.list(Some(&self.namespace));
-            let mut keys = Vec::new();
-            let mut total_bytes = 0_u64;
-            while let Some(object) = objects.try_next().await.map_err(remote_error)? {
-                if let Some(limits) = self.read_limits {
-                    if keys.len() >= limits.objects {
-                        return Err(read_limit("object count"));
+        self.runtime
+            .as_ref()
+            .unwrap()
+            .block_on(self.retry_read(|| async {
+                let mut objects = self.remote.list(Some(&self.namespace));
+                let mut keys = Vec::new();
+                let mut total_bytes = 0_u64;
+                while let Some(object) = objects.try_next().await.map_err(read_remote_error)? {
+                    if let Some(limits) = self.read_limits {
+                        if keys.len() >= limits.objects {
+                            return Err(read_limit("object count"));
+                        }
+                        if object.size > limits.object_bytes as u64 {
+                            return Err(read_limit("listed object bytes"));
+                        }
+                        total_bytes = total_bytes
+                            .checked_add(object.size)
+                            .ok_or_else(|| read_limit("namespace byte overflow"))?;
+                        if total_bytes > limits.namespace_bytes {
+                            return Err(read_limit("namespace bytes"));
+                        }
                     }
-                    if object.size > limits.object_bytes as u64 {
-                        return Err(read_limit("listed object bytes"));
-                    }
-                    total_bytes = total_bytes
-                        .checked_add(object.size)
-                        .ok_or_else(|| read_limit("namespace byte overflow"))?;
-                    if total_bytes > limits.namespace_bytes {
-                        return Err(read_limit("namespace bytes"));
-                    }
+                    let key = object
+                        .location
+                        .as_ref()
+                        .strip_prefix(&prefix)
+                        .ok_or_else(|| Error::Corrupt("S3 listing escaped namespace".into()))?;
+                    self.path(key)
+                        .map_err(|_| Error::Corrupt(format!("unexpected S3 key: {key}")))?;
+                    keys.push(key.to_owned());
                 }
-                let key = object
-                    .location
-                    .as_ref()
-                    .strip_prefix(&prefix)
-                    .ok_or_else(|| Error::Corrupt("S3 listing escaped namespace".into()))?;
-                self.path(key)
-                    .map_err(|_| Error::Corrupt(format!("unexpected S3 key: {key}")))?;
-                keys.push(key.to_owned());
-            }
-            Ok(keys)
-        })
+                Ok(keys)
+            }))
     }
     fn remove(&self, key: &str) -> Result<()> {
         self.ready()?;
