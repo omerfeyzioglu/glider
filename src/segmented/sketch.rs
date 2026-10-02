@@ -41,7 +41,8 @@ const POSTING_MAGIC: &[u8; 8] = b"GLSKT003";
 ///
 /// With a clustered view the ranking keeps as many candidates as the probed
 /// postings have blocks plus the usual count, mixing posting blocks with
-/// canonical blocks sealed after the view, and every ranked candidate may
+/// any canonical blocks holding versions no posting covers, and every ranked
+/// candidate may
 /// widen a span: spans grow in rank order until the request and byte limits
 /// stop them, so `blocks` does not limit posting blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1105,7 +1106,7 @@ fn set_bit(bits: &mut [u64], row: usize, value: bool) {
 
 /// Loaded sketches for the packs queries route: every pack the selected root
 /// references or, with a clustered view, the view's posting packs and the
-/// canonical packs holding sealed versions newer than the view. A canonical
+/// canonical packs holding live versions no posting covers. A canonical
 /// row is live when it is the current committed version of its ID, no
 /// acknowledged log-tail mutation shadows it and no posting covers it. A
 /// posting row's bit only records that it was current when loaded; queries
@@ -1645,7 +1646,7 @@ impl<S: ObjectStore> View<S> {
         };
         let (ranked, remote) = match &self.cluster {
             // Every live block of the probed postings is a candidate, ranked
-            // with the canonical candidates newer than the view.
+            // with the canonical candidates no posting covers.
             Some(cluster) => {
                 let probed = cluster.probe(self.config.metric, query, self.probes);
                 let postings: usize = self
