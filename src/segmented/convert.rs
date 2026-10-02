@@ -960,7 +960,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         self.replace_root(root);
         // Release the old routing state before loading the new view.
-        self.load_routing()?;
+        self.load_routing(&mut super::OpenProfile::default())?;
         if let Some(error) = &self.cluster_error {
             return Err(Error::Corrupt(format!(
                 "published clustered view did not load: {error}"

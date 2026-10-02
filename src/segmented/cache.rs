@@ -10,6 +10,7 @@ use std::{
 };
 
 const DIRECTORY: &str = "glider-block-cache-v1";
+const ROUTING_CACHE_MAGIC: &[u8; 8] = b"GLROUTE1";
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct CacheStats {
@@ -159,7 +160,7 @@ impl BlockCache {
             let key = parse_filename(&name);
             if !metadata.file_type().is_file()
                 || key.is_none()
-                || metadata.len() > super::MAX_BLOCK_BYTES as u64
+                || metadata.len() > (super::MAX_INDEX_BYTES + 40) as u64
             {
                 if metadata.file_type().is_dir() {
                     fs::remove_dir_all(entry.path())?;
@@ -211,6 +212,50 @@ impl BlockCache {
             }
         }
         Ok(None)
+    }
+
+    /// Read disposable routing bytes. The caller authenticates them against
+    /// the selected root or the sketch frame before using them.
+    pub(super) fn lookup_open(&mut self, key: &Key) -> Option<Vec<u8>> {
+        if !self.nvme.contains_key(key) {
+            return None;
+        }
+        match fs::read(self.directory.join(filename(key))) {
+            Ok(bytes) => {
+                if bytes.len() < 40
+                    || &bytes[..8] != ROUTING_CACHE_MAGIC
+                    || Sha256::digest(&bytes[40..]).as_slice() != &bytes[8..40]
+                {
+                    self.reject_open(key);
+                    return None;
+                }
+                self.tick += 1;
+                if let Some((_, tick)) = self.nvme.get_mut(key) {
+                    self.nvme_order.remove(tick);
+                    *tick = self.tick;
+                    self.nvme_order.insert(self.tick, *key);
+                }
+                Some(bytes[40..].to_vec())
+            }
+            Err(_) => {
+                self.stats.cache_io_errors += 1;
+                self.remove_nvme(key);
+                None
+            }
+        }
+    }
+
+    pub(super) fn admit_open(&mut self, key: &Key, bytes: &[u8]) {
+        let mut wrapped = Vec::with_capacity(40 + bytes.len());
+        wrapped.extend_from_slice(ROUTING_CACHE_MAGIC);
+        wrapped.extend_from_slice(&Sha256::digest(bytes));
+        wrapped.extend_from_slice(bytes);
+        self.put_nvme(key, &wrapped);
+    }
+
+    pub(super) fn reject_open(&mut self, key: &Key) {
+        self.stats.corrupt_entries += 1;
+        self.remove_nvme(key);
     }
 
     pub(super) fn count_remote(&mut self, bytes: usize) {
@@ -546,6 +591,20 @@ fn cache_key(reference: &BlockRef) -> Key {
     hash.update(reference.length.to_le_bytes());
     hash.update(reference.payload_len.to_le_bytes());
     hash.update(reference.sha256.as_bytes());
+    hash.finalize().into()
+}
+
+/// Domain-separated identity; run indexes include the root digest, while a
+/// pack key is never reused and its cached frame is verified on every read.
+pub(super) fn open_key(kind: &[u8], object: &str, length: usize, digest: &str) -> Key {
+    let mut hash = Sha256::new();
+    hash.update(b"glider-routing-cache-v1\0");
+    hash.update(kind);
+    hash.update([0]);
+    hash.update(object.as_bytes());
+    hash.update([0]);
+    hash.update(length.to_le_bytes());
+    hash.update(digest.as_bytes());
     hash.finalize().into()
 }
 
