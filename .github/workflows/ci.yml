@@ -46,7 +46,8 @@ jobs:
       - name: Check S3 and segmented features
         run: |
           cargo clippy --all-targets --all-features --locked -- -D warnings
-          cargo test --all-features --locked
+          # Release mode: the crash-point matrices take minutes unoptimized.
+          cargo test --release --all-features --locked
 
   minio:
     # Disposable-MinIO integration, fault and benchmark smoke checks; runs in
