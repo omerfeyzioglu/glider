@@ -5394,10 +5394,12 @@ mod tests {
                     .unwrap();
             }
             assert!(uncertain.start_prune().unwrap());
-            if fail_prefix.starts_with("sgroot-") {
-                assert!(uncertain.prune_step().unwrap());
-            }
-            assert!(matches!(uncertain.prune_step(), Err(Error::Io(_))));
+            // Manifest creates may precede the root create; step until the
+            // injected failure is reached.
+            let error = (0..16)
+                .find_map(|_| uncertain.prune_step().err())
+                .expect("the injected failure is reached");
+            assert!(matches!(error, Error::Io(_)));
             assert!(matches!(
                 uncertain.start_prune(),
                 Err(Error::RecoveryRequired)
