@@ -31,14 +31,16 @@ for format versions, publication order, failure cases and recovery rules.
 
 ![Glider AWS deployment pattern](architecture/aws.svg)
 
-This diagram is a deployment pattern for the existing single-node server,
-not infrastructure shipped by this repository. Run one `glider-server`
-process for each collection on an EC2 instance or container host. Give each
-process a distinct S3 namespace prefix. S3 stores the mutation logs, vector
-data, root generations and writer ownership objects. Local EBS or instance
-storage may hold a disposable block cache. A TLS-terminating proxy or load
-balancer, networking, S3 bucket, IAM permissions and operational monitoring
-must be provisioned by the operator.
+This diagram is one deployment pattern for the existing single-node server,
+not infrastructure shipped by this repository. An Application Load Balancer
+terminates HTTPS in public subnets. A private-subnet EC2 instance runs one
+`glider-server` process for one collection; an S3 gateway endpoint gives it
+access to the bucket. Give each process a distinct S3 namespace prefix. S3
+stores mutation logs, vector data, root generations and writer ownership
+objects. An EBS volume holds only a disposable block cache. The operator
+must provision the VPC, load balancer, compute host, endpoint, bucket,
+credentials and monitoring. This is still one active server, not a
+multi-node availability design.
 
 The server speaks HTTP; configure authentication and terminate HTTPS at the
 edge before exposing it to clients. The repository does not currently ship
@@ -49,11 +51,12 @@ environment variables.
 
 ## Diagram sources
 
-The editable [runtime](architecture/runtime.dot) and
-[AWS](architecture/aws.dot) diagrams are Graphviz DOT. To regenerate their
-SVG files with Graphviz:
-
-```sh
-dot -Tsvg docs/architecture/runtime.dot -o docs/architecture/runtime.svg
-dot -Tsvg docs/architecture/aws.dot -o docs/architecture/aws.svg
-```
+The editable [runtime](architecture/runtime.drawio) and
+[AWS](architecture/aws.drawio) sources open in
+[diagrams.net](https://app.diagrams.net/). Export each page as SVG with
+embedded images to update the corresponding image in this directory.
+The AWS diagram uses the official
+[AWS Architecture Icons](https://aws.amazon.com/architecture/icons/) package
+(July 2026 release). Generic runtime icons are from
+[Lucide](https://lucide.dev/) under its
+[ISC license](architecture/LUCIDE-LICENSE.txt).
