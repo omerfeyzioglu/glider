@@ -41,8 +41,8 @@ def main():
     parser.add_argument("--bucket", default="glider-pilot-test-t1g1p")
     parser.add_argument("--prefix", default="glider-pilot")
     parser.add_argument("--region", default="eu-central-1")
-    parser.add_argument("--instance-type", default="c7g.2xlarge")
-    parser.add_argument("--max-minutes", type=int, default=120)
+    parser.add_argument("--instance-type", default="m7i-flex.large")
+    parser.add_argument("--max-minutes", type=int, default=150)
     parser.add_argument("--cleanup-datasets", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
@@ -58,8 +58,10 @@ def main():
     }.items():
         script = script.replace(f"@@{key}@@", str(value))
     assert "@@" not in script
+    # Graviton types (c7g, m7g, t4g) need the arm64 image; others are x86_64.
+    arch = "arm64" if args.instance_type.split(".")[0].endswith("g") else "x86_64"
     ami = aws("ssm", "get-parameter", "--region", args.region, "--name",
-              "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+              f"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-{arch}",
               "--query", "Parameter.Value", "--output", "text").strip()
     tags = f"{{Key=project,Value={TAG}}},{{Key=run,Value={run_id}}}"
     instance = json.loads(aws(
