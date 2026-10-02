@@ -198,7 +198,15 @@ impl<S: ObjectStore> SegmentedServing<S> {
                 "segmented serving bounds are invalid".into(),
             ));
         }
-        let mut db = SegmentedDatabase::take_over_with_options(store, config, segmented)?;
+        let mut db = SegmentedDatabase::take_over_with_options_cached(
+            store,
+            config,
+            segmented,
+            options
+                .cache
+                .as_ref()
+                .map(|(path, ram, nvme)| (path.as_path(), *ram, *nvme)),
+        )?;
         // Serving fails closed rather than answer queries without the
         // selected view; a conversion rebuilds it from the canonical runs.
         if let Some(error) = db.clustered_view_error() {
@@ -213,9 +221,6 @@ impl<S: ObjectStore> SegmentedServing<S> {
         }
         db = db.with_query_threads(options.query_threads);
         db.set_cluster_probes(options.cluster_probes);
-        if let Some((directory, ram, nvme)) = &options.cache {
-            db = db.with_block_cache(directory, *ram, *nvme)?;
-        }
         Ok(Self {
             db,
             options,

@@ -302,7 +302,7 @@ fn remote_error(error: object_store::Error) -> Error {
 
 impl S3Store {
     /// Concurrent reads issued by one batched call.
-    const READ_CONCURRENCY: usize = 16;
+    const READ_CONCURRENCY: usize = 32;
 
     async fn retry_read<T, F, Fut>(&self, mut attempt: F) -> Result<T>
     where

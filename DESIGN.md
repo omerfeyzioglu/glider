@@ -264,7 +264,7 @@ Block v2 and sketch metric bytes are 0 for squared Euclidean, 1 for Manhattan,
 and 2 for cosine; existing bytes retain their meaning.
 
 The sketch is derived, never authoritative. Opening reads a bounded prefix
-of each referenced pack through batched range reads (8 at a time), re-reads
+of each referenced pack through batched range reads (32 at a time), re-reads
 a longer prefix if the frame needs it, verifies the frame digest (range reads
 bypass the whole-object envelope) and decodes it, then binds each root block
 reference to a sketch block with the same digest. A pack without a valid
@@ -349,7 +349,7 @@ while their encoded sizes total at most 2 MiB, bounding its memory and time.
 With 24-byte entries and size-tiered pairing, runs settle between about 44,000
 and 87,000 IDs, so the 64-run root limit leaves room beyond 1,000,000 rows (a
 512 KiB cap exceeded it near 800,000). `ObjectStore::get_many` and `get_ranges` batch independent reads; the
-S3 backend issues up to 16 concurrently, and other backends default to serial
+S3 backend issues up to 32 concurrently, and other backends default to serial
 reads. Opening uses them for run indexes, the log tail and sketch frames.
 
 ### Clustered view (M37)
@@ -673,7 +673,17 @@ root creation requires reopen. Indexes above this size are not pruned yet.
 The opt-in block cache reads through bounded RAM and a versioned local NVMe
 directory. Its key is a SHA-256 of object, range, complete payload length and
 block digest, kept as 32 bytes in memory with tick-ordered LRU; every hit is
-checked against the selected root before decoding.
+checked against the selected root before decoding. The same bounded NVMe tier
+also holds run indexes (keyed by object, length and selected-root digest) and
+exact sketch frames (keyed by never-reused pack key, payload length and the
+selected root or catalog's block-layout digest). Routing cache files have a
+versioned header and SHA-256 checksum.
+Open validates cached indexes against the selected root's digest and cached
+frames against their embedded digest, pack identity and sketch layout;
+missing or corrupt entries are discarded and fetched from object storage.
+Opening still lists the complete namespace, validates roots and manifests,
+and replays the tail. Local bytes are disposable and have no role in write
+acknowledgement, fencing, publication or recovery authority.
 Missing or corrupt cache bytes trigger an authoritative range fetch. Opening
 rejects a missing selected pack, and corrupt bytes fetched from object storage
 fail closed. Cache bytes never acknowledge mutations or participate in root

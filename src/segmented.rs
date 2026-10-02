@@ -13,7 +13,7 @@ use std::{
 };
 
 mod cache;
-use cache::BlockCache;
+use cache::{open_key, BlockCache};
 mod clustered;
 mod codec;
 use clustered::{ClusterIndex, ExtentKind};
@@ -32,6 +32,24 @@ pub use serving::{
 };
 mod sketch;
 use sketch::{frame, unframe, Framed, PackSketch, SketchSet, FRAME_PREFIX_READ, MAX_SKETCH_BYTES};
+
+/// Wall time of the successive phases of a segmented open. Durations include
+/// store waits and validation in that phase; the store can profile its calls
+/// separately to isolate I/O from CPU work.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenProfile {
+    pub list_metadata: std::time::Duration,
+    pub root_manifests: std::time::Duration,
+    pub run_indexes: std::time::Duration,
+    pub run_index_reads: std::time::Duration,
+    pub tail_replay: std::time::Duration,
+    pub routing: std::time::Duration,
+    pub catalog: std::time::Duration,
+    pub catalog_reads: std::time::Duration,
+    pub sketch_frames: std::time::Duration,
+    pub sketch_reads: std::time::Duration,
+    pub finish: std::time::Duration,
+}
 pub use sketch::{ReadBudget, SegmentedOptions};
 
 pub(crate) const MAX_BLOCK_BYTES: usize = 128 * 1024;
@@ -1825,20 +1843,64 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         config: Config,
         options: SegmentedOptions,
     ) -> Result<Self> {
+        Self::take_over_with_options_cached(store, config, options, None)
+    }
+
+    /// Take over and use an optional disposable NVMe cache while opening.
+    pub fn take_over_with_options_cached(
+        store: S,
+        config: Config,
+        options: SegmentedOptions,
+        cache: Option<(&Path, usize, usize)>,
+    ) -> Result<Self> {
         config.validate()?;
         validate_options(&options)?;
         let keys = initialize(&store, config, &options)?;
         fence(&store, config, &keys)?;
-        Self::open_with_options(store, config, options)
+        Self::open_with_options_profiled_cached(
+            store,
+            config,
+            options,
+            &mut OpenProfile::default(),
+            cache,
+        )
     }
 
     /// Open or create a namespace whose metadata declares `options`. Opening
     /// with options different from the persisted declaration fails. This
     /// fences nothing: the caller must ensure no other writer is active.
     pub fn open_with_options(store: S, config: Config, options: SegmentedOptions) -> Result<Self> {
+        Self::open_with_options_profiled(store, config, options, &mut OpenProfile::default())
+    }
+
+    /// Open with a phase breakdown for reproducible storage latency probes.
+    pub fn open_with_options_profiled(
+        store: S,
+        config: Config,
+        options: SegmentedOptions,
+        profile: &mut OpenProfile,
+    ) -> Result<Self> {
+        Self::open_with_options_profiled_cached(store, config, options, profile, None)
+    }
+
+    /// The cache stores only authenticated, disposable routing bytes and
+    /// shares the same capacity and directory as cached vector blocks.
+    pub fn open_with_options_profiled_cached(
+        store: S,
+        config: Config,
+        options: SegmentedOptions,
+        profile: &mut OpenProfile,
+        cache: Option<(&Path, usize, usize)>,
+    ) -> Result<Self> {
+        let cache = cache.map(|(directory, ram, nvme)| {
+            Arc::new(Mutex::new(BlockCache::open(directory, ram, nvme)))
+        });
+        let phase = std::time::Instant::now();
         config.validate()?;
         validate_options(&options)?;
         let keys = initialize(&store, config, &options)?;
+        profile.list_metadata = phase.elapsed();
+        let phase = std::time::Instant::now();
         let listed: BTreeSet<_> = keys.iter().cloned().collect();
         let mut generations = BTreeSet::new();
         let mut logs = Vec::new();
@@ -1871,6 +1933,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 error => error,
             })?;
         manifest::load_manifests(&store, config, &mut root)?;
+        profile.root_manifests = phase.elapsed();
+        let phase = std::time::Instant::now();
         let mut fences = root.fences.clone();
         fences.roots.extend(markers);
         let mut latest = Directory::default();
@@ -1889,12 +1953,68 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 ));
             }
         }
-        // At most two indexes are in flight at once.
+        // Bound outstanding index bytes while using the store's read parallelism.
         let mut indexes = Vec::new();
-        for (chunk_start, chunk) in root.runs.chunks(2).enumerate() {
-            let keys: Vec<_> = chunk.iter().map(|run| run.index_object.clone()).collect();
-            for (offset, bytes) in store.get_many(&keys)?.into_iter().enumerate() {
-                let run_ordinal = chunk_start * 2 + offset;
+        let mut chunk_start = 0;
+        while chunk_start < root.runs.len() {
+            let mut chunk_end = chunk_start;
+            let mut batch_bytes = 0_usize;
+            while chunk_end < root.runs.len() && chunk_end - chunk_start < 32 {
+                let next = root.runs[chunk_end].index_len;
+                if chunk_end > chunk_start && batch_bytes + next > 32 * 1024 * 1024 {
+                    break;
+                }
+                batch_bytes += next;
+                chunk_end += 1;
+            }
+            let chunk = &root.runs[chunk_start..chunk_end];
+            let mut keys = Vec::new();
+            let mut pending = Vec::new();
+            let mut values = vec![None; chunk.len()];
+            for (offset, run) in chunk.iter().enumerate() {
+                if let Some(cache) = &cache {
+                    let key = open_key(
+                        b"index",
+                        &run.index_object,
+                        run.index_len,
+                        &run.index_sha256,
+                    );
+                    let hit = lock_cache(cache)?.lookup_open(&key);
+                    if let Some(bytes) = hit {
+                        if bytes.len() == run.index_len
+                            && format!("{:x}", Sha256::digest(&bytes)) == run.index_sha256
+                        {
+                            values[offset] = Some(bytes);
+                            continue;
+                        }
+                        lock_cache(cache)?.reject_open(&key);
+                    }
+                }
+                keys.push(run.index_object.clone());
+                pending.push(offset);
+            }
+            let read = std::time::Instant::now();
+            let fetched = store.get_many(&keys)?;
+            profile.run_index_reads += read.elapsed();
+            for (offset, bytes) in pending.into_iter().zip(fetched) {
+                if let (Some(cache), Some(bytes)) = (&cache, &bytes) {
+                    let run = &chunk[offset];
+                    if bytes.len() == run.index_len
+                        && format!("{:x}", Sha256::digest(bytes)) == run.index_sha256
+                    {
+                        let key = open_key(
+                            b"index",
+                            &run.index_object,
+                            run.index_len,
+                            &run.index_sha256,
+                        );
+                        lock_cache(cache)?.admit_open(&key, bytes);
+                    }
+                }
+                values[offset] = bytes;
+            }
+            for (offset, bytes) in values.into_iter().enumerate() {
+                let run_ordinal = chunk_start + offset;
                 indexes.push((
                     run_ordinal,
                     decode_run_index(&root.runs[run_ordinal], bytes)?,
@@ -1911,7 +2031,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     )
                 }));
             }
+            chunk_start = chunk_end;
         }
+        profile.run_indexes = phase.elapsed();
+        let phase = std::time::Instant::now();
         logs.sort_unstable();
         let tail_logs: Vec<_> = logs
             .into_iter()
@@ -1932,7 +2055,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             obsolete: VecDeque::new(),
             staged_manifests: BTreeMap::new(),
             retired: Vec::new(),
-            cache: None,
+            cache,
             options_digest: Sha256::digest(encode(&options)?).into(),
             options: Arc::new(options),
             sketches: Arc::default(),
@@ -1986,8 +2109,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 db.tail_objects += 1;
             }
         }
-        db.load_routing()?;
+        profile.tail_replay = phase.elapsed();
+        let phase = std::time::Instant::now();
+        db.load_routing(profile)?;
+        profile.routing = phase.elapsed();
+        let phase = std::time::Instant::now();
         db.schedule_obsolete();
+        profile.finish = phase.elapsed();
         Ok(db)
     }
 
@@ -2001,14 +2129,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// posting copy, or an uncovered version inside a posting pack leaves the
     /// view unavailable (`clustered_view_error`); other storage errors fail.
     /// Invalid sketch frames are rebuilt from authenticated blocks.
-    fn load_routing(&mut self) -> Result<()> {
+    fn load_routing(&mut self, profile: &mut OpenProfile) -> Result<()> {
         Arc::make_mut(&mut self.sketches).clear();
         self.cluster = None;
         self.cluster_error = None;
         let mut covered = Vec::new();
         let mut uncovered = BTreeSet::new();
         if let Some(view) = self.root.clustered.clone() {
-            let loaded = self.load_view(&view).and_then(|index| {
+            let loaded = self.load_view(&view, profile).and_then(|index| {
                 covered = self.covered_versions()?;
                 uncovered = self.uncovered_blocks(&covered, Some(&index))?;
                 Ok(index)
@@ -2056,9 +2184,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let packs: Vec<_> = packs.into_iter().collect();
         let keys: Vec<_> = packs
             .iter()
-            .map(|(pack, references)| (pack.as_str(), references[0].payload_len))
+            .map(|(pack, references)| {
+                let mut digest = Sha256::new();
+                for reference in references {
+                    digest.update(reference.offset.to_le_bytes());
+                    digest.update(reference.length.to_le_bytes());
+                    digest.update(reference.sha256.as_bytes());
+                }
+                (
+                    pack.as_str(),
+                    references[0].payload_len,
+                    format!("{:x}", digest.finalize()),
+                )
+            })
             .collect();
-        let decoded = self.read_sketch_frames(&keys, false)?;
+        let decoded = self.read_sketch_frames(&keys, false, profile)?;
         for ((pack, references), decoded) in packs.iter().zip(decoded) {
             let sketch = match decoded {
                 Some(sketch) => sketch,
@@ -2141,20 +2281,32 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Decode and authenticate the clustered view `view` selects and load
     /// its posting sketches. `Error::Corrupt` means a derived object is
     /// missing or invalid.
-    fn load_view(&mut self, view: &clustered::ViewRef) -> Result<ClusterIndex> {
+    fn load_view(
+        &mut self,
+        view: &clustered::ViewRef,
+        profile: &mut OpenProfile,
+    ) -> Result<ClusterIndex> {
+        let phase = std::time::Instant::now();
         let read = |key: &str| {
+            let started = std::time::Instant::now();
             self.store
                 .get(key)?
                 .ok_or_else(|| Error::Corrupt(format!("clustered object missing: {key}")))
+                .map(|bytes| (bytes, started.elapsed()))
         };
-        let centroids = view.decode_centroids(self.config, &read(&view.centroid.key)?)?;
+        let (centroid_bytes, elapsed) = read(&view.centroid.key)?;
+        profile.catalog_reads += elapsed;
+        let centroids = view.decode_centroids(self.config, &centroid_bytes)?;
         if centroids.source_generation >= self.root.generation
             || centroids.source_sequence > self.root.sequence
         {
             return Err(Error::Corrupt("clustered view source is not older".into()));
         }
-        let catalog = view.decode_catalog(&centroids, &read(&view.catalog.key)?)?;
+        let (catalog_bytes, elapsed) = read(&view.catalog.key)?;
+        profile.catalog_reads += elapsed;
+        let catalog = view.decode_catalog(&centroids, &catalog_bytes)?;
         let index = ClusterIndex::new(&centroids, catalog);
+        profile.catalog += phase.elapsed();
         if let Some(pack) = index
             .packs
             .keys()
@@ -2165,9 +2317,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let layouts = index.pack_blocks();
         let keys: Vec<_> = layouts
             .iter()
-            .map(|(pack, layout)| (*pack, layout.payload_len))
+            .map(|(pack, layout)| {
+                let mut digest = Sha256::new();
+                for (offset, length, sha256) in &layout.blocks {
+                    digest.update(offset.to_le_bytes());
+                    digest.update(length.to_le_bytes());
+                    digest.update(sha256);
+                }
+                (
+                    *pack,
+                    layout.payload_len,
+                    format!("{:x}", digest.finalize()),
+                )
+            })
             .collect();
-        let decoded = self.read_sketch_frames(&keys, true)?;
+        let decoded = self.read_sketch_frames(&keys, true, profile)?;
         let mut sketches = Vec::with_capacity(layouts.len());
         for ((pack, layout), decoded) in layouts.iter().zip(decoded) {
             sketches.push(self.posting_sketch(&index, pack, layout, decoded)?);
@@ -2273,27 +2437,64 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(sketch)
     }
 
-    /// Read and decode the sketch frame of each `(pack, payload length)`,
-    /// eight prefix reads at a time. `None` marks a pack whose frame is
+    /// Read and decode the sketch frame of each `(pack, payload length,
+    /// committed block-layout digest)`,
+    /// up to 32 prefix reads at a time. `None` marks a pack whose frame is
     /// absent or invalid, or whose range the store reported corrupt.
     fn read_sketch_frames(
         &self,
-        packs: &[(&str, usize)],
+        packs: &[(&str, usize, String)],
         posting: bool,
+        profile: &mut OpenProfile,
     ) -> Result<Vec<Option<PackSketch>>> {
+        let phase = std::time::Instant::now();
         let mut decoded = Vec::with_capacity(packs.len());
-        // At most eight prefix reads (2 MiB) are in flight at once.
-        for chunk in packs.chunks(8) {
-            let requests: Vec<_> = chunk
-                .iter()
-                .map(|&(pack, payload_len)| {
-                    (pack, 0, FRAME_PREFIX_READ.min(payload_len), payload_len)
-                })
-                .collect();
+        // Match the store's bounded read parallelism.
+        for chunk in packs.chunks(32) {
+            let mut requests = Vec::new();
+            let mut pending = Vec::new();
+            let mut cached = vec![None; chunk.len()];
+            for (index, (pack, payload_len, layout_digest)) in chunk.iter().enumerate() {
+                if let Some(cache) = &self.cache {
+                    let key = open_key(b"sketch", pack, *payload_len, layout_digest);
+                    let hit = lock_cache(cache)?.lookup_open(&key);
+                    if let Some(bytes) = hit {
+                        let sketch = match unframe(&bytes, *payload_len) {
+                            Framed::Sketch(body)
+                                if bytes.len() == sketch::FRAME_HEADER + body.len() =>
+                            {
+                                PackSketch::decode_with(
+                                    body,
+                                    self.config,
+                                    &self.options_digest,
+                                    pack,
+                                    &self.options.routed_keys,
+                                    posting,
+                                )
+                                .ok()
+                                .map(|mut sketch| {
+                                    sketch.frame_len = Some(bytes.len());
+                                    sketch
+                                })
+                            }
+                            _ => None,
+                        };
+                        if sketch.is_some() {
+                            cached[index] = sketch;
+                            continue;
+                        }
+                        lock_cache(cache)?.reject_open(&key);
+                    }
+                }
+                pending.push(index);
+                requests.push((*pack, 0, FRAME_PREFIX_READ.min(*payload_len), *payload_len));
+            }
             // A store-reported corrupt range fails the batch; read that chunk
             // serially so each pack is judged on its own bytes.
+            let read = std::time::Instant::now();
             let batch = self.store.get_ranges(&requests);
-            let mut prefixes = match batch {
+            profile.sketch_reads += read.elapsed();
+            let fetched = match batch {
                 Ok(values) => values,
                 Err(Error::Corrupt(_)) => requests
                     .iter()
@@ -2306,13 +2507,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .collect::<Result<Vec<_>>>()?,
                 Err(error) => return Err(error),
             };
-            for (index, &(pack, payload_len)) in chunk.iter().enumerate() {
+            let mut prefixes = vec![None; chunk.len()];
+            for (index, bytes) in pending.into_iter().zip(fetched) {
+                prefixes[index] = bytes;
+            }
+            for (index, (pack, payload_len, layout_digest)) in chunk.iter().enumerate() {
+                if let Some(sketch) = cached[index].take() {
+                    decoded.push(Some(sketch));
+                    continue;
+                }
                 let mut sketch = None;
                 for _ in 0..2 {
                     let Some(bytes) = prefixes[index].as_deref() else {
                         break;
                     };
-                    match unframe(bytes, payload_len) {
+                    match unframe(bytes, *payload_len) {
                         Framed::Sketch(bytes) => {
                             sketch = PackSketch::decode_with(
                                 bytes,
@@ -2330,19 +2539,28 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                             break;
                         }
                         Framed::Need(length) => {
+                            let read = std::time::Instant::now();
                             prefixes[index] =
-                                match self.store.get_range(pack, 0, length, payload_len) {
+                                match self.store.get_range(pack, 0, length, *payload_len) {
                                     Err(Error::Corrupt(_)) => None,
                                     other => other?,
                                 };
+                            profile.sketch_reads += read.elapsed();
                         }
                         Framed::Invalid => break,
+                    }
+                }
+                if let (Some(cache), Some(sketch)) = (&self.cache, &sketch) {
+                    if let (Some(prefix), Some(length)) = (&prefixes[index], sketch.frame_len) {
+                        let key = open_key(b"sketch", pack, *payload_len, layout_digest);
+                        lock_cache(cache)?.admit_open(&key, &prefix[..length]);
                     }
                 }
                 prefixes[index] = None;
                 decoded.push(sketch);
             }
         }
+        profile.sketch_frames += phase.elapsed();
         Ok(decoded)
     }
 
