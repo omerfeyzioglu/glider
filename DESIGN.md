@@ -282,8 +282,10 @@ the live set; reopening reloads the full persisted sketches. Root
 publications do not invalidate the reader, and recovery reconstructs
 identical bits. A failure to bind after a root publication poisons the
 handle. The latest-ID directory holds sorted 24-byte slots in shared 1,024-slot
-pages; a root publication copies only pages with changed entries while an
-older view remains pinned. Sketch row IDs are stored as u32 offsets
+pages. Each backing allocation holds at most 16,384 slots; a root publication copies
+changed pages while an older view remains pinned, grouping changed pages into
+bounded backing allocations. Page-end IDs are also kept in a small contiguous
+array for lookup. Sketch row IDs are stored as u32 offsets
 from the pack's smallest ID when its span allows, else as u64.
 
 `search_selective_within(query, k, budget, filter)` supports two modes. With

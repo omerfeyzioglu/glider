@@ -1,7 +1,8 @@
 //! Reproducible, object-store-local admission workload for M31 latency investigation.
 //! Usage: cargo run --offline --release --example m31_latency_probe --
 //! ROWS SECONDS [THREADS [grouped|legacy [QUERIES]]]
-//! Set M31_PROBE_SNAPSHOT=1 for a held-view seal, or M31_PROBE_CACHE=1 and
+//! Set M31_PROBE_SNAPSHOT=1 for a held-view seal, M31_PROBE_REOPEN=1 for a
+//! fresh open after load, M31_PROBE_LOCAL=1 for a temporary LocalStore, or M31_PROBE_CACHE=1 and
 //! M31_PROBE_WARM_STEP=1 for one warm-up unit. The optional memory-probe
 //! feature reports live and peak requested Rust heap bytes; leave it off for
 //! latency measurements.
@@ -9,7 +10,7 @@ use glider::{
     admission::{Engine, Limits, Service, Shutdown, Snapshot},
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOptions},
-    store::ObjectStore,
+    store::{LocalStore, ObjectStore},
     Config, Error, Metric, Mutation, Neighbor, Result,
 };
 use std::{
@@ -34,6 +35,8 @@ struct MeteredAllocator;
 static HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "memory-probe")]
 static PEAK_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "memory-probe")]
+static TOTAL_HEAP_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "memory-probe")]
 #[global_allocator]
@@ -44,6 +47,7 @@ unsafe impl GlobalAlloc for MeteredAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
+            TOTAL_HEAP_ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
             let current = HEAP_BYTES.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
             PEAK_HEAP_BYTES.fetch_max(current, Ordering::Relaxed);
         }
@@ -60,6 +64,7 @@ unsafe impl GlobalAlloc for MeteredAllocator {
         if !replacement.is_null() {
             if new_size >= layout.size() {
                 let added = new_size - layout.size();
+                TOTAL_HEAP_ALLOCATED.fetch_add(added, Ordering::Relaxed);
                 let current = HEAP_BYTES.fetch_add(added, Ordering::Relaxed) + added;
                 PEAK_HEAP_BYTES.fetch_max(current, Ordering::Relaxed);
             } else {
@@ -112,10 +117,88 @@ impl ObjectStore for MemoryStore {
     }
 }
 
+#[derive(Clone)]
+enum ProbeStore {
+    Memory(MemoryStore),
+    Local(Arc<LocalStore>, Arc<AtomicU64>),
+}
+
+impl ProbeStore {
+    fn log_count(&self) -> Arc<AtomicU64> {
+        match self {
+            Self::Memory(store) => store.1.clone(),
+            Self::Local(_, count) => count.clone(),
+        }
+    }
+}
+
+impl ObjectStore for ProbeStore {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::Memory(store) => store.get(key),
+            Self::Local(store, _) => store.get(key),
+        }
+    }
+
+    fn get_range(
+        &self,
+        key: &str,
+        offset: usize,
+        length: usize,
+        expected_payload_len: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::Memory(store) => store.get_range(key, offset, length, expected_payload_len),
+            Self::Local(store, _) => store.get_range(key, offset, length, expected_payload_len),
+        }
+    }
+
+    fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        match self {
+            Self::Memory(store) => store.get_many(keys),
+            Self::Local(store, _) => store.get_many(keys),
+        }
+    }
+
+    fn get_ranges(&self, ranges: &[(&str, usize, usize, usize)]) -> Result<Vec<Option<Vec<u8>>>> {
+        match self {
+            Self::Memory(store) => store.get_ranges(ranges),
+            Self::Local(store, _) => store.get_ranges(ranges),
+        }
+    }
+
+    fn list(&self) -> Result<Vec<String>> {
+        match self {
+            Self::Memory(store) => store.list(),
+            Self::Local(store, _) => store.list(),
+        }
+    }
+
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
+        match self {
+            Self::Memory(store) => store.create(key, value),
+            Self::Local(store, count) => {
+                store.create(key, value)?;
+                if key.starts_with("sglog-") {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn remove(&self, key: &str) -> Result<()> {
+        match self {
+            Self::Memory(store) => store.remove(key),
+            Self::Local(store, _) => store.remove(key),
+        }
+    }
+}
+
 /// The old acceptance wrapper inherited Engine's per-request group fallback.
 /// `legacy` reproduces that behavior; the other mode forwards group commit.
 struct Wrapped {
-    inner: SegmentedServing<MemoryStore>,
+    inner: SegmentedServing<ProbeStore>,
     legacy: bool,
 }
 
@@ -305,8 +388,22 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         None
     };
     options.query_threads = threads;
-    let store = MemoryStore::default();
-    let log_count = store.1.clone();
+    let local_dir = if std::env::var_os("M31_PROBE_LOCAL").is_some() {
+        Some(tempfile::tempdir_in("target")?)
+    } else {
+        None
+    };
+    let store = match &local_dir {
+        Some(directory) => ProbeStore::Local(
+            Arc::new(LocalStore::open(directory.path().join("namespace"))?),
+            Arc::new(AtomicU64::new(0)),
+        ),
+        None => ProbeStore::Memory(MemoryStore::default()),
+    };
+    let reopen_store = store.clone();
+    let reopen_options = options.clone();
+    let reopen_segmented = segmented.clone();
+    let log_count = store.log_count();
     let mut db = SegmentedServing::open(store, config, segmented, options)?;
     let load_start = Instant::now();
     for batch in 0..rows / 100 {
@@ -333,8 +430,43 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         db.database().selective_index_bytes() as f64 / 1048576.
     );
     #[cfg(feature = "memory-probe")]
+    println!(
+        "loaded heap {:.2} MiB, total allocated {:.2} MiB",
+        heap_mib(),
+        TOTAL_HEAP_ALLOCATED.load(Ordering::Relaxed) as f64 / 1048576.
+    );
+    if let Ok(reopens) = std::env::var("M31_PROBE_REOPEN") {
+        let reopens: usize = reopens.parse()?;
+        assert!(reopens > 0);
+        db.close()?;
+        for attempt in 0..reopens {
+            let started = Instant::now();
+            let reopened = SegmentedServing::open(
+                reopen_store.clone(),
+                config,
+                reopen_segmented.clone(),
+                reopen_options.clone(),
+            )?;
+            println!(
+                "reopen {} in {:.3} s, RSS current/peak {:.2}/{:.2} MiB, sketch charged {:.2} MiB",
+                attempt + 1,
+                started.elapsed().as_secs_f64(),
+                rss_mib(),
+                peak_rss_mib(),
+                reopened.database().selective_index_bytes() as f64 / 1048576.
+            );
+            reopened.close()?;
+        }
+        #[cfg(feature = "memory-probe")]
+        println!(
+            "reopened heap current/peak {:.2}/{:.2} MiB",
+            heap_mib(),
+            peak_heap_mib()
+        );
+        return Ok(());
+    }
+    #[cfg(feature = "memory-probe")]
     {
-        println!("loaded heap {:.2} MiB", heap_mib());
         reset_heap_peak();
     }
     if warm_step {
@@ -402,6 +534,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let logs_before = log_count.load(Ordering::Relaxed);
     let initial_sequence = db.sequence();
+    let latest_sequence = Arc::new(AtomicU64::new(initial_sequence));
     let service = Service::start(
         Wrapped {
             inner: db,
@@ -418,7 +551,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let began = Instant::now() + Duration::from_millis(100);
     let mut workers = Vec::new();
     for writer in 0..4_u64 {
-        let (client, barrier) = (client.clone(), barrier.clone());
+        let (client, barrier, latest_sequence) =
+            (client.clone(), barrier.clone(), latest_sequence.clone());
         workers.push(std::thread::spawn(move || {
             let mut data = Vec::new();
             barrier.wait();
@@ -428,7 +562,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 let submitted = Instant::now();
                 let result = client
                     .write(request(
-                        initial_sequence,
+                        latest_sequence.load(Ordering::Acquire),
                         (1_000_000 + writer * seconds + round) as u128,
                         start,
                         round + 1,
@@ -436,6 +570,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     .unwrap()
                     .wait()
                     .unwrap();
+                latest_sequence.fetch_max(result.value.sequence, Ordering::Release);
                 data.push((submitted.elapsed(), result.queue_wait, result.execution));
             }
             data
@@ -512,9 +647,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     );
     #[cfg(feature = "memory-probe")]
     println!(
-        "serving heap current/peak {:.2}/{:.2} MiB",
+        "serving heap current/peak {:.2}/{:.2} MiB, total allocated {:.2} MiB",
         heap_mib(),
-        peak_heap_mib()
+        peak_heap_mib(),
+        TOTAL_HEAP_ALLOCATED.load(Ordering::Relaxed) as f64 / 1048576.
     );
     service.shutdown(Shutdown::Drain)?;
     if let Some(path) = cache_path {
