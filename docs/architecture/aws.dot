@@ -1,0 +1,77 @@
+// Render with Graphviz: dot -Tsvg aws.dot -o aws.svg
+digraph GliderAWS {
+  graph [
+    rankdir=LR,
+    bgcolor="#F7F9FC",
+    pad="0.42",
+    nodesep="0.52",
+    ranksep="0.88",
+    splines=polyline,
+    compound=true,
+    newrank=true,
+    fontname="Helvetica",
+    fontsize=18,
+    fontcolor="#12263A",
+    label=<<B>GLIDER / AWS DEPLOYMENT PATTERN</B><BR/><FONT POINT-SIZE="11" COLOR="#5B7087">A single-node deployment using S3 as the durable source of truth</FONT>>,
+    labelloc=t,
+    labeljust=l
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#FFFFFF",
+    color="#D2DDE8",
+    penwidth=1.3,
+    fontname="Helvetica",
+    fontsize=11,
+    fontcolor="#12263A",
+    margin="0.19,0.15"
+  ];
+  edge [color="#8296AA", penwidth=1.5, arrowsize=0.65, fontname="Helvetica", fontsize=9, fontcolor="#577087"];
+
+  clients [label=<<B>Applications</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">HTTPS clients</FONT>>, fillcolor="#EAF2FF", color="#A8C7F2"];
+  edge_tls [label=<<B>TLS edge</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">operator-provided proxy / load balancer</FONT>>, fillcolor="#FFFFFF"];
+
+  subgraph cluster_host {
+    label=<<B>COMPUTE HOST</B><BR/><FONT POINT-SIZE="10" COLOR="#61788E">EC2 instance or container host · one collection per process</FONT>>;
+    labelloc=t;
+    labeljust=l;
+    style="rounded,filled";
+    color="#C8D8E8";
+    fillcolor="#EFF5FA";
+    penwidth=1.3;
+    margin=20;
+
+    server [label=<<B>glider-server</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">HTTP :8080 · bounded admission</FONT>>, fillcolor="#E6F3FF", color="#82B9ED"];
+    engine [label=<<B>Single writer + readers</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">RAM: latest IDs, sketches, log tail</FONT>>, fillcolor="#FFFFFF"];
+    cache [label=<<B>Local block cache</B><BR/><FONT POINT-SIZE="10" COLOR="#8A691F">EBS / instance NVMe · disposable</FONT>>, fillcolor="#FFF4DE", color="#E8BE6E"];
+
+    server -> engine;
+    {rank=same; engine; cache}
+    engine -> cache [label="warm reads", constraint=false];
+  }
+
+  subgraph cluster_s3 {
+    label=<<B>AMAZON S3</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">one bucket + a non-overlapping collection prefix</FONT>>;
+    labelloc=t;
+    labeljust=l;
+    style="rounded,filled";
+    color="#9BCBC1";
+    fillcolor="#EAF7F3";
+    penwidth=1.3;
+    margin=20;
+
+    store [shape=plain, label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="10" COLOR="#B7DCD3" BGCOLOR="#FFFFFF">
+        <TR><TD ALIGN="LEFT"><B>Immutable mutation logs</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">conditional PUT → write ACK</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>Immutable data objects</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">vector packs · manifests · indexes</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>Root generations</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">published last · selected on recovery</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>Lease + fences</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">single-writer takeover</FONT></TD></TR>
+      </TABLE>
+    >];
+  }
+
+  clients -> edge_tls;
+  edge_tls -> server [label="HTTP to server"];
+  engine -> store [label="conditional PUT · bounded GET · recovery", color="#4E9C8C", fontcolor="#4E8D80"];
+}

@@ -28,7 +28,8 @@ and cost on one machine, without operating a replicated cluster.
   server builds by itself at 250,000 rows and rebuilds as the collection
   grows. Unfiltered queries read at most 8 remote ranges and 1 MiB.
 - **SSD cache.** A local block cache is filled in the background so warm
-  queries need no remote reads; losing it only slows queries.
+  queries need no remote reads. Losing it does not lose acknowledged writes;
+  it can affect query latency and approximate-search recall until warm again.
 - **Filters.** Equality filters on string metadata; one declared predicate
   is answered exactly, and up to four declared keys steer routing.
 - **Metadata in results.** Queries can return each hit's metadata and
@@ -73,6 +74,15 @@ Known limitations:
 - No built-in scheduled backups; use S3 Versioning and `glider-admin backup`.
 
 ## Quickstart
+
+The Docker Compose path needs a Git checkout and Docker with Compose, but **does
+not require Rust on your computer**: the Docker build uses Rust inside its
+builder image. There is currently no published binary installer or prebuilt
+container image. The Compose setup is a local demo with example MinIO
+credentials and an HTTP port; it is not an internet-facing deployment.
+An AWS deployment requires you to provision the S3 bucket, compute host,
+networking, credentials and TLS edge. See the
+[deployment architecture](docs/ARCHITECTURE.md#aws-deployment-pattern).
 
 ### Docker Compose (with MinIO)
 
@@ -287,20 +297,7 @@ and [benchmarks/](benchmarks/SUMMARY.md).
 
 ## Architecture
 
-```text
-clients ── HTTP/JSON ──> glider-server (axum)
-                              │  bounded admission queue
-               ┌──────────────┴───────────────┐
-        single committer                reader threads
-   writes, seals, merges,           queries and point reads on
-   conversion, cleanup, warm-up     immutable published views
-               │                               │
-               ▼                               ▼
-   object store (authoritative)      RAM: ID directory, routing sketches,
-   logs, packs, run indexes,              unsealed log tail
-   run manifests, roots,             SSD: disposable block cache
-   centroids, catalogs
-```
+![Glider runtime architecture](docs/architecture/runtime.svg)
 
 - A write batch becomes one immutable log object, created conditionally,
   before it is acknowledged.
@@ -313,7 +310,8 @@ clients ── HTTP/JSON ──> glider-server (axum)
 - Takeover uses a renewed lease to pace restarts and permanent fence objects
   so that a deposed writer's next publication fails at the store.
 
-[DESIGN.md](DESIGN.md) states the formats, invariants, and crash and
+The [architecture guide](docs/ARCHITECTURE.md) includes an AWS deployment
+diagram. [DESIGN.md](DESIGN.md) states the formats, invariants, and crash and
 recovery semantics in full.
 
 ## Library

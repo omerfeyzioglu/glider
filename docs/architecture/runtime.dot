@@ -1,0 +1,80 @@
+// Render with Graphviz: dot -Tsvg runtime.dot -o runtime.svg
+digraph GliderRuntime {
+  graph [
+    rankdir=LR,
+    bgcolor="#F7F9FC",
+    pad="0.36",
+    nodesep="0.64",
+    ranksep="0.78",
+    splines=polyline,
+    newrank=true,
+    fontname="Helvetica",
+    fontsize=18,
+    fontcolor="#12263A",
+    label=<<B>GLIDER / RUNTIME ARCHITECTURE</B><BR/><FONT POINT-SIZE="11" COLOR="#5B7087">One process per collection · object storage is the durable authority</FONT>>,
+    labelloc=t,
+    labeljust=l
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#FFFFFF",
+    color="#D2DDE8",
+    penwidth=1.3,
+    fontname="Helvetica",
+    fontsize=11,
+    fontcolor="#12263A",
+    margin="0.21,0.17"
+  ];
+  edge [color="#8296AA", penwidth=1.4, arrowsize=0.65, fontname="Helvetica", fontsize=9, fontcolor="#577087"];
+
+  clients [label=<<B>Applications</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">HTTP / JSON</FONT>>, fillcolor="#EAF2FF", color="#A8C7F2"];
+
+  subgraph cluster_server {
+    label=<<B>GLIDER SERVER</B><BR/><FONT POINT-SIZE="10" COLOR="#61788E">bounded admission · one committer · parallel snapshot readers</FONT>>;
+    labelloc=t;
+    labeljust=l;
+    style="rounded,filled";
+    color="#C8D8E8";
+    fillcolor="#EFF5FA";
+    penwidth=1.3;
+    margin=22;
+
+    api [label=<<B>HTTP API</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">axum · status · metrics</FONT>>];
+    admission [label=<<B>Admission</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">bounded FIFO + byte budget</FONT>>];
+    writer [label=<<B>Single committer</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">writes · seals · merges · roots</FONT>>, fillcolor="#E6F3FF", color="#82B9ED"];
+    readers [label=<<B>Snapshot readers</B><BR/><FONT POINT-SIZE="10" COLOR="#5B7087">selective search · exact rerank</FONT>>, fillcolor="#E6F3FF", color="#82B9ED"];
+    cache [label=<<B>Disposable block cache</B><BR/><FONT POINT-SIZE="10" COLOR="#8A691F">RAM / local SSD</FONT>>, fillcolor="#FFF4DE", color="#E8BE6E"];
+    {rank=same; writer; readers}
+
+    api -> admission;
+    admission -> writer [label="writes"];
+    admission -> readers [label="queries / get"];
+    readers -> cache [label="warm blocks"];
+  }
+
+  subgraph cluster_store {
+    label=<<B>OBJECT STORAGE</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">S3-compatible backend · local backend for development</FONT>>;
+    labelloc=t;
+    labeljust=l;
+    style="rounded,filled";
+    color="#9BCBC1";
+    fillcolor="#EAF7F3";
+    penwidth=1.3;
+    margin=22;
+
+    store [shape=plain, label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="10" COLOR="#B7DCD3" BGCOLOR="#FFFFFF">
+        <TR><TD PORT="log" ALIGN="LEFT"><B>Mutation log</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">immutable conditional create → write ACK</FONT></TD></TR>
+        <TR><TD PORT="data" ALIGN="LEFT"><B>Vector packs + indexes</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">immutable blocks, manifests and catalog</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>Root generations</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">published last · selected on recovery</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>Lease + permanent fences</B><BR/><FONT POINT-SIZE="10" COLOR="#4F7B76">single-writer takeover</FONT></TD></TR>
+      </TABLE>
+    >];
+  }
+
+  clients -> api;
+  writer -> store:log [label="conditional PUT", color="#4E9C8C", fontcolor="#4E8D80"];
+  readers -> store:data [label="bounded range GET", color="#4E9C8C", fontcolor="#4E8D80"];
+  cache -> store [style=invis];
+}
