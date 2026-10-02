@@ -134,6 +134,7 @@ fn plan_vector_local(
                 continue;
             }
             if group.len() == 1 {
+                debug_assert!(!codec::row_fits(puts[group[0]].2));
                 return Err(Error::Invalid(format!(
                     "segmented row {} exceeds block limit",
                     id(group[0])
@@ -2539,6 +2540,19 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 if let Some(outcome) = retry.duplicate(request, sequence)? {
                     return Ok((outcome, false));
                 }
+                // A row that cannot share a block with anything can never be
+                // sealed; refuse it before it is acknowledged. Replay does not
+                // apply this check: older logs may hold such rows.
+                for mutation in &request.mutations {
+                    if let Mutation::Put {
+                        id,
+                        vector,
+                        metadata,
+                    } = mutation
+                    {
+                        codec::check_put_fits(*id, vector, metadata)?;
+                    }
+                }
                 let next = sequence
                     .checked_add(1)
                     .ok_or_else(|| Error::Invalid("sequence exhausted".into()))?;
@@ -2780,23 +2794,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let boundary = self.sequence;
         let mut puts = Vec::new();
         let mut deletes = Vec::new();
-        for (&id, (sequence, document)) in self.tail.iter() {
+        for (&id, (_, document)) in self.tail.iter() {
             match document {
                 Some(document) => puts.push((
                     id,
                     document.vector.as_slice(),
-                    codec::record_len(&BlockRecord {
-                        sequence: *sequence,
-                        mutation: Mutation::Delete { id },
-                    }) + codec::put_len(&document.vector, &document.metadata),
+                    codec::put_row_len(&document.vector, &document.metadata),
                 )),
-                None => deletes.push((
-                    id,
-                    codec::record_len(&BlockRecord {
-                        sequence: *sequence,
-                        mutation: Mutation::Delete { id },
-                    }),
-                )),
+                None => deletes.push((id, codec::DELETE_ROW_LEN)),
             }
         }
         // With a loaded clustered view every put joins its nearest cluster's
@@ -5448,5 +5453,172 @@ mod tests {
             assert_eq!(recovered.root.runs[0].blocks.len(), 1);
             while recovered.cleanup_step(8).unwrap() != 0 {}
         }
+    }
+
+    fn limit_request(nonce: u8, boundary: u64, mutations: Vec<Mutation>) -> retry::Request {
+        retry::Request {
+            id: retry::RequestId {
+                boundary,
+                nonce: [nonce; 16],
+            },
+            conditions: Vec::new(),
+            mutations,
+        }
+    }
+
+    fn limit_put(id: u64, value_len: usize) -> Mutation {
+        Mutation::Put {
+            id,
+            vector: vec![1., 2.],
+            metadata: BTreeMap::from([("blob".into(), "x".repeat(value_len))]),
+        }
+    }
+
+    /// Value length at which a two-component put with one "blob" metadata
+    /// entry exactly fills a block.
+    fn exact_fit_value_len() -> usize {
+        let empty =
+            codec::put_row_len(&[1., 2.], &BTreeMap::from([("blob".into(), String::new())]));
+        codec::MAX_RAW_BLOCK_BYTES - codec::block_len([]) - empty
+    }
+
+    fn limit_config() -> Config {
+        Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        }
+    }
+
+    #[test]
+    fn a_row_that_cannot_fit_one_block_is_rejected_before_acknowledgement() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), limit_config())
+                .unwrap();
+        let fits = exact_fit_value_len();
+        // One byte over the seal planner's limit is refused with the limit named.
+        let error = db
+            .apply_request(limit_request(1, 0, vec![limit_put(1, fits + 1)]))
+            .unwrap_err();
+        let Error::Invalid(message) = &error else {
+            panic!("expected Invalid, got {error:?}");
+        };
+        assert!(message.contains("document 1") && message.contains("fit in one block"));
+        assert_eq!((db.sequence(), db.tail_objects), (0, 0));
+        // An exact fit is acknowledged and seals.
+        db.apply_request(limit_request(2, 0, vec![limit_put(2, fits)]))
+            .unwrap();
+        db.seal_delta().unwrap();
+        assert_eq!(db.tail_objects, 0);
+        assert_eq!(db.get(2).unwrap().unwrap().metadata["blob"].len(), fits);
+        // One oversized put rejects its whole request: nothing is applied.
+        let error = db
+            .apply_request(limit_request(
+                3,
+                1,
+                vec![limit_put(3, 10), limit_put(4, fits + 1)],
+            ))
+            .unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)));
+        assert!(db.get(3).unwrap().is_none());
+        assert_eq!(db.sequence(), 1);
+        // Grouped requests are decided individually; the group still commits.
+        let results = db.apply_requests(vec![
+            limit_request(4, 1, vec![limit_put(5, 10)]),
+            limit_request(5, 1, vec![limit_put(6, fits + 1)]),
+            limit_request(6, 1, vec![limit_put(7, 10)]),
+        ]);
+        assert!(results[0].is_ok() && results[2].is_ok());
+        assert!(matches!(results[1], Err(Error::Invalid(_))));
+        assert_eq!(db.sequence(), 3);
+        assert!(db.get(6).unwrap().is_none());
+        assert!(db.get(5).unwrap().is_some() && db.get(7).unwrap().is_some());
+    }
+
+    /// The original wedge: acknowledging an unsealable row made every seal
+    /// fail until the tail reached 64 objects and all writes returned 503.
+    #[test]
+    fn rejected_oversized_puts_cannot_wedge_sealing_or_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), limit_config())
+                .unwrap();
+        let oversized = exact_fit_value_len() + 1;
+        for round in 0..(MAX_TAIL_OBJECTS as u64 + 8) {
+            let nonce = (round % 100) as u8 + 1;
+            let boundary = db.sequence();
+            assert!(
+                matches!(
+                    db.apply_request(limit_request(
+                        nonce,
+                        boundary,
+                        vec![limit_put(1, oversized)]
+                    )),
+                    Err(Error::Invalid(_))
+                ),
+                "round {round}"
+            );
+            db.apply_request(limit_request(
+                nonce + 100,
+                boundary,
+                vec![limit_put(100 + round, 8)],
+            ))
+            .unwrap_or_else(|error| panic!("round {round}: {error}"));
+            if round % 4 == 3 {
+                db.start_seal()
+                    .unwrap_or_else(|error| panic!("round {round}: {error}"));
+                while db.seal_step().unwrap() {}
+            }
+        }
+        assert_eq!(db.tail_objects, 0);
+        let boundary = db.sequence();
+        db.apply_request(limit_request(
+            250,
+            boundary,
+            vec![Mutation::Delete { id: 1 }],
+        ))
+        .unwrap();
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(100).unwrap().unwrap().metadata["blob"].len(), 8);
+    }
+
+    /// A row an older binary acknowledged is still replayed on recovery. It
+    /// blocks sealing until a delete or smaller replacement supersedes it in
+    /// the tail; no acknowledged row is dropped silently.
+    #[test]
+    fn a_legacy_oversized_row_recovers_and_can_be_deleted_or_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        drop(SegmentedDatabase::open(LocalStore::open(&path).unwrap(), limit_config()).unwrap());
+        let store = LocalStore::open(&path).unwrap();
+        for (sequence, id) in [(1_u64, 1_u64), (2, 2)] {
+            let request = limit_request(sequence as u8, sequence - 1, vec![limit_put(id, 300_000)]);
+            let record = LogRecordV1 {
+                version: 1,
+                sequence,
+                request,
+                outcome: retry::Outcome {
+                    sequence,
+                    conflict: None,
+                },
+            };
+            store
+                .create(&log_key(sequence), &encode(&record).unwrap())
+                .unwrap();
+        }
+        drop(store);
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(&path).unwrap(), limit_config()).unwrap();
+        assert_eq!(db.get(1).unwrap().unwrap().metadata["blob"].len(), 300_000);
+        let error = db.start_seal().unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+        db.apply_request(limit_request(10, 2, vec![Mutation::Delete { id: 1 }]))
+            .unwrap();
+        db.apply_request(limit_request(11, 3, vec![limit_put(2, 8)]))
+            .unwrap();
+        db.seal_delta().unwrap();
+        assert_eq!(db.tail_objects, 0);
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(2).unwrap().unwrap().metadata["blob"].len(), 8);
     }
 }

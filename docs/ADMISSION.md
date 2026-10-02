@@ -19,8 +19,9 @@ let outcome = client.write(request.clone())?.wait()?.value;
 service.shutdown(Shutdown::Drain)?;
 ```
 
-Defaults admit at most eight commands and 320 KiB of encoded payload, including
-the active command. Count and bytes are independent limits. `Overloaded` means
+Defaults admit at most eight commands and 1 MiB of encoded payload (the maximum
+valid request size), including the active command. A byte limit below that makes
+the largest valid requests permanently `Overloaded`. Count and bytes are independent limits. `Overloaded` means
 this submission was not enqueued; it cannot publish. All clients share the same
 limits. Payloads are normalized before retention, so caller-reserved capacities
 do not inflate queued memory. Caller-owned inputs and completed results are

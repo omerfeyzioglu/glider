@@ -1,5 +1,5 @@
 use super::{
-    error::{bad_request, ApiError},
+    error::{bad_request, json_errors, ApiError},
     metrics::{cache_status, clustering_status, record_metrics, render_metrics, HttpMetrics},
     Engine0,
 };
@@ -333,5 +333,6 @@ pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
             token: token.map(Arc::from),
             metrics: http_metrics.clone(),
         })
+        .layer(middleware::from_fn(json_errors))
         .layer(middleware::from_fn_with_state(http_metrics, record_metrics))
 }

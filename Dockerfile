@@ -1,4 +1,4 @@
-# Build and run glider-server. See README "Quickstart: Docker Compose".
+# Build and run glider-server. See README "Quickstart", "Docker Compose".
 FROM rust:1.98.1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./

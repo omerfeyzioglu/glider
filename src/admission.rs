@@ -186,7 +186,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Limits {
     /// Includes the command currently executing.
     pub commands: usize,
-    /// Sum of encoded payload charges, including active work.
+    /// Sum of encoded payload charges, including active work. The default is
+    /// `retry::MAX_REQUEST_BYTES`, so any valid request is admitted when
+    /// nothing else is charged; a smaller limit makes the largest valid
+    /// requests permanently `Overloaded`.
     pub bytes: usize,
     /// For engines that run reads on the committer: when set, a queued query
     /// runs before queued writes, lookups and observations unless the oldest
@@ -202,7 +205,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             commands: 8,
-            bytes: 320 * 1024,
+            bytes: crate::retry::MAX_REQUEST_BYTES,
             read_priority: None,
             queries: 4,
         }
@@ -632,7 +635,10 @@ impl<E: Engine> Client<E> {
         }
         let charge = crate::encoded_len(&(&query, k, &filter))?;
         if charge > crate::retry::MAX_REQUEST_BYTES {
-            return Err(Error::Overloaded);
+            // No retry can succeed, so this is a client error, not overload.
+            return Err(
+                crate::Error::Invalid("query exceeds the encoded byte bound".into()).into(),
+            );
         }
         self.enqueue(true, charge, move |reply| {
             let bytes = crate::encode(&(&query, k, &filter))?;
