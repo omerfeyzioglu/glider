@@ -1,10 +1,12 @@
 //! Crash-point matrix: fail every object create and remove of a fixed
 //! workload, before it lands or after (response lost), then reopen and check
-//! the acknowledged state against a model and exact search.
+//! the acknowledged state against a model and exact search. A second
+//! workload converts the namespace to a clustered view (M37) twice, so every
+//! staged posting pack, centroid, catalog and root create is a crash point.
 
 use glider::{
     retry::{Request, RequestId},
-    segmented::SegmentedDatabase,
+    segmented::{ConvertOptions, ReadBudget, SegmentedDatabase},
     store::ObjectStore,
     Config, Error, Metric, Mutation, Result,
 };
@@ -115,7 +117,17 @@ fn open<S: ObjectStore>(
         },
         config(),
     )?
-    .with_reclaim_min_garbage(1))
+    .with_reclaim_min_garbage(1)
+    .with_cluster_probes(usize::MAX))
+}
+
+/// A small view: several gather passes and posting packs for this workload.
+fn conversion() -> ConvertOptions {
+    ConvertOptions {
+        centroids: Some(3),
+        seed: 11,
+        gather_bytes: 16 * 1024,
+    }
 }
 
 fn vector(seed: u64) -> Vec<f32> {
@@ -163,6 +175,7 @@ fn apply(model: &mut Model, mutations: &[Mutation]) {
 /// outcome is uncertain, if the failure hit a write.
 fn run<S: ObjectStore>(
     db: &mut SegmentedDatabase<FaultStore<S>>,
+    convert: bool,
 ) -> (Model, u64, Option<Vec<Mutation>>) {
     let mut model = Model::new();
     for (index, mutations) in batches().into_iter().enumerate() {
@@ -188,6 +201,11 @@ fn run<S: ObjectStore>(
                     while db.prune_step()? {}
                 }
                 while db.reclaim_pack_step()? {}
+                while db.cleanup_step(3)? > 0 {}
+            }
+            // Convert midway, then rebuild the view as a new epoch.
+            if convert && (index == 11 || index == 23) {
+                db.convert_clustered(conversion())?;
                 while db.cleanup_step(3)? > 0 {}
             }
             Ok(())
@@ -227,8 +245,16 @@ fn check<S: ObjectStore>(db: &SegmentedDatabase<FaultStore<S>>, model: &Model, c
             .map(|neighbor| (neighbor.distance.to_bits(), neighbor.id))
             .collect();
         assert_eq!(found, expected, "{context}: exact query {seed}");
+        // Every routable block within budget: equal to exact search.
+        let budget = ReadBudget {
+            blocks: db.block_count().max(1),
+            requests: usize::MAX,
+            bytes: usize::MAX,
+            local_blocks: 0,
+        };
+        assert!(db.clustered_view_error().is_none(), "{context}");
         let selective: Vec<_> = db
-            .search_selective(&query, 10, db.block_count().max(1), &[])
+            .search_selective_within(&query, 10, budget, &[])
             .unwrap()
             .into_iter()
             .map(|neighbor| (neighbor.distance.to_bits(), neighbor.id))
@@ -239,15 +265,18 @@ fn check<S: ObjectStore>(db: &SegmentedDatabase<FaultStore<S>>, model: &Model, c
 
 /// Run the matrix for every `stride`-th mutating operation (both fault
 /// modes). `store(case)` opens a fresh, empty namespace for each case name.
-fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize) {
+fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, convert: bool) {
     let plan = Arc::new(Mutex::new(Plan::default()));
-    let (model, ..) = run(&mut open(store("clean"), &plan).unwrap());
+    let (model, ..) = run(&mut open(store("clean"), &plan).unwrap(), convert);
     let operations = plan.lock().unwrap().operations;
     assert!(
         operations > 50,
         "workload too small: {operations} operations"
     );
-    check(&open(store("clean"), &plan).unwrap(), &model, "clean run");
+    let clean = open(store("clean"), &plan).unwrap();
+    assert_eq!(clean.clustered_epoch(), convert.then_some(2));
+    check(&clean, &model, "clean run");
+    drop(clean);
     for at in (0..operations).step_by(stride.max(1)) {
         for fault in [Fault::Before, Fault::After] {
             let context = format!("operation {at} of {operations}, {fault:?}");
@@ -259,7 +288,7 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize) {
             // A fault may hit namespace creation inside the first open;
             // then nothing was acknowledged and the next open must succeed.
             let (mut acknowledged, sequence, uncertain) = match open(store(&case), &plan) {
-                Ok(mut db) => run(&mut db),
+                Ok(mut db) => run(&mut db, convert),
                 Err(_) => (Model::new(), 0, None),
             };
             assert!(plan.lock().unwrap().fired, "{context}: fault not reached");
@@ -283,8 +312,28 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize) {
             }
             while db.reclaim_pack_step().unwrap() {}
             while db.cleanup_step(16).unwrap() > 0 {}
+            if convert && acknowledged.values().any(Option::is_some) {
+                let epoch = db.clustered_epoch().unwrap_or(0);
+                assert_eq!(db.convert_clustered(conversion()).unwrap().epoch, epoch + 1);
+                while db.cleanup_step(16).unwrap() > 0 {}
+            } else if convert {
+                // Nothing sealed and live: there is nothing to convert.
+                assert!(matches!(
+                    db.convert_clustered(conversion()),
+                    Err(Error::Invalid(_))
+                ));
+            }
             check(&db, &acknowledged, &format!("{context}, after maintenance"));
             drop(db);
+            if convert {
+                // Cleanup removed every staged orphan and replaced view.
+                let keys = store(&case).list().unwrap();
+                let views = usize::from(acknowledged.values().any(Option::is_some));
+                for prefix in ["sgcentroid-", "sgcluster-"] {
+                    let count = keys.iter().filter(|key| key.starts_with(prefix)).count();
+                    assert_eq!(count, views, "{context}: {prefix}");
+                }
+            }
             let db = open(store(&case), &plan).unwrap();
             check(&db, &acknowledged, &format!("{context}, reopened"));
         }
@@ -341,6 +390,27 @@ fn every_create_and_remove_failure_recovers_acknowledged_state() {
                 .clone()
         },
         stride(1),
+        false,
+    );
+}
+
+/// The same matrix over a workload that converts to a clustered view and
+/// later rebuilds it: interrupted conversions leave the previous root
+/// serving and only orphans behind, which cleanup removes.
+#[test]
+fn every_conversion_create_and_remove_failure_recovers_acknowledged_state() {
+    let stores = Mutex::new(BTreeMap::<String, MemoryStore>::new());
+    matrix(
+        |case| {
+            stores
+                .lock()
+                .unwrap()
+                .entry(case.into())
+                .or_default()
+                .clone()
+        },
+        stride(1),
+        true,
     );
 }
 
@@ -369,5 +439,6 @@ fn minio_every_sampled_failure_recovers_acknowledged_state() {
             .unwrap()
         },
         stride(7),
+        false,
     );
 }
