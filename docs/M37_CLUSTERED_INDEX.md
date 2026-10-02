@@ -1,6 +1,7 @@
 # M37: global clustered index for the segmented engine
 
-Status: design proposal, not an implemented format or a measured quality result.
+Status: stage 1 format codecs and validators implemented; no clustered writer,
+conversion, query path, or measured quality result.
 The first implementation target is the M31 single-writer, 128-dimensional SIFT1M
 envelope. Exact search over the committed runs and log tail remains the oracle.
 
@@ -43,13 +44,17 @@ retry state and recovery. A serving copy never acknowledges a mutation. The
 directory still has exactly one canonical location per ID; duplicate posting
 rows never enter an ID run index.
 
-A **root v2** keeps v1's generation, sequence, configuration, retry state and
+A **root v4** keeps v1's generation, sequence, configuration, retry state and
 runs, and adds a required clustered-view reference: `(epoch, centroid key,
 centroid length and SHA-256, catalog key, catalog length and SHA-256)`. The
 old root v1 remains selected during conversion and serves through the existing
-per-seal route under its existing quality policy. Readers accept roots v1 and
-v2; writers of a converted namespace emit v2.
-Older binaries must reject v2 rather than discard its reference. Root keys remain
+per-seal route under its existing quality policy. Root v2 already carries M36
+takeover fences, and v3 is the M36 fence marker, so v4 is the next free root
+version. The v4 JSON requires `clustered`; v1 and v2 forbid it. A v4 root may
+also carry takeover fences. Format decoding accepts v4; until clustered
+serving is implemented, opening a selected v4 root fails closed. Converted
+writers will emit v4. Older binaries reject v4 rather than discard its
+reference. Root keys remain
 `sgroot-{generation:020}`; their never-reused generations are the only index
 visibility switch. Root zero and metadata keep their existing meanings.
 
@@ -81,6 +86,26 @@ complete view; the 1M starting estimate is thousands of extents and roughly
 1-3 MiB of resident descriptors, to be measured. Cap its encoded size (for
 example 16 MiB) and fail maintenance before publication if exceeded; do not
 silently omit partitions.
+
+Stage 1 binary layouts use little-endian numbers and exact lengths. Centroid
+v1 is `GLCENT01`, dimension `u32`, metric `u8` (0 squared Euclidean, 1
+Manhattan, 2 cosine), source generation and sequence `u64`, seed `u64`, sample
+rule `u8` (1 = seeded hash priority over live IDs), sample row count `u32`,
+training iterations `u32`, sample SHA-256 (32 raw bytes), epoch `u64`, center
+count `u32`, then each center's ID `u32` and `dimension` f32 coordinates.
+There are at most 4,096 unique centers and 16,384 sampled rows; a centroid
+object is at most 2 MiB. Cosine centers have squared norm within `1e-4` of 1.
+Catalog v1 is `GLCLCAT1`, epoch `u64`, cluster count `u32`, then ID-ordered
+clusters: ID `u32`, extent count `u32`, then each extent's pack-key byte length
+`u16`, UTF-8 key, payload length, offset, length and row count `u32`, epoch
+`u64`, cluster ID `u32`, kind `u8` (0 canonical, 1 derived), posting role
+`u8` (0 primary, 1 secondary), block count `u32`,
+then each block's offset and length `u32` and SHA-256 (32 raw bytes). The
+catalog lists every center, including empty clusters; extents are ordered by
+`(pack key, offset)` within a cluster, and it has at most 65,536
+extents and 16 MiB of bytes. Blocks cover each extent exactly; extents do not
+overlap within a pack. Root references authenticate complete centroid and
+catalog bytes by length and SHA-256 before their decoders run.
 
 Packs retain the existing <=1 MiB block-data and <=12-block limits, <=128 KiB
 encoded blocks, `GLB2` full-precision records, and authenticated sketch frame.
@@ -163,7 +188,7 @@ blocks and have no vector posting. Materialize one <=1 MiB pack per step,
 grouping cluster fragments contiguously and splitting at 170 rows or the
 120 KiB raw block limit. Preserve displaced frozen tail versions while later
 acknowledged writes arrive. Stage packs and the ordinary ID run index, then a
-new catalog with these fragments, then root v2 at the seal boundary. Only the
+new catalog with these fragments, then root v4 at the seal boundary. Only the
 root PUT makes the seal and its cluster fragments visible; later logs replay
 over it. A missing fragment prevents clustered serving; the canonical run and
 logs still define exact results.
@@ -275,14 +300,14 @@ from a stray centroid or catalog object. Conversion is explicit and offline
 under exclusive ownership with writes quiesced: select and validate the
 current canonical root plus tail, train the bounded sample, stream its current
 live rows into clustered packs, stage centroid and catalog, then publish root
-v2 pointing to the complete view. Retain the existing canonical runs and
+v4 pointing to the complete view. Retain the existing canonical runs and
 log tail; the selected root sequence and retry state do not change.
 Interrupted conversion leaves root v1 selected and its serving behavior intact;
 on reopen, cleanup removes staged orphans or a new attempt uses new keys.
 During offline conversion, stage new sketches as bytes without retaining a
-second full resident set; release v1 routing sketches before loading the v2
+second full resident set; release v1 routing sketches before loading the v4
 view. Reads are quiesced for this switch. After successful root publication,
-reopen validates v2 and uses clustered seals. There is no mixed partial index
+reopen validates v4 and uses clustered seals. There is no mixed partial index
 visible to queries. An unconverted namespace can remain v1 indefinitely;
 changing metadata or silently starting
 a full rebuild on open is not required. Restore into an empty prefix carries
@@ -329,12 +354,12 @@ query p95, <=150 ms write p95, <=8 GET and <=1 MiB per cold query,
 overloads, late slots or maintenance errors. The 250k comparison also uses
 M21's tighter 64 MiB RSS and 1 s open gates when evaluating that envelope.
 
-1. Add format decoders/validators and tests for root v2, centroid v1 and
+1. Add format decoders/validators and tests for root v4, centroid v1 and
    catalog v1; keep v1 opens and exact results unchanged. Include malformed
    length/digest/epoch/extent and old-reader rejection tests.
 2. Add deterministic bounded training and an offline clustering probe only;
    produce occupancy and recall-versus-budget curves before enabling writes.
-3. Add explicit v1-to-v2 conversion and clustered read-only queries. Test
+3. Add explicit v1-to-v4 conversion and clustered read-only queries. Test
    crashes after each staged pack, centroid, catalog and root create, plus
    restart, cache loss, missing/corrupt derived objects and exact equality.
 4. Add clustered seal-time assignment and root/catalog publication. Test
