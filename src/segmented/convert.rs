@@ -1,14 +1,19 @@
-//! M37 stage 3: explicit conversion of a namespace's sealed rows into a
-//! clustered view, published by one root v4.
+//! M37 stage 3: conversion of a namespace's sealed rows into a clustered
+//! view, published by one root v4, explicitly (`convert_clustered`) or as
+//! idle serving maintenance (`SegmentedServing`'s automatic conversion).
 //!
-//! A conversion freezes the selected root and its latest-ID directory, then
-//! advances in bounded steps, each at most one canonical pack read or one
-//! object create: it samples live sealed rows, trains centroids, assigns
-//! every row, gathers cluster ranges into cluster-contiguous posting packs,
-//! then creates the centroid object, the catalog and finally the root. Only
-//! that root create switches serving; every earlier object is an orphan
-//! that cleanup removes after a reopen. The canonical runs, log tail,
-//! sequence and retry state are unchanged and stay authoritative.
+//! A conversion freezes the selected root's runs and the live sealed puts
+//! they hold, then advances in bounded steps, each at most one canonical
+//! pack read or one object create: it samples live sealed rows, trains
+//! centroids, assigns every row, gathers cluster ranges into
+//! cluster-contiguous posting packs, then creates the centroid object, the
+//! catalog and finally the root. Only that root create switches serving;
+//! every earlier object is an orphan that cleanup removes after a reopen or
+//! an abandoned attempt. The canonical runs, log tail, sequence and retry
+//! state are unchanged and stay authoritative. Without a selected view,
+//! seals and consolidation of runs newer than the frozen ones may publish
+//! between steps; a frozen row they shadow is simply not copied, and the
+//! versions they seal stay routed through their canonical packs.
 use super::{
     attempt_id,
     clustered::{
@@ -34,7 +39,7 @@ use std::{
 
 /// The automatic centroid count targets about this many live rows per
 /// cluster (`benchmarks/M37.md`: 256 centroids at 1,000,000 rows).
-const TARGET_CLUSTER_ROWS: f64 = 4_000.;
+pub(super) const TARGET_CLUSTER_ROWS: usize = 4_000;
 /// Bounded training profile: sample rows and Lloyd iterations.
 const SAMPLE_ROWS: usize = 16_384;
 const ITERATIONS: usize = 2;
@@ -76,8 +81,10 @@ pub struct ConversionSummary {
     pub epoch: u64,
     pub root_generation: u64,
     /// The source root sequence: postings cover every live version sealed
-    /// at or below it.
+    /// at or below it that is still current.
     pub source_sequence: u64,
+    /// Posting rows: the frozen live sealed puts not shadowed by a seal
+    /// before they were gathered.
     pub rows: u64,
     pub centroids: usize,
     pub sample_rows: usize,
@@ -111,11 +118,68 @@ enum Phase {
     Root,
 }
 
+/// Marks a put that was not current when its source was assigned; it
+/// never becomes current again, so gathering skips it.
+const UNASSIGNED: u16 = u16::MAX;
+
+/// Where a running conversion is; see
+/// [`SegmentedDatabase::conversion_progress`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ConversionProgress {
+    /// `sample`, `assign`, `gather`, `write`, `catalog` or `root`.
+    pub phase: &'static str,
+    /// Canonical packs holding the frozen live sealed puts; the sample,
+    /// assignment and every gather pass read each once.
+    pub sources: usize,
+    /// Source packs the current pass has read.
+    pub sources_done: usize,
+    /// Current gather pass (1-based) and the number of passes, both 0
+    /// until assignment has sized them.
+    pub pass: usize,
+    pub passes: usize,
+    pub posting_packs: usize,
+    /// Live sealed puts frozen when the conversion started.
+    pub rows: u64,
+    /// The epoch being built: 1 for a first view, higher for a rebuild.
+    pub epoch: u64,
+    /// Its centroid count, 0 until training.
+    pub centroids: usize,
+}
+
+impl ConversionProgress {
+    /// Stable numeric code of `phase` for metrics: 1 sample, 2 assign,
+    /// 3 gather, 4 write, 5 catalog, 6 root.
+    pub fn phase_code(&self) -> u64 {
+        match self.phase {
+            "sample" => 1,
+            "assign" => 2,
+            "gather" => 3,
+            "write" => 4,
+            "catalog" => 5,
+            "root" => 6,
+            _ => 0,
+        }
+    }
+}
+
 pub(super) struct ConvertState {
     attempt: String,
     seed: u64,
     gather_bytes: usize,
+    /// Generation and sequence of the root the conversion froze.
     generation: u64,
+    sequence: u64,
+    /// Index objects of the frozen root's runs. Runs sealed later are
+    /// appended after them and only those may be consolidated, so frozen
+    /// `(run, block)` locations stay valid until publication.
+    frozen_runs: Vec<String>,
+    /// Keys of every object this attempt created or tried to create; they
+    /// stay out of cleanup until the attempt publishes or is abandoned.
+    staged: Vec<String>,
+    /// Current rows copied into posting packs so far.
+    gathered: u64,
+    /// Live sealed puts of the frozen root.
+    frozen_rows: u64,
     epoch: u64,
     centroid_count: usize,
     sources: Vec<Source>,
@@ -126,7 +190,8 @@ pub(super) struct ConvertState {
     /// Centers in cluster-ID order; cluster IDs are their indexes.
     centers: Vec<Vec<f32>>,
     fingerprints: BTreeMap<u32, [u8; 32]>,
-    /// Per source pack, the cluster of each live put in scan order.
+    /// Per source pack, the cluster of each put in scan order, or
+    /// [`UNASSIGNED`] for a put that was no longer current.
     assignments: Vec<Vec<u16>>,
     charges: Vec<usize>,
     ranges: Vec<Range<usize>>,
@@ -136,9 +201,10 @@ pub(super) struct ConvertState {
     summary: ConversionSummary,
 }
 
-/// `2^round(log2(rows / 4,000))`, at least one.
-fn automatic_centroids(rows: usize) -> usize {
-    let exponent = (rows as f64 / TARGET_CLUSTER_ROWS).log2().round();
+/// The centroid count a conversion without an explicit count chooses for
+/// `rows` live sealed rows: `2^round(log2(rows / 4,000))`, from 1 to 4,096.
+pub fn automatic_centroids(rows: usize) -> usize {
+    let exponent = (rows as f64 / TARGET_CLUSTER_ROWS as f64).log2().round();
     if exponent <= 0. {
         1
     } else {
@@ -267,19 +333,81 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// run it under exclusive ownership while no other maintenance runs.
     ///
     /// Memory is bounded by the 16,384-row training sample, two bytes per
-    /// live sealed row for assignments and `gather_bytes` of rows per pass,
-    /// plus one pack. Queries keep using the previous root until the new
-    /// root's create succeeds; interrupted conversions leave only orphans
-    /// that cleanup removes. Any create error poisons the handle: reopen to
-    /// learn whether the root was published. Writes may continue in the log
-    /// tail, which shadows converted rows like any older version.
+    /// sealed put of the source packs for assignments and `gather_bytes` of
+    /// rows per pass, plus one pack. Queries keep using the previous root
+    /// until the new root's create succeeds; interrupted conversions leave
+    /// only orphans that cleanup removes. Any create error poisons the
+    /// handle: reopen to learn whether the root was published. Any other
+    /// error abandons the attempt. Writes may continue in the log tail,
+    /// which shadows converted rows like any older version.
     pub fn convert_clustered(&mut self, options: ConvertOptions) -> Result<ConversionSummary> {
         self.start_conversion(options)?;
         loop {
-            if let Some(summary) = self.conversion_step()? {
-                return Ok(summary);
+            match self.conversion_step() {
+                Ok(Some(summary)) => return Ok(summary),
+                Ok(None) => {}
+                Err(error) => {
+                    self.abandon_conversion();
+                    return Err(error);
+                }
             }
         }
+    }
+
+    /// Whether a conversion is staged.
+    pub fn conversion_active(&self) -> bool {
+        self.convert.is_some()
+    }
+
+    /// The running conversion's phase and counters, if one is staged.
+    pub fn conversion_progress(&self) -> Option<ConversionProgress> {
+        let state = self.convert.as_ref()?;
+        let (phase, pass) = match &state.phase {
+            Phase::Sample(_) => ("sample", 0),
+            Phase::Assign => ("assign", 0),
+            Phase::Gather { range, .. } => ("gather", range + 1),
+            Phase::Write { range, .. } => ("write", range + 1),
+            Phase::Catalog => ("catalog", state.ranges.len()),
+            Phase::Root => ("root", state.ranges.len()),
+        };
+        Some(ConversionProgress {
+            phase,
+            sources: state.sources.len(),
+            sources_done: match state.phase {
+                Phase::Sample(_) | Phase::Assign | Phase::Gather { .. } => state.next,
+                _ => state.sources.len(),
+            },
+            pass,
+            passes: state.ranges.len(),
+            posting_packs: state.summary.posting_packs,
+            rows: state.frozen_rows,
+            epoch: state.epoch,
+            centroids: state.summary.centroids,
+        })
+    }
+
+    /// Drop a staged conversion. Its staged objects were never selected;
+    /// unless the handle is poisoned they become obsolete for cleanup
+    /// (a reopen's cleanup removes them otherwise).
+    pub(super) fn abandon_conversion(&mut self) {
+        if self.convert.take().is_some() && !self.poisoned {
+            self.schedule_obsolete();
+        }
+    }
+
+    /// Keys a staged conversion created, which cleanup must retain.
+    pub(super) fn conversion_staged(&self) -> &[String] {
+        self.convert
+            .as_ref()
+            .map_or(&[], |state| state.staged.as_slice())
+    }
+
+    /// Runs of the root a staged conversion froze, which consolidation
+    /// must leave in place; 0 without a conversion.
+    pub(super) fn conversion_frozen_runs(&self) -> usize {
+        self.convert
+            .as_ref()
+            .map_or(0, |state| state.frozen_runs.len())
     }
 
     /// Freeze the selected root's live sealed puts for a conversion.
@@ -342,6 +470,16 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             seed: options.seed,
             gather_bytes: options.gather_bytes,
             generation: self.root.generation,
+            sequence: self.root.sequence,
+            frozen_runs: self
+                .root
+                .runs
+                .iter()
+                .map(|run| run.index_object.clone())
+                .collect(),
+            staged: Vec::new(),
+            gathered: 0,
+            frozen_rows: rows as u64,
             epoch: self
                 .root
                 .clustered
@@ -362,20 +500,32 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             catalog: None,
             summary: ConversionSummary {
                 source_sequence: self.root.sequence,
-                rows: rows as u64,
                 ..ConversionSummary::default()
             },
         });
         Ok(())
     }
 
-    /// Visit the live sealed puts of one source pack in scan order, from
-    /// one range read of its referenced blocks, each authenticated.
+    /// Whether the frozen runs are still the selected root's first runs,
+    /// so frozen `(run, block)` locations still name the same blocks.
+    fn frozen_runs_intact(&self, state: &ConvertState) -> bool {
+        let runs = &self.root.runs;
+        runs.len() >= state.frozen_runs.len()
+            && runs
+                .iter()
+                .zip(&state.frozen_runs)
+                .all(|(run, frozen)| &run.index_object == frozen)
+    }
+
+    /// Every sealed put of one source pack's referenced blocks in scan
+    /// order, each with whether it is still the current version, from one
+    /// range read whose blocks are each authenticated. Reads everything
+    /// before returning, so a failed read has no partial effect.
     fn source_puts(
         &self,
+        state: &ConvertState,
         source: &Source,
-        mut visit: impl FnMut(BlockRecord) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<(BlockRecord, bool)>> {
         let references: Vec<&BlockRef> = source
             .blocks
             .iter()
@@ -391,7 +541,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .store
             .get_range(&source.key, start, end - start, references[0].payload_len)?
             .ok_or_else(|| Error::Corrupt(format!("segmented pack missing: {}", source.key)))?;
-        let mut seen = 0;
+        let mut puts = Vec::new();
+        let mut current_puts = 0;
         for (&(run, ordinal), reference) in source.blocks.iter().zip(references) {
             let at = reference.offset - start;
             let block = decode_block_bytes(
@@ -402,32 +553,38 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .ok_or_else(|| Error::Corrupt("segmented range read is short".into()))?,
             )?;
             for record in block.records {
-                let id = record.id();
-                let current = matches!(record.mutation, Mutation::Put { .. })
-                    && self.latest.get(&id).is_some_and(|location| {
-                        location.run == run
-                            && location.entry.block as usize == ordinal
-                            && location.entry.sequence == record.sequence
-                            && !location.entry.deleted
-                    });
-                if current {
-                    seen += 1;
-                    visit(record)?;
+                if !matches!(record.mutation, Mutation::Put { .. }) {
+                    continue;
                 }
+                let current = self.latest.get(&record.id()).is_some_and(|location| {
+                    location.run == run
+                        && location.entry.block as usize == ordinal
+                        && location.entry.sequence == record.sequence
+                        && !location.entry.deleted
+                });
+                current_puts += usize::from(current);
+                puts.push((record, current));
             }
         }
-        if seen != source.puts {
+        // Only a later seal moves a frozen ID's directory entry, and a
+        // version once shadowed never becomes current again.
+        let unchanged = self.root.runs.len() == state.frozen_runs.len();
+        if current_puts > source.puts || (unchanged && current_puts != source.puts) {
             return Err(Error::Corrupt(
                 "segmented directory disagrees with a canonical block".into(),
             ));
         }
-        Ok(())
+        Ok(puts)
     }
 
     /// Advance a conversion by one bounded step: one canonical pack read
     /// (sampling, assignment or gathering), training, or one create of a
     /// centroid object, posting pack, catalog or root. Returns the summary
     /// once the root is published.
+    ///
+    /// A failed read leaves the conversion staged for a retry. A create
+    /// error poisons the handle; any other error abandons the attempt, so
+    /// its staged objects become obsolete.
     pub(super) fn conversion_step(&mut self) -> Result<Option<ConversionSummary>> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
@@ -435,101 +592,155 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let Some(mut state) = self.convert.take() else {
             return Ok(None);
         };
-        if state.generation != self.root.generation {
-            return Err(Error::Corrupt("root changed during conversion".into()));
+        if !self.frozen_runs_intact(&state) {
+            self.convert = Some(state);
+            self.abandon_conversion();
+            return Err(Error::Corrupt(
+                "frozen runs changed during conversion".into(),
+            ));
         }
-        let config = self.config;
-        let phase = mem::replace(&mut state.phase, Phase::Root);
-        state.phase = match phase {
-            Phase::Sample(mut sample) => {
-                if state.next < state.sources.len() {
-                    self.source_puts(&state.sources[state.next], |record| {
-                        if let Mutation::Put { id, vector, .. } = &record.mutation {
-                            sample.offer(*id, vector);
-                        }
-                        Ok(())
-                    })?;
-                    state.next += 1;
-                    Phase::Sample(sample)
-                } else {
-                    self.train(&mut state, sample)?;
-                    state.next = 0;
-                    Phase::Assign
+        let reads = match state.phase {
+            Phase::Sample(_) | Phase::Gather { .. } => state.next < state.sources.len(),
+            Phase::Assign => state.centroid_object.is_some() && state.next < state.sources.len(),
+            Phase::Root => {
+                if self.seal.is_some() {
+                    // A staged seal publishes from the root it froze.
+                    self.convert = Some(state);
+                    return Err(Error::MaintenanceRequired);
+                }
+                false
+            }
+            _ => false,
+        };
+        let puts = if reads {
+            match self.source_puts(&state, &state.sources[state.next]) {
+                Ok(puts) => Some(puts),
+                Err(error) => {
+                    self.convert = Some(state);
+                    return Err(error);
                 }
             }
-            Phase::Assign if state.centroid_object.is_none() => {
+        } else {
+            None
+        };
+        match self.advance_conversion(&mut state, puts) {
+            Ok(true) => Ok(Some(state.summary)),
+            Ok(false) => {
+                self.convert = Some(state);
+                Ok(None)
+            }
+            Err(error) => {
+                if !self.poisoned {
+                    // Keep the staged keys out of cleanup until now.
+                    self.convert = Some(state);
+                    self.abandon_conversion();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// One step after its read, if any. Returns true once published.
+    fn advance_conversion(
+        &mut self,
+        state: &mut ConvertState,
+        puts: Option<Vec<(BlockRecord, bool)>>,
+    ) -> Result<bool> {
+        let config = self.config;
+        let phase = mem::replace(&mut state.phase, Phase::Root);
+        state.phase = match (phase, puts) {
+            (Phase::Sample(mut sample), Some(puts)) => {
+                for (record, current) in &puts {
+                    if let (true, Mutation::Put { id, vector, .. }) = (current, &record.mutation) {
+                        sample.offer(*id, vector);
+                    }
+                }
+                state.next += 1;
+                Phase::Sample(sample)
+            }
+            (Phase::Sample(sample), None) => {
+                self.train(state, sample)?;
+                state.next = 0;
+                Phase::Assign
+            }
+            (Phase::Assign, None) if state.centroid_object.is_none() => {
                 let centroids = state.centroids.as_ref().expect("trained before assignment");
                 let bytes = centroids.encode()?;
                 let reference = object_ref(format!("sgcentroid-{}", state.attempt), &bytes);
-                self.poisoned = true;
-                self.create_staged(&reference.key, &bytes)?;
-                self.poisoned = false;
+                self.create_conversion_object(state, &reference.key, &bytes)?;
                 state.centroid_object = Some(reference);
                 Phase::Assign
             }
-            Phase::Assign => {
-                if state.next < state.sources.len() {
-                    let mut rows = Vec::new();
-                    self.source_puts(&state.sources[state.next], |record| {
-                        rows.push(record);
-                        Ok(())
-                    })?;
-                    let vectors: Vec<&[f32]> = rows
-                        .iter()
-                        .map(|record| match &record.mutation {
-                            Mutation::Put { vector, .. } => vector.as_slice(),
-                            Mutation::Delete { .. } => unreachable!("sources yield puts"),
-                        })
-                        .collect();
-                    let clusters = assign(config.metric, &state.centers, &vectors);
-                    for (record, &cluster) in rows.iter().zip(&clusters) {
+            (Phase::Assign, Some(puts)) => {
+                let vectors: Vec<&[f32]> = puts
+                    .iter()
+                    .filter(|(_, current)| *current)
+                    .map(|(record, _)| match &record.mutation {
+                        Mutation::Put { vector, .. } => vector.as_slice(),
+                        Mutation::Delete { .. } => unreachable!("sources yield puts"),
+                    })
+                    .collect();
+                let mut clusters = assign(config.metric, &state.centers, &vectors).into_iter();
+                let mut assigned = Vec::with_capacity(puts.len());
+                for (record, current) in &puts {
+                    if *current {
+                        let cluster = clusters.next().expect("one cluster per current put");
                         state.charges[cluster as usize] +=
                             codec::record_len(record) + RECORD_OVERHEAD;
-                    }
-                    state.assignments.push(clusters);
-                    state.next += 1;
-                    Phase::Assign
-                } else {
-                    state.ranges = gather_ranges(&state.charges, state.gather_bytes);
-                    state.summary.gather_passes = state.ranges.len();
-                    state.next = 0;
-                    Phase::Gather {
-                        range: 0,
-                        buffers: vec![Vec::new(); state.ranges[0].len()],
+                        assigned.push(cluster);
+                    } else {
+                        assigned.push(UNASSIGNED);
                     }
                 }
+                state.assignments.push(assigned);
+                state.next += 1;
+                Phase::Assign
             }
-            Phase::Gather { range, mut buffers } => {
+            (Phase::Assign, None) => {
+                state.ranges = gather_ranges(&state.charges, state.gather_bytes);
+                state.summary.gather_passes = state.ranges.len();
+                state.next = 0;
+                Phase::Gather {
+                    range: 0,
+                    buffers: vec![Vec::new(); state.ranges[0].len()],
+                }
+            }
+            (Phase::Gather { range, mut buffers }, Some(puts)) => {
                 let clusters = state.ranges[range].clone();
-                if state.next < state.sources.len() {
-                    let assignments = &state.assignments[state.next];
-                    let mut row = 0;
-                    self.source_puts(&state.sources[state.next], |record| {
-                        let cluster = usize::from(assignments[row]);
-                        row += 1;
-                        if clusters.contains(&cluster) {
-                            buffers[cluster - clusters.start].push(record);
-                        }
-                        Ok(())
-                    })?;
-                    state.next += 1;
-                    Phase::Gather { range, buffers }
-                } else {
-                    let buffers = buffers
-                        .into_iter()
-                        .enumerate()
-                        .map(|(offset, rows)| ((clusters.start + offset) as u32, rows))
-                        .collect();
-                    state.next = 0;
-                    Phase::Write {
-                        range,
-                        packs: layout(config, buffers)?,
+                let assignments = &state.assignments[state.next];
+                if assignments.len() != puts.len() {
+                    return Err(Error::Corrupt(
+                        "conversion source changed between passes".into(),
+                    ));
+                }
+                for ((record, current), &cluster) in puts.into_iter().zip(assignments) {
+                    let cluster = usize::from(cluster);
+                    // A put shadowed since assignment is not copied.
+                    if current && cluster != usize::from(UNASSIGNED) && clusters.contains(&cluster)
+                    {
+                        buffers[cluster - clusters.start].push(record);
+                        state.gathered += 1;
                     }
                 }
+                state.next += 1;
+                Phase::Gather { range, buffers }
             }
-            Phase::Write { range, mut packs } => {
+            (Phase::Gather { range, buffers }, None) => {
+                let clusters = state.ranges[range].clone();
+                let buffers = buffers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(offset, rows)| ((clusters.start + offset) as u32, rows))
+                    .collect();
+                state.next = 0;
+                Phase::Write {
+                    range,
+                    packs: layout(config, buffers)?,
+                }
+            }
+            (Phase::Write { range, mut packs }, None) => {
                 if let Some(blocks) = packs.pop_front() {
-                    self.write_posting_pack(&mut state, &blocks)?;
+                    self.write_posting_pack(state, &blocks)?;
                     Phase::Write { range, packs }
                 } else if range + 1 < state.ranges.len() {
                     Phase::Gather {
@@ -540,7 +751,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     Phase::Catalog
                 }
             }
-            Phase::Catalog => {
+            (Phase::Catalog, None) => {
                 let centroids = state.centroids.as_ref().expect("trained before catalog");
                 let catalog = Catalog {
                     epoch: state.epoch,
@@ -559,24 +770,48 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .flat_map(|cluster| &cluster.extents)
                     .map(|extent| u64::from(extent.rows))
                     .sum();
-                // Every live sealed put has exactly one posting row.
-                if posting_rows != state.summary.rows {
+                // Every gathered put has exactly one posting row and, unless
+                // a seal shadowed some since the freeze, every frozen one.
+                let unchanged = self.root.runs.len() == state.frozen_runs.len();
+                if posting_rows != state.gathered
+                    || (unchanged && posting_rows != state.frozen_rows)
+                {
                     return Err(Error::Corrupt(
                         "conversion postings do not cover the sealed rows".into(),
                     ));
                 }
                 let bytes = catalog.encode(centroids)?;
                 let reference = object_ref(format!("sgcluster-{}", state.attempt), &bytes);
-                self.poisoned = true;
-                self.create_staged(&reference.key, &bytes)?;
-                self.poisoned = false;
+                self.create_conversion_object(state, &reference.key, &bytes)?;
                 state.catalog = Some(reference);
                 Phase::Root
             }
-            Phase::Root => return self.publish_conversion(state),
+            (Phase::Root, None) => {
+                // A legacy root's runs first get their manifests, one create
+                // per step; the root itself is published on the last step.
+                if self.publish_conversion(state)? {
+                    return Ok(true);
+                }
+                Phase::Root
+            }
+            (_, Some(_)) => unreachable!("only sample, assign and gather steps read"),
         };
-        self.convert = Some(state);
-        Ok(None)
+        Ok(false)
+    }
+
+    /// Create one staged object of a conversion; an error poisons the
+    /// handle because the create's outcome is unknown.
+    fn create_conversion_object(
+        &mut self,
+        state: &mut ConvertState,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        state.staged.push(key.to_owned());
+        self.poisoned = true;
+        self.create_staged(key, bytes)?;
+        self.poisoned = false;
+        Ok(())
     }
 
     /// Train centers on the sample, then stage the centroid object.
@@ -609,8 +844,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         let centroids = Centroids {
             config: self.config,
-            source_generation: self.root.generation,
-            source_sequence: self.root.sequence,
+            source_generation: state.generation,
+            source_sequence: state.sequence,
             seed: state.seed,
             sample_rule: 1,
             sample_rows: rows.len() as u32,
@@ -657,9 +892,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             blocks,
             Some(&state.fingerprints),
         )?;
-        self.poisoned = true;
-        self.create_staged(&key, &bytes)?;
-        self.poisoned = false;
+        self.create_conversion_object(state, &key, &bytes)?;
         state.summary.posting_packs += 1;
         state.summary.posting_bytes += bytes.len() as u64;
         let mut last: Option<u32> = None;
@@ -698,11 +931,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(())
     }
 
-    /// Publish the root selecting the staged view, then load it the way
-    /// an open does. The previous view stays readable by query views that
-    /// still hold it. A legacy root's runs first get their manifests, one
-    /// create per step (`None` until the root is published).
-    fn publish_conversion(&mut self, mut state: ConvertState) -> Result<Option<ConversionSummary>> {
+    /// Publish the root selecting the staged view over the current runs
+    /// (the frozen ones plus any sealed since), then load it the way an
+    /// open does. Versions sealed after the freeze have no posting copy and
+    /// stay routed through their canonical packs. The previous view stays
+    /// readable by query views that still hold it. A legacy root's runs
+    /// first get their manifests, one create per call; returns true once the
+    /// root is published.
+    fn publish_conversion(&mut self, state: &mut ConvertState) -> Result<bool> {
         let mut root = self.next_root()?;
         root.clustered = Some(ViewRef {
             epoch: state.epoch,
@@ -711,14 +947,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         });
         root.validate(self.config)?;
         if self.stage_manifest(&mut root)? {
-            self.convert = Some(state);
-            return Ok(None);
+            return Ok(false);
         }
         let bytes = super::manifest::encode_root(&root)?;
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &bytes)?;
         state.summary.root_generation = root.generation;
         state.summary.epoch = state.epoch;
+        state.summary.rows = state.gathered;
         if let Some(old) = self.cluster.take() {
             self.retired_views.push(Arc::downgrade(&old));
         }
@@ -732,7 +968,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         self.poisoned = false;
         self.schedule_obsolete();
-        Ok(Some(state.summary))
+        Ok(true)
     }
 }
 
@@ -799,8 +1035,8 @@ mod tests {
     }
 
     /// Writes acknowledged between conversion steps shadow the frozen rows
-    /// through the tail and then the directory; root-changing maintenance
-    /// waits for the conversion.
+    /// through the tail and then the directory; pruning, reclamation and
+    /// merges wait for the conversion.
     #[test]
     fn writes_during_conversion_shadow_converted_rows() {
         let config = Config {
@@ -825,11 +1061,12 @@ mod tests {
             gather_bytes: 8 * 1024,
         })
         .unwrap();
-        assert!(matches!(db.start_seal(), Err(Error::MaintenanceRequired)));
+        assert!(matches!(db.start_prune(), Err(Error::MaintenanceRequired)));
         assert!(matches!(
-            db.consolidate_runs_step(),
+            db.start_reclaim(),
             Err(Error::MaintenanceRequired)
         ));
+        assert!(matches!(db.start_merge(), Err(Error::MaintenanceRequired)));
         let mut steps = 0;
         let summary = loop {
             if let Some(summary) = db.conversion_step().unwrap() {
@@ -859,6 +1096,97 @@ mod tests {
         let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
             .unwrap()
             .with_cluster_probes(usize::MAX);
+        assert_exact(&db, "reopened");
+    }
+
+    /// Without a selected view, seals and consolidation of runs newer than
+    /// the frozen ones publish between conversion steps. The view covers
+    /// the frozen rows they did not shadow, newer versions stay routed
+    /// through their canonical packs, and cleanup never removes a staged
+    /// object before the conversion's root.
+    #[test]
+    fn seals_and_newer_run_consolidation_publish_during_conversion() {
+        let config = Config {
+            dimensions: 4,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let mut db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_cluster_probes(usize::MAX);
+        for batch in 0..6_u64 {
+            apply(
+                &mut db,
+                (0..100).map(|n| put(batch * 100 + n, n as f32)).collect(),
+            );
+            db.seal_delta().unwrap();
+        }
+        while db.consolidate_runs_step().unwrap() {}
+        let frozen_runs = db.run_count();
+        let frozen_index: Vec<_> = db
+            .root
+            .runs
+            .iter()
+            .map(|run| run.index_object.clone())
+            .collect();
+        db.start_conversion(ConvertOptions {
+            centroids: Some(5),
+            seed: 5,
+            gather_bytes: 8 * 1024,
+        })
+        .unwrap();
+        let (mut steps, mut seals, mut consolidations) = (0, 0, 0);
+        let summary = loop {
+            if let Some(summary) = db.conversion_step().unwrap() {
+                break summary;
+            }
+            steps += 1;
+            if steps % 4 == 0 {
+                let id = (steps * 53) % 600;
+                apply(
+                    &mut db,
+                    vec![
+                        put(id, 2_000. + steps as f32),
+                        put(600 + steps, steps as f32),
+                        Mutation::Delete { id: (id + 7) % 600 },
+                    ],
+                );
+                db.seal_delta().unwrap();
+                seals += 1;
+                while db.consolidate_runs_step().unwrap() {
+                    consolidations += 1;
+                }
+                // Cleanup may run: staged objects are retained.
+                while db.cleanup_step(4).unwrap() > 0 {}
+                let runs: Vec<_> = db
+                    .root
+                    .runs
+                    .iter()
+                    .map(|run| run.index_object.clone())
+                    .collect();
+                assert_eq!(&runs[..frozen_runs], &frozen_index[..], "step {steps}");
+                assert_exact(&db, &format!("step {steps}"));
+            }
+        };
+        assert!(
+            seals > 5 && consolidations > 0,
+            "{seals} seals, {consolidations} consolidations"
+        );
+        assert!(summary.rows < 600, "{summary:?}");
+        assert_eq!(db.clustered_epoch(), Some(1));
+        let layout = db.clustered_layout().unwrap();
+        assert!(layout.uncovered_packs > 0, "{layout:?}");
+        assert_exact(&db, "published");
+        while db.cleanup_step(4).unwrap() > 0 {}
+        db.seal_delta().unwrap();
+        while db.merge_postings().unwrap().is_some() {}
+        assert_exact(&db, "sealed after conversion");
+        drop(db);
+        let db = SegmentedDatabase::open(LocalStore::open(&path).unwrap(), config)
+            .unwrap()
+            .with_cluster_probes(usize::MAX);
+        assert!(db.clustered_view_error().is_none());
         assert_exact(&db, "reopened");
     }
 

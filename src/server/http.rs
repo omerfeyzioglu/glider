@@ -1,6 +1,6 @@
 use super::{
     error::{bad_request, ApiError},
-    metrics::{cache_status, record_metrics, render_metrics, HttpMetrics},
+    metrics::{cache_status, clustering_status, record_metrics, render_metrics, HttpMetrics},
     Engine0,
 };
 use crate::{
@@ -289,6 +289,7 @@ async fn status(
             "failed": queue.failed,
             "maintenance_errors": queue.maintenance_errors,
             "cache": cache_status(&engine),
+            "clustering": clustering_status(&engine),
         })))
     })
     .await

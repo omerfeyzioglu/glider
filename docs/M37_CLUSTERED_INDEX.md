@@ -309,8 +309,11 @@ format, memory and query-quality decision.
 
 Existing metadata v2/v3/v4 and root v1 namespaces open on the present per-seal
 path without rewriting their data. New code must not infer a clustered view
-from a stray centroid or catalog object. Conversion is explicit and offline
-under exclusive ownership with writes quiesced: select and validate the
+from a stray centroid or catalog object. Conversion runs under exclusive
+ownership, explicitly (`glider-admin convert`) or as idle serving maintenance
+once a namespace reaches `auto_cluster_rows` or outgrows its view by
+`auto_recluster_factor` (`DESIGN.md`, "Segmented serving"): select and
+validate the
 current canonical root plus tail, train the bounded sample, stream its current
 live rows into clustered packs, stage centroid and catalog, then publish root
 v4 pointing to the complete view. Retain the existing canonical runs and

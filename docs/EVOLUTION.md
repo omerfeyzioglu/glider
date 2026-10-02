@@ -357,3 +357,22 @@ merge policy because runs are already the bounded unit of change. A
 publication fell to 253 KB and all uploads from 529 to 311 MB; older roots
 open unchanged and upgrade on their next publication.
 [Evidence](../benchmarks/M39.md#root-manifests-root-v5-publication-bytes-in-the-update-wave-replay).
+
+## 2026-10-02 — Automatic conversion as idle serving maintenance
+
+Without an operator `convert`, a growing namespace kept per-seal routing
+past the size where it misses the recall gate (0.894 static at 1,000,000
+rows). `SegmentedServing` now converts once the sealed runs hold
+`auto_cluster_rows` live rows (default 250,000, where per-seal p5 recall is
+on the gate), one conversion step per idle unit. A conversion of 1,000,000
+rows takes thousands of units, longer than writes take to fill the 64-object
+log tail, so finishing it synchronously or abandoning it at the bound was
+rejected; instead seals and consolidation of runs newer than the frozen ones
+publish between its steps, and their versions stay routed through canonical
+packs under the new view, which open already supported. Failed reads keep
+the attempt; staged objects are retained from cleanup until its root.
+Because the centroid count is fixed per epoch, a view is rebuilt as the next
+epoch once the namespace holds more than `auto_recluster_factor` (default
+4) times the 4,000 rows per centroid it was sized for; at 1,000,000 rows a
+64-centroid view measured 0.953 / 0.8 against 0.981 / 0.9 for 256
+centroids at the M31 budget.

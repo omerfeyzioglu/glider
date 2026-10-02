@@ -411,6 +411,9 @@ fn update_wave(
     let serving_options = SegmentedServingOptions {
         cache: None,
         warm_unit_bytes: 0,
+        // The probe converts explicitly and measures that view.
+        auto_cluster_rows: 0,
+        auto_recluster_factor: 0,
         ..SegmentedServingOptions::m31(std::path::PathBuf::new())
     };
     let mut serving =
