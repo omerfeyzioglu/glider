@@ -37,6 +37,7 @@ def main():
     run = lambda *args: subprocess.run(args, capture_output=True, text=True).stdout.strip()
     result = {
         "version": 1, "dataset": envelope["dataset"], "rows": rows, "dimensions": 128,
+        "clustered": bool(load.get("clustered", False)),
         "metric": "squared_euclidean", "k": 10, "filter": "cohort=one-percent (id % 100 == 0)",
         "backend": "aws-s3-standard-eu-central-1", "instance_type": instance_type(),
         "oracle": oracle, "oracle_sha256": digest(Path(oracle)),

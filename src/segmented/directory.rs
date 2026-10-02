@@ -60,6 +60,14 @@ impl Directory {
             .map(|index| self.slots[index].location())
     }
 
+    /// Position of an ID in iteration order, for side tables indexed like
+    /// the directory.
+    pub(super) fn index_of(&self, id: u64) -> Option<(usize, Location)> {
+        self.position(id)
+            .ok()
+            .map(|index| (index, self.slots[index].location()))
+    }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = (u64, Location)> + '_ {
         self.slots.iter().map(|slot| (slot.id, slot.location()))
     }

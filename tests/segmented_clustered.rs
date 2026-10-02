@@ -1,4 +1,5 @@
-//! M37 stage 3: conversion to a clustered view and clustered queries.
+//! M37 stages 3-5: conversion to a clustered view, clustered queries,
+//! clustered seals and bounded posting merges.
 //! Exact search over the canonical runs and the log tail is the oracle.
 use glider::{
     retry::{Request, RequestId},
@@ -284,6 +285,7 @@ fn small(centroids: usize) -> ConvertOptions {
 
 fn maintain(db: &mut SegmentedDatabase<MemoryStore>) {
     db.seal_delta().unwrap();
+    while db.merge_postings().unwrap().is_some() {}
     while db.consolidate_runs_step().unwrap() {}
     if db.start_prune().unwrap() {
         while db.prune_step().unwrap() {}
@@ -663,4 +665,368 @@ fn backup_carries_the_clustered_view() {
     let mut restored = open(&destination, Metric::SquaredEuclidean);
     assert_eq!(restored.clustered_epoch(), Some(1));
     assert_full_budget_is_exact(&mut restored, &model, &mut rng, &format!("seed {seed:#x}"));
+}
+
+/// `count` random puts and deletes split across `requests` requests that
+/// share one group-commit log. Returns the requests for retries.
+fn write_group(
+    db: &mut SegmentedDatabase<MemoryStore>,
+    model: &mut Model,
+    rng: &mut Rng,
+    requests: usize,
+    count: u64,
+) -> Vec<Request> {
+    let group: Vec<Request> = (0..requests)
+        .map(|_| Request {
+            id: RequestId {
+                boundary: db.sequence(),
+                nonce: u128::from(rng.next()).to_le_bytes(),
+            },
+            conditions: Vec::new(),
+            mutations: (0..count)
+                .map(|_| {
+                    let id = rng.below(1_500);
+                    if rng.below(8) == 0 {
+                        Mutation::Delete { id }
+                    } else {
+                        Mutation::Put {
+                            id,
+                            vector: rng.vector(),
+                            metadata: metadata(rng),
+                        }
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    for result in db.apply_requests(group.clone()) {
+        result.unwrap();
+    }
+    for request in &group {
+        for mutation in &request.mutations {
+            match mutation {
+                Mutation::Put {
+                    id,
+                    vector,
+                    metadata,
+                } => model.insert(*id, Some((vector.clone(), metadata.clone()))),
+                Mutation::Delete { id } => model.insert(*id, None),
+            };
+        }
+    }
+    group
+}
+
+/// Resubmitting acknowledged requests returns their retained outcomes and
+/// publishes nothing.
+fn assert_retry_is_idempotent(db: &mut SegmentedDatabase<MemoryStore>, group: &[Request]) {
+    let sequence = db.sequence();
+    let tail = db.tail_objects();
+    for (request, result) in group.iter().zip(db.apply_requests(group.to_vec())) {
+        let outcome = result.unwrap();
+        assert!(outcome.sequence <= sequence);
+        assert_eq!(
+            db.lookup_request(request.id).unwrap(),
+            glider::retry::Lookup::Retained(outcome)
+        );
+    }
+    assert_eq!((db.sequence(), db.tail_objects()), (sequence, tail));
+}
+
+fn assert_layout(db: &SegmentedDatabase<MemoryStore>, context: &str) {
+    let layout = db.clustered_layout().expect("clustered view loaded");
+    // Every current version is routed through exactly one posting copy.
+    assert_eq!(layout.uncovered_packs, 0, "{context}: {layout:?}");
+    assert!(layout.max_small_extents <= 3, "{context}: {layout:?}");
+}
+
+/// After conversion, seals assign puts to clusters and publish canonical
+/// posting extents through a new catalog; merges keep at most three small
+/// extents per cluster. Full-budget selective search stays exact through
+/// single and grouped writes, deletes, seals, merges, consolidation,
+/// pruning, reclamation, cleanup and reopen, for every metric.
+#[test]
+fn clustered_seals_and_merges_match_exact_search() {
+    let seed = 0x3704_5ea1_0000_0006_u64;
+    for metric in [Metric::SquaredEuclidean, Metric::Cosine, Metric::Manhattan] {
+        let context = format!("seed {seed:#x}, {metric:?}");
+        let mut rng = Rng(seed ^ metric as u64);
+        let store = MemoryStore::default();
+        let mut db = open(&store, metric);
+        let mut model = Model::new();
+        for batch in 0..20 {
+            write(&mut db, &mut model, &mut rng, 80, metric);
+            if batch % 6 == 5 {
+                maintain(&mut db);
+            }
+        }
+        maintain(&mut db);
+        db.convert_clustered(small(9)).unwrap();
+        let converted = db.clustered_layout().unwrap();
+        assert_eq!(converted.canonical_extents, 0, "{context}");
+        let mut merged = 0;
+        for batch in 0..72 {
+            if batch % 3 == 0 {
+                let mut group_model = Model::new();
+                write_group(&mut db, &mut group_model, &mut rng, 3, 25);
+                // Cosine namespaces store unit vectors.
+                for (id, value) in group_model {
+                    let value =
+                        value.map(|(vector, metadata)| (normalized(metric, vector), metadata));
+                    model.insert(id, value);
+                }
+            } else {
+                write(&mut db, &mut model, &mut rng, 40, metric);
+            }
+            if batch % 4 == 3 {
+                db.seal_delta().unwrap();
+                let layout = db.clustered_layout().unwrap();
+                assert!(layout.canonical_extents > 0, "{context}: {layout:?}");
+                assert_eq!(layout.uncovered_packs, 0, "{context}: {layout:?}");
+                while let Some(summary) = db.merge_postings().unwrap() {
+                    merged += summary.merged_extents;
+                }
+                maintain(&mut db);
+                assert_layout(&db, &format!("{context}, batch {batch}"));
+            }
+            if batch % 24 == 23 {
+                assert_full_budget_is_exact(
+                    &mut db,
+                    &model,
+                    &mut rng,
+                    &format!("{context}, batch {batch}"),
+                );
+            }
+        }
+        assert!(merged > 0, "{context}: no merge ran");
+        assert_eq!(db.clustered_epoch(), Some(1), "{context}");
+        drop(db);
+        let mut db = open(&store, metric);
+        assert!(db.clustered_view_error().is_none(), "{context}");
+        // Partially listed posting packs bind their persisted sketches.
+        assert_eq!(db.sketch_rebuilds(), 0, "{context}");
+        assert_layout(&db, &format!("{context}, reopened"));
+        assert_full_budget_is_exact(&mut db, &model, &mut rng, &format!("{context}, reopened"));
+        // Cleanup leaves exactly the selected view's catalog and centroids.
+        while db.cleanup_step(64).unwrap() > 0 {}
+        assert_eq!(store.keys("sgcluster-").len(), 1, "{context}");
+        assert_eq!(store.keys("sgcentroid-").len(), 1, "{context}");
+        // A new epoch replaces every posting extent, canonical ones included.
+        db.convert_clustered(small(5)).unwrap();
+        assert_eq!(db.clustered_layout().unwrap().canonical_extents, 0);
+        assert_full_budget_is_exact(&mut db, &model, &mut rng, &format!("{context}, epoch 2"));
+    }
+}
+
+fn normalized(metric: Metric, vector: Vec<f32>) -> Vec<f32> {
+    if metric != Metric::Cosine {
+        return vector;
+    }
+    let norm = vector
+        .iter()
+        .map(|&x| f64::from(x).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    vector
+        .iter()
+        .map(|&x| (f64::from(x) / norm) as f32)
+        .collect()
+}
+
+/// Writes, deletes and group retries arrive between every step of a
+/// clustered seal (shadowing and displacing frozen tail versions) and of a
+/// merge round; each intermediate state, and the reopened one, is exact.
+#[test]
+fn writes_between_clustered_seal_and_merge_steps_stay_exact() {
+    let seed = 0x3704_57e9_0000_0007_u64;
+    let context = format!("seed {seed:#x}");
+    let mut rng = Rng(seed);
+    let store = MemoryStore::default();
+    let mut db = open(&store, METRIC);
+    let mut model = Model::new();
+    for batch in 0..12 {
+        write(&mut db, &mut model, &mut rng, 80, METRIC);
+        if batch % 4 == 3 {
+            maintain(&mut db);
+        }
+    }
+    db.convert_clustered(small(6)).unwrap();
+    let mut merges = 0;
+    for round in 0..8 {
+        let mut last = Vec::new();
+        for _ in 0..4 {
+            last = write_group(&mut db, &mut model, &mut rng, 2, 40);
+        }
+        db.start_seal().unwrap();
+        let mut steps = 0;
+        while db.seal_step().unwrap() {
+            steps += 1;
+            assert_retry_is_idempotent(&mut db, &last);
+            // Overwrites and deletes of frozen versions displace them.
+            last = write_group(&mut db, &mut model, &mut rng, 2, 30);
+            if steps % 3 == 0 {
+                assert_full_budget_is_exact(
+                    &mut db,
+                    &model,
+                    &mut rng,
+                    &format!("{context}, round {round}, seal step {steps}"),
+                );
+            }
+        }
+        assert_full_budget_is_exact(&mut db, &model, &mut rng, &context);
+        if db.start_merge().unwrap() {
+            merges += 1;
+            let mut steps = 0;
+            while db.merge_step().unwrap() {
+                steps += 1;
+                assert_retry_is_idempotent(&mut db, &last);
+                last = write_group(&mut db, &mut model, &mut rng, 2, 30);
+                if steps % 4 == 0 {
+                    assert_full_budget_is_exact(
+                        &mut db,
+                        &model,
+                        &mut rng,
+                        &format!("{context}, round {round}, merge step {steps}"),
+                    );
+                }
+            }
+            assert_layout(&db, &context);
+        }
+        assert_full_budget_is_exact(&mut db, &model, &mut rng, &context);
+    }
+    assert!(merges > 0, "{context}: no merge was due");
+    drop(db);
+    let mut db = open(&store, METRIC);
+    assert_layout(&db, &format!("{context}, reopened"));
+    assert_full_budget_is_exact(&mut db, &model, &mut rng, &format!("{context}, reopened"));
+}
+
+/// Backup copies canonical and posting packs once each (a clustered seal's
+/// packs are both); the restored namespace equals the source and keeps
+/// sealing and merging clustered.
+#[test]
+fn backup_and_restore_carry_clustered_seals_and_merges() {
+    let seed = 0x3704_bac0_0000_0008_u64;
+    let context = format!("seed {seed:#x}");
+    let mut rng = Rng(seed);
+    let store = MemoryStore::default();
+    let mut db = open(&store, METRIC);
+    let mut model = Model::new();
+    for batch in 0..10 {
+        write(&mut db, &mut model, &mut rng, 80, METRIC);
+        if batch % 4 == 3 {
+            maintain(&mut db);
+        }
+    }
+    db.convert_clustered(small(4)).unwrap();
+    for batch in 0..30 {
+        write(&mut db, &mut model, &mut rng, 50, METRIC);
+        if batch % 3 == 2 {
+            maintain(&mut db);
+        }
+    }
+    write(&mut db, &mut model, &mut rng, 20, METRIC);
+    assert!(db.clustered_layout().unwrap().canonical_extents > 0);
+    drop(db);
+    let temp = tempfile::tempdir().unwrap();
+    let config = Config {
+        dimensions: DIMENSIONS,
+        metric: METRIC,
+    };
+    let mut serving = SegmentedServing::open(
+        store.clone(),
+        config,
+        options(),
+        SegmentedServingOptions {
+            cache: None,
+            ..SegmentedServingOptions::m21(temp.path().to_path_buf())
+        },
+    )
+    .unwrap();
+    let destination = MemoryStore::default();
+    serving.backup_to(destination.clone()).unwrap();
+    serving.close().unwrap();
+    let mut restored = open(&destination, METRIC);
+    assert_layout(&restored, &context);
+    assert_full_budget_is_exact(
+        &mut restored,
+        &model,
+        &mut rng,
+        &format!("{context}, restored"),
+    );
+    for batch in 0..12 {
+        write(&mut restored, &mut model, &mut rng, 50, METRIC);
+        if batch % 3 == 2 {
+            maintain(&mut restored);
+        }
+    }
+    assert_layout(&restored, &context);
+    assert_full_budget_is_exact(
+        &mut restored,
+        &model,
+        &mut rng,
+        &format!("{context}, continued"),
+    );
+}
+
+/// Serving maintenance runs clustered seals and merge rounds as idle units.
+#[test]
+fn serving_maintenance_seals_and_merges_clustered_views() {
+    use glider::admission::Engine;
+    let seed = 0x3704_5e7e_0000_0009_u64;
+    let mut rng = Rng(seed);
+    let store = MemoryStore::default();
+    let mut db = open(&store, METRIC);
+    let mut model = Model::new();
+    for _ in 0..10 {
+        write(&mut db, &mut model, &mut rng, 80, METRIC);
+    }
+    maintain(&mut db);
+    drop(db);
+    let temp = tempfile::tempdir().unwrap();
+    let config = Config {
+        dimensions: DIMENSIONS,
+        metric: METRIC,
+    };
+    let mut serving = SegmentedServing::open(
+        store.clone(),
+        config,
+        options(),
+        SegmentedServingOptions {
+            cache: None,
+            seal_tail_objects: 4,
+            ..SegmentedServingOptions::m21(temp.path().to_path_buf())
+        },
+    )
+    .unwrap();
+    serving.convert_clustered(small(5)).unwrap();
+    for round in 0..60_u64 {
+        let request = Request {
+            id: RequestId {
+                boundary: serving.sequence(),
+                nonce: u128::from(round).to_le_bytes(),
+            },
+            conditions: Vec::new(),
+            mutations: (0..30)
+                .map(|n| Mutation::Put {
+                    id: (round * 30 + n) % 1_500,
+                    vector: rng.vector(),
+                    metadata: BTreeMap::new(),
+                })
+                .collect(),
+        };
+        serving.apply_request(request).unwrap();
+        while serving.maintenance_step().unwrap() {}
+    }
+    let counters = serving.counters();
+    assert!(
+        counters.seal_starts > 0 && counters.merge_starts > 0,
+        "seed {seed:#x}: {counters:?}"
+    );
+    let layout = serving.database().clustered_layout().unwrap();
+    assert!(
+        layout.max_small_extents <= 3 && layout.uncovered_packs == 0,
+        "seed {seed:#x}: {layout:?}"
+    );
+    serving.close().unwrap();
 }

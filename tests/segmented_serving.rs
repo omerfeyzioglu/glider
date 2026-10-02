@@ -41,6 +41,7 @@ fn serving(cache: &Path) -> SegmentedServingOptions {
         cache: Some((cache.to_path_buf(), 64 * 1024, 1024 * 1024)),
         query_threads: 3,
         warm_unit_bytes: 64 * 1024,
+        cluster_probes: 16,
     }
 }
 

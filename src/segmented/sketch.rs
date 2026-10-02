@@ -41,7 +41,8 @@ const POSTING_MAGIC: &[u8; 8] = b"GLSKT003";
 ///
 /// With a clustered view the ranking keeps as many candidates as the probed
 /// postings have blocks plus the usual count, mixing posting blocks with
-/// canonical blocks sealed after the view, and every ranked candidate may
+/// any canonical blocks holding versions no posting covers, and every ranked
+/// candidate may
 /// widen a span: spans grow in rank order until the request and byte limits
 /// stop them, so `blocks` does not limit posting blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -930,6 +931,45 @@ impl PackSketch {
             })
     }
 
+    /// Drop the blocks whose `keep` flag is clear, with their rows, and every
+    /// row whose `live` bit is clear; return the number of rows kept. A
+    /// posting pack's catalog may list only some of its blocks: the others
+    /// were merged into other extents and must not be routed.
+    pub(super) fn retain_blocks(&mut self, live: &mut [u64], keep: &[bool]) -> usize {
+        debug_assert_eq!(keep.len(), self.blocks.len());
+        for (block, &kept) in self.blocks.iter().zip(keep) {
+            if !kept {
+                for row in block.start..block.end {
+                    set_bit(live, row, false);
+                }
+            }
+        }
+        let rows = self.compact(live);
+        let mut flags = keep.iter();
+        self.blocks.retain(|_| *flags.next().unwrap());
+        if let Some(posting) = self.posting.as_mut() {
+            let mut flags = keep.iter();
+            posting.clusters.retain(|_| *flags.next().unwrap());
+            let mut flags = keep.iter();
+            posting.fingerprints.retain(|_| *flags.next().unwrap());
+            if posting.references.len() == keep.len() {
+                posting.references = posting
+                    .references
+                    .iter()
+                    .zip(keep)
+                    .filter(|(_, &kept)| kept)
+                    .map(|(reference, _)| reference.clone())
+                    .collect();
+            }
+        }
+        rows
+    }
+
+    /// Block digests in pack order.
+    pub(super) fn block_digests(&self) -> impl Iterator<Item = &[u8; 32]> + '_ {
+        self.blocks.iter().map(|block| &block.digest)
+    }
+
     /// Drop rows whose `live` bit is clear and return the number kept.
     fn compact(&mut self, live: &[u64]) -> usize {
         let width = self.codes.len() / self.ids.len().max(1);
@@ -1033,10 +1073,22 @@ impl LoadedSketch {
     /// reloads the persisted sketch and recomputes liveness.
     fn compact(&mut self) {
         let kept = Arc::make_mut(&mut self.sketch).compact(&self.live);
-        self.live = vec![u64::MAX; kept.div_ceil(64)];
-        if !kept.is_multiple_of(64) {
-            *self.live.last_mut().unwrap() = (1 << (kept % 64)) - 1;
+        self.set_all_live(kept);
+    }
+
+    fn set_all_live(&mut self, rows: usize) {
+        self.live = vec![u64::MAX; rows.div_ceil(64)];
+        if !rows.is_multiple_of(64) {
+            *self.live.last_mut().unwrap() = (1 << (rows % 64)) - 1;
         }
+    }
+
+    /// Keep only the blocks flagged in `keep` (and their live rows).
+    fn retain_blocks(&mut self, keep: &[bool]) {
+        let mut live = std::mem::take(&mut self.live);
+        let kept = Arc::make_mut(&mut self.sketch).retain_blocks(&mut live, keep);
+        self.set_all_live(kept);
+        self.roots = vec![None; self.sketch.blocks.len()];
     }
 
     fn is_live(&self, row: usize) -> bool {
@@ -1054,7 +1106,7 @@ fn set_bit(bits: &mut [u64], row: usize, value: bool) {
 
 /// Loaded sketches for the packs queries route: every pack the selected root
 /// references or, with a clustered view, the view's posting packs and the
-/// canonical packs holding sealed versions newer than the view. A canonical
+/// canonical packs holding live versions no posting covers. A canonical
 /// row is live when it is the current committed version of its ID, no
 /// acknowledged log-tail mutation shadows it and no posting covers it. A
 /// posting row's bit only records that it was current when loaded; queries
@@ -1231,17 +1283,117 @@ impl SketchSet {
         }
     }
 
-    /// Set each posting row's bit from `current(ID, sequence)`.
-    pub(super) fn activate_postings(&mut self, mut current: impl FnMut(u64, u64) -> bool) {
+    /// Set each posting row's bit from `current(ID, sequence)`, for the named
+    /// posting packs or all of them when `None`.
+    pub(super) fn activate_postings(
+        &mut self,
+        packs: Option<&BTreeSet<String>>,
+        mut current: impl FnMut(u64, u64) -> bool,
+    ) {
         for loaded in &mut self.packs {
             let LoadedSketch { sketch, live, .. } = loaded;
             let Some(posting) = &sketch.posting else {
                 continue;
             };
+            if packs.is_some_and(|names| !names.contains(&sketch.pack)) {
+                continue;
+            }
             for (row, &sequence) in posting.sequences.iter().enumerate() {
                 set_bit(live, row, current(sketch.ids.get(row), sequence));
             }
         }
+    }
+
+    /// Keep only the blocks of posting pack `pack` that `listed` accepts by
+    /// offset; drop its sketch when none remain. Called after a catalog
+    /// stops listing some of the pack's extents.
+    pub(super) fn retain_posting(&mut self, pack: &str, listed: impl Fn(usize) -> bool) {
+        let Some(slot) = self
+            .packs
+            .iter()
+            .position(|loaded| loaded.sketch.posting.is_some() && loaded.sketch.pack == pack)
+        else {
+            return;
+        };
+        let keep: Vec<bool> = self.packs[slot]
+            .sketch
+            .posting
+            .as_ref()
+            .unwrap()
+            .references
+            .iter()
+            .map(|reference| listed(reference.offset))
+            .collect();
+        if !keep.contains(&true) {
+            self.packs.remove(slot);
+        } else if keep.contains(&false) {
+            self.packs[slot].retain_blocks(&keep);
+        }
+    }
+
+    /// Current rows of each loaded posting block, keyed by pack and block
+    /// offset: rows whose bit is set and for which `current(ID, sequence)`
+    /// holds.
+    pub(super) fn posting_block_rows(
+        &self,
+        mut current: impl FnMut(u64, u64) -> bool,
+    ) -> BTreeMap<(&str, usize), usize> {
+        let mut rows = BTreeMap::new();
+        for loaded in &self.packs {
+            let sketch = &loaded.sketch;
+            let Some(posting) = &sketch.posting else {
+                continue;
+            };
+            for (block, reference) in sketch.blocks.iter().zip(posting.references.iter()) {
+                let count = (block.start..block.end)
+                    .filter(|&row| {
+                        loaded.is_live(row) && current(sketch.ids.get(row), posting.sequences[row])
+                    })
+                    .count();
+                rows.insert((sketch.pack.as_str(), reference.offset), count);
+            }
+        }
+        rows
+    }
+
+    /// Loaded canonical (non-posting) sketches with a live row.
+    pub(super) fn routed_canonical_packs(&self) -> usize {
+        self.packs
+            .iter()
+            .filter(|loaded| {
+                loaded.sketch.posting.is_none() && loaded.live.iter().any(|word| *word != 0)
+            })
+            .count()
+    }
+
+    /// Every loaded posting row as `(ID, sequence)`, whatever its bit.
+    pub(super) fn posting_rows(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.packs.iter().flat_map(|loaded| {
+            let sketch = &loaded.sketch;
+            let sequences = sketch
+                .posting
+                .as_ref()
+                .map_or(&[][..], |posting| &posting.sequences[..]);
+            sequences
+                .iter()
+                .enumerate()
+                .map(move |(row, &sequence)| (sketch.ids.get(row), sequence))
+        })
+    }
+
+    /// IDs whose canonical row in root block `(run, block)` is live, or
+    /// none when no loaded sketch routes that block.
+    pub(super) fn live_ids(&self, run: usize, block: usize) -> Vec<u64> {
+        let Some(&Some((slot, sketch_block))) = self.locations.get(run).and_then(|r| r.get(block))
+        else {
+            return Vec::new();
+        };
+        let loaded = &self.packs[slot];
+        let range = &loaded.sketch.blocks[sketch_block];
+        (range.start..range.end)
+            .filter(|&row| loaded.is_live(row))
+            .map(|row| loaded.sketch.ids.get(row))
+            .collect()
     }
 
     /// Drop every sketch, before loading a new view.
@@ -1494,7 +1646,7 @@ impl<S: ObjectStore> View<S> {
         };
         let (ranked, remote) = match &self.cluster {
             // Every live block of the probed postings is a candidate, ranked
-            // with the canonical candidates newer than the view.
+            // with the canonical candidates no posting covers.
             Some(cluster) => {
                 let probed = cluster.probe(self.config.metric, query, self.probes);
                 let postings: usize = self
@@ -1774,7 +1926,7 @@ impl<S: ObjectStore> View<S> {
         fetched.extend(self.fetch_blocks(&references[local..], &ranges, &mut reads)?);
         let (config, latest, tail) = (self.config, &self.latest, &self.tail);
         let packs = &self.sketches.packs;
-        let boundary = self.cluster.as_ref().map(|cluster| cluster.boundary);
+        let clustered = self.cluster.is_some();
         // Whether a record of target `index` with this ID and sequence is a
         // current version to score: `Ok(Some(true))` for a live put,
         // `Ok(Some(false))` for its current tombstone, `Ok(None)` to skip.
@@ -1807,9 +1959,18 @@ impl<S: ObjectStore> View<S> {
                     if put == location.entry.deleted {
                         return disagree();
                     }
-                    // A clustered view's postings serve versions it covers.
-                    if boundary.is_some_and(|boundary| sequence <= boundary) {
-                        return Ok(None);
+                    // A clustered view's postings serve the versions they
+                    // cover; only uncovered canonical rows are live.
+                    if put && clustered {
+                        let range = &loaded.sketch.blocks[block];
+                        let live = loaded
+                            .sketch
+                            .ids
+                            .find(range.start, range.end, id)
+                            .is_some_and(|row| loaded.is_live(row));
+                        if !live {
+                            return Ok(None);
+                        }
                     }
                     Ok(Some(put))
                 }

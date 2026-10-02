@@ -329,3 +329,17 @@ With the real five-bit sketches, 16 probes, 8 requests and 1 MiB reach 0.994
 0.894 for the per-seal layout. A missing or corrupt view fails selective
 serving and is repaired by converting again.
 [Evidence](../benchmarks/M37.md#stage-3-conversion-and-clustered-queries-on-real-packs).
+
+## 2026-10-02 — Clustered seals and bounded posting merges
+
+M37 stages 4-5 keep a converted namespace clustered under writes. A seal
+assigns each put to its nearest center and writes cluster-contiguous packs
+that are both the run's canonical packs and `Canonical` catalog extents,
+published with a new catalog before its root. A merge round copies each
+cluster's small extents (under three blocks of current rows, more than
+three per cluster) into derived extents under one catalog and one root.
+Coverage is derived at open from the posting rows, so no format changed.
+After an in-memory replay of the M31 update wave, 16 probes, 8 requests and
+1 MiB reach 0.977 / 0.9 at 250,000 rows and 0.9585 / 0.8 at 1,000,000 rows;
+root uploads (every block reference per root) bounded the merge policy.
+[Evidence](../benchmarks/M37.md#stages-4-5-clustered-seals-and-posting-merges-under-the-update-wave).
