@@ -315,3 +315,17 @@ scores) reaches 0.979 mean and 0.9 p5 at both 250,000 and 1,000,000 rows with
 p5 gate. Five-percent boundary duplication and more training iterations did
 not help. Stage 3 must confirm this with the real five-bit sketches.
 [Evidence](../benchmarks/M37.md#offline-clustering-probe).
+
+## 2026-10-02 — Explicit conversion to a clustered view
+
+M37 stage 3 converts a namespace's sealed rows into derived, cluster-contiguous
+posting packs with `GLSKT003` sketches (cluster, center fingerprint and
+per-row sequence), a centroid object and a catalog, published by one root v4
+after bounded gather passes; canonical runs stay authoritative and a posting
+copy counts only while the directory holds its `(ID, sequence)`. Later seals
+keep the per-seal layout and are routed beside the postings until stage 4.
+With the real five-bit sketches, 16 probes, 8 requests and 1 MiB reach 0.994
+/ 0.9 mean / p5 at 250,000 rows and 0.970 / 0.8 at 1,000,000 rows, against
+0.894 for the per-seal layout. A missing or corrupt view fails selective
+serving and is repaired by converting again.
+[Evidence](../benchmarks/M37.md#stage-3-conversion-and-clustered-queries-on-real-packs).

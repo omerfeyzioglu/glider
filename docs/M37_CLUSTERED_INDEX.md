@@ -1,7 +1,11 @@
 # M37: global clustered index for the segmented engine
 
-Status: stage 1 format codecs and validators implemented; no clustered writer,
-conversion, query path, or measured quality result.
+Status: stages 1-3 implemented: formats, the offline probe, explicit
+conversion (`convert_clustered`, `glider-admin convert`) and clustered queries.
+Static recall on real packs passes the gates at 250,000 and 1,000,000 rows
+(`benchmarks/M37.md`, stage 3); seals still write the per-seal layout
+(stage 4 is next). `DESIGN.md` ("Clustered view") states the implemented
+invariants.
 The first implementation target is the M31 single-writer, 128-dimensional SIFT1M
 envelope. Exact search over the committed runs and log tail remains the oracle.
 
@@ -51,9 +55,9 @@ old root v1 remains selected during conversion and serves through the existing
 per-seal route under its existing quality policy. Root v2 already carries M36
 takeover fences, and v3 is the M36 fence marker, so v4 is the next free root
 version. The v4 JSON requires `clustered`; v1 and v2 forbid it. A v4 root may
-also carry takeover fences. Format decoding accepts v4; until clustered
-serving is implemented, opening a selected v4 root fails closed. Converted
-writers will emit v4. Older binaries reject v4 rather than discard its
+also carry takeover fences. Opening a selected v4 root loads its view (a
+missing or corrupt view object makes the view unavailable, below); every
+later root of a converted namespace is v4. Older binaries reject v4 rather than discard its
 reference. Root keys remain
 `sgroot-{generation:020}`; their never-reused generations are the only index
 visibility switch. Root zero and metadata keep their existing meanings.
@@ -110,9 +114,12 @@ catalog bytes by length and SHA-256 before their decoders run.
 Packs retain the existing <=1 MiB block-data and <=12-block limits, <=128 KiB
 encoded blocks, `GLB2` full-precision records, and authenticated sketch frame.
 New clustered packs use `GLSKT003` sketches carrying per-block cluster ID and
-center fingerprint (metric, coordinates and ID), plus per-row sequence; block
-format needs a new version only if its partition field cannot be given this
-validated meaning. Each block contains
+center fingerprint (metric, coordinates and ID), plus per-row sequence: the
+`GLSKT001`/`GLSKT002` body (routed sections iff routed keys are declared)
+followed by, per block, the cluster ID (u32) and fingerprint (SHA-256 of the
+metric byte, dimension u32, center ID u32 and f32 coordinates), then per row
+the copied version's sequence (u64), little-endian. Blocks stay `GLB2`; their
+partition field is the cluster ID. Each block contains
 one cluster's rows, sorted by ID, and adjacent blocks of the same cluster are
 contiguous in a pack. Several small clusters may share a pack, but one cluster
 extent must be a contiguous byte range. The center fingerprint must match the
@@ -156,9 +163,10 @@ these estimates; measure peak during catalog switches and merges.
 
 ## Centroid training and count
 
-Use a target of about 1,000 live primary rows per cluster: start at 256 centers
-for 250k rows and 1,024 for 1M, rounded to a power of two and capped by live
-rows. These are experiment settings, not fixed quality claims. Train from a
+Stage 2 measurements set the profile: about 4,000 live primary rows per
+cluster, `2^round(log2(rows / 4,000))` centers (64 at 250k, 256 at 1M),
+capped by the sample and 4,096 (an explicit count may be given); no boundary
+duplication; two Lloyd iterations on a 16,384-row sample. Train from a
 bounded, deterministic sample of at most 16,384 live IDs selected by a seeded
 hash priority while streaming authenticated canonical rows; record seed,
 sample rule, row count and training iterations in the object. Reuse `src/ivf.rs`
@@ -166,9 +174,7 @@ metric routing, seeded deterministic tie behavior, final-center assignment,
 means for squared Euclidean/cosine and coordinate medians for Manhattan, but
 extract a bounded trainer: `build_ivf` currently gathers all resident points
 and builds full ID postings, so calling it on the segmented namespace would
-violate the memory target. Begin with two assignment/update iterations and
-compare 256/512/1,024/2,048 centers and sample sizes before fixing a profile.
-For cosine, train on the engine's stored normalized vectors and validate centers
+violate the memory target. For cosine, train on the engine's stored normalized vectors and validate centers
 for routing. Empty clusters retain centers but have no extents. Training cost
 is a bounded offline maintenance cost; it must not run in a foreground PUT.
 
@@ -264,9 +270,10 @@ objects and the selected clustered view, then publishes metadata last.
 ## Query path and filters
 
 Score every resident centroid with the configured metric, order by
-`(routing score, cluster ID)`, and probe a measured number of nearest clusters
-(initial sweep 1, 2, 4, 8). The resident catalog gives pack ranges for each
-probed cluster. Within those ranges, rank live blocks using their five-bit
+`(routing score, cluster ID)`, and probe the 16 nearest clusters (a database
+setting; stage 2 and 3 measured 1-32). Every block of a probed posting with a
+current row is a candidate, ranked with the per-seal candidates of versions
+sealed after the view. Rank live blocks using their five-bit
 codes and existing nonnegative-prefix pruning. Choose byte-contiguous spans
 in score order, coalescing adjacent extents in one pack, with **both** <=8 remote range GETs and <=1 MiB
 remote payload. Charge the logical cold plan independently of cache hits for
@@ -304,10 +311,19 @@ v4 pointing to the complete view. Retain the existing canonical runs and
 log tail; the selected root sequence and retry state do not change.
 Interrupted conversion leaves root v1 selected and its serving behavior intact;
 on reopen, cleanup removes staged orphans or a new attempt uses new keys.
+Stage 3 freezes the selected root and directory rather than quiescing
+writes: root-changing maintenance waits, while acknowledged tail writes may
+continue and shadow converted rows by the directory/tail rule. The view
+covers every live version sealed at or below the source root sequence (its
+boundary); until stage 4, seals after a conversion keep the per-seal layout,
+their canonical sketches route versions above the boundary beside the
+postings, and consolidation, pruning, reclamation and cleanup carry the view
+into each root unchanged. Converting again builds the next epoch, which is
+also the explicit repair of an unavailable view.
 During offline conversion, stage new sketches as bytes without retaining a
 second full resident set; release v1 routing sketches before loading the v4
-view. Reads are quiesced for this switch. After successful root publication,
-reopen validates v4 and uses clustered seals. There is no mixed partial index
+view. Query views keep the state they hold across the switch. After
+successful root publication the handle loads the view as an open does. There is no mixed partial index
 visible to queries. An unconverted namespace can remain v1 indefinitely;
 changing metadata or silently starting
 a full rebuild on open is not required. Restore into an empty prefix carries
@@ -359,7 +375,7 @@ M21's tighter 64 MiB RSS and 1 s open gates when evaluating that envelope.
    length/digest/epoch/extent and old-reader rejection tests.
 2. Add deterministic bounded training and an offline clustering probe only;
    produce occupancy and recall-versus-budget curves before enabling writes.
-3. Add explicit v1-to-v4 conversion and clustered read-only queries. Test
+3. (Done.) Add explicit v1-to-v4 conversion and clustered read-only queries. Test
    crashes after each staged pack, centroid, catalog and root create, plus
    restart, cache loss, missing/corrupt derived objects and exact equality.
 4. Add clustered seal-time assignment and root/catalog publication. Test
