@@ -1,0 +1,1151 @@
+{
+  "accepted": false,
+  "backend": "loopback-minio",
+  "cost_model": {
+    "note": "same-region transfer assumed; excludes compute, NVMe and egress",
+    "prices_usd": {
+      "delete_per_1000": 0.0,
+      "get_per_1000": 0.0004,
+      "list_per_1000": 0.005,
+      "put_per_1000": 0.005,
+      "storage_gb_month": 0.023
+    },
+    "thirty_day_get_payload_bytes": 479320570563.7986,
+    "thirty_day_requests": {
+      "delete": 6921847.134561974,
+      "get": 7163809.3315254375,
+      "list": 0.0,
+      "put": 6921847.134561974
+    },
+    "thirty_day_upload_bytes": 2890299572749.3477,
+    "thirty_day_usd": {
+      "delete": 0.0,
+      "get": 2.8655237326101752,
+      "list": 0.0,
+      "put": 34.60923567280987,
+      "storage": 0.006407637666
+    },
+    "thirty_day_usd_total": 37.48116704308604
+  },
+  "dataset": "SIFT1M-1000000-rotate137-v1",
+  "dataset_sha256": {
+    "sift_base.fvecs": "21f66e2975057b5728ba56de1c825bac4f4d89d596609ae985741c6242631816",
+    "sift_query.fvecs": "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc"
+  },
+  "dimensions": 128,
+  "docker_server_version": "29.1.3",
+  "environment": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "filter": "cohort=one-percent (id % 100 == 0)",
+  "gates": {
+    "backup_restores_committed_view": true,
+    "cache_loss_preserves_results": true,
+    "cache_occupancy_le_256MiB": true,
+    "cold_query_le_8_get_1MiB": true,
+    "cold_query_p95_le_200ms": true,
+    "delete_per_second_le_6": true,
+    "fifth_percentile_recall_ge_0_80": false,
+    "fresh_open_le_2000ms": true,
+    "list_le_1_per_minute": true,
+    "mean_recall_ge_0_90": false,
+    "no_maintenance_errors": true,
+    "peak_engine_rss_le_192MiB": false,
+    "put_per_second_le_6": true,
+    "short_results_lt_1_percent": true,
+    "upload_le_2MiB_per_second": true,
+    "visible_payload_le_1GiB": true,
+    "warm_query_p95_le_50ms": true,
+    "write_p95_le_150ms": true,
+    "zero_late_skips": true,
+    "zero_lost_acknowledged_writes": true,
+    "zero_overload": true
+  },
+  "git_revision": "b8a05431f5a63f7fd08ff40cd1b3cdba1790ffdb",
+  "hardware": "Apple M4",
+  "k": 10,
+  "load": {
+    "blocks": 5928,
+    "counters": {
+      "consolidations": 292,
+      "forced_seals": 0,
+      "prune_starts": 0,
+      "prune_steps": 0,
+      "reclaim_starts": 0,
+      "reclaim_steps": 0,
+      "removed_objects": 11170,
+      "seal_starts": 312,
+      "seal_steps": 1248,
+      "sketch_compactions": 0,
+      "warm_steps": 0
+    },
+    "http": {
+      "delete": 11170,
+      "get": 584,
+      "http_errors": 0,
+      "list": 0,
+      "other": 0,
+      "put": 11832,
+      "request_body_bytes": 1583346275,
+      "transport_errors": 0
+    },
+    "load_ms": 73656.00662500001,
+    "longest_maintenance_step_ms": 62.384207999999994,
+    "maintenance_units": {
+      "cleanup": [
+        2943,
+        40.566167,
+        5210112
+      ],
+      "consolidation": [
+        292,
+        62.384207999999994,
+        90472544
+      ],
+      "seal_plan": [
+        312,
+        15.274583,
+        2097152
+      ],
+      "seal_step": [
+        1248,
+        35.099458,
+        52183112
+      ],
+      "warm": [
+        312,
+        0.010708,
+        0
+      ]
+    },
+    "open": {
+      "blocks": 0,
+      "get_payload_bytes": 507,
+      "http": {
+        "delete": 0,
+        "get": 5,
+        "http_errors": 0,
+        "list": 2,
+        "other": 0,
+        "put": 4,
+        "request_body_bytes": 535,
+        "transport_errors": 0
+      },
+      "ms": 12.266291,
+      "runs": 0,
+      "sequence": 1,
+      "sketch_charged_bytes": 0,
+      "sketch_rebuilds": 0,
+      "tail_objects": 1
+    },
+    "peak_rss_bytes": 118112256,
+    "rows": 1000000,
+    "runs": 20,
+    "sequence": 10001,
+    "sketch_charged_bytes": 115206888,
+    "tail_objects": 17
+  },
+  "metric": "squared_euclidean",
+  "minio_image": "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9",
+  "oracle": "benchmarks/m31/oracle-sift1m-1000000.json",
+  "oracle_sha256": "a8d33b61321c7a8b4b4cd4c6d128090f6a39b19be7551ad7f682177e54d6d385",
+  "rows": 1000000,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "serve": {
+    "acknowledged": {
+      "queries": 12000,
+      "write_batches": 1200
+    },
+    "acknowledged_batch_count": 1200,
+    "cache": {
+      "cache_io_errors": 0,
+      "corrupt_entries": 0,
+      "namespace_bytes": 191754240,
+      "nvme_available": true,
+      "nvme_bytes": 191754240,
+      "nvme_entries": 5928,
+      "nvme_hits": 8613,
+      "nvme_limit": 268435456,
+      "nvme_payload_bytes": 223607416,
+      "ram_bytes": 0,
+      "ram_entries": 0,
+      "ram_hits": 0,
+      "ram_payload_bytes": 0,
+      "remote_fetches": 1813,
+      "remote_payload_bytes": 50470590,
+      "warm_bytes": 191754240,
+      "warm_complete": true,
+      "warm_fetches": 732,
+      "warm_payload_bytes": 135579601
+    },
+    "elapsed_seconds": 299.947681542,
+    "engine_profile": {
+      "cleanup": {
+        "count": 208,
+        "max_ms": 34.310584,
+        "peak_footprint_raised_bytes": 589728
+      },
+      "consolidation": {
+        "count": 18,
+        "max_ms": 99.991417,
+        "peak_footprint_raised_bytes": 5505024
+      },
+      "prune_reclaim_scan": {
+        "count": 55,
+        "max_ms": 52.787167000000004,
+        "peak_footprint_raised_bytes": 360448
+      },
+      "prune_step": {
+        "count": 66,
+        "max_ms": 56.453375,
+        "peak_footprint_raised_bytes": 2605032
+      },
+      "reclaim_step": {
+        "count": 689,
+        "max_ms": 44.172208,
+        "peak_footprint_raised_bytes": 1867824
+      },
+      "seal_plan": {
+        "count": 17,
+        "max_ms": 31.739916,
+        "peak_footprint_raised_bytes": 0
+      },
+      "seal_step": {
+        "count": 105,
+        "max_ms": 35.628167000000005,
+        "peak_footprint_raised_bytes": 24051760
+      },
+      "sketch_compaction": {
+        "count": 1185,
+        "max_ms": 0.221917,
+        "peak_footprint_raised_bytes": 0
+      },
+      "warm": {
+        "count": 578,
+        "max_ms": 37.663333,
+        "peak_footprint_raised_bytes": 1310768
+      },
+      "write": {
+        "count": 1200,
+        "max_ms": 29.661,
+        "peak_footprint_raised_bytes": 0
+      }
+    },
+    "filtered_query_ms": {
+      "count": 6000,
+      "max": 8.923292,
+      "mean": 1.7792037054999983,
+      "p50": 1.325083,
+      "p95": 3.9198749999999998,
+      "p99": 5.861084
+    },
+    "get_payload_bytes": 55467243,
+    "http": {
+      "delete": 801,
+      "get": 829,
+      "http_errors": 0,
+      "list": 0,
+      "other": 0,
+      "put": 801,
+      "request_body_bytes": 334467074,
+      "transport_errors": 0
+    },
+    "idle_maintenance_ms": {
+      "count": 2620,
+      "max": 99.99900000000001,
+      "mean": 3.3671404580152675,
+      "p50": 0.494,
+      "p95": 25.031000000000002,
+      "p99": 39.791
+    },
+    "late_slots_skipped": {
+      "queries": 0,
+      "writes": 0
+    },
+    "maintenance_errors": 0,
+    "offered": {
+      "logical_mutations": 120000,
+      "queries": 12000,
+      "write_batches": 1200
+    },
+    "open": {
+      "blocks": 5928,
+      "get_payload_bytes": 192074589,
+      "http": {
+        "delete": 0,
+        "get": 668,
+        "http_errors": 0,
+        "list": 2,
+        "other": 0,
+        "put": 2,
+        "request_body_bytes": 156,
+        "transport_errors": 0
+      },
+      "ms": 1209.497167,
+      "runs": 20,
+      "sequence": 10002,
+      "sketch_charged_bytes": 90613348,
+      "sketch_rebuilds": 0,
+      "tail_objects": 18
+    },
+    "overloaded": {
+      "queries": 0,
+      "writes": 0
+    },
+    "peak_physical_footprint_bytes": 193446536,
+    "peak_rss_bytes": 203259904,
+    "peak_rss_per_second": [
+      167952384,
+      169017344,
+      169689088,
+      170524672,
+      171081728,
+      171393024,
+      171704320,
+      202604544,
+      202604544,
+      202620928,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202637312,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      202866688,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904,
+      203259904
+    ],
+    "peak_rss_stages": {
+      "after_open": 161497088,
+      "after_static_quality": 163577856,
+      "before_open": 6815744
+    },
+    "query_arrival_lateness_ms": {
+      "count": 12000,
+      "max": 0.0,
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    },
+    "query_ms": {
+      "count": 12000,
+      "max": 55.388917,
+      "mean": 17.91859962650001,
+      "p50": 8.704500000000001,
+      "p95": 41.33925,
+      "p99": 44.62625
+    },
+    "query_queue_ms": {
+      "count": 12000,
+      "max": 23.633125,
+      "mean": 0.2158687051666665,
+      "p50": 0.013417,
+      "p95": 0.624667,
+      "p99": 6.063959
+    },
+    "query_remote_payload_bytes": {
+      "count": 12000,
+      "max": 27254.0,
+      "mean": 22.653,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    },
+    "query_remote_reads": {
+      "count": 12000,
+      "max": 1.0,
+      "mean": 0.0009166666666666666,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    },
+    "requests_by_kind": {
+      "sgindex": {
+        "delete": 69,
+        "put": 68
+      },
+      "sglog": {
+        "delete": 550,
+        "put": 550
+      },
+      "sgpack": {
+        "delete": 92,
+        "put": 93
+      },
+      "sgroot": {
+        "delete": 90,
+        "put": 90
+      }
+    },
+    "rounds": 300,
+    "short_results": 0,
+    "static_quality": [
+      {
+        "filtered": {
+          "fifth_percentile_recall_at_10": 1.0,
+          "latency_ms": {
+            "count": 200,
+            "max": 0.912791,
+            "mean": 0.46765129500000013,
+            "p50": 0.464333,
+            "p95": 0.470334,
+            "p99": 0.495416
+          },
+          "mean_recall_at_10": 1.0,
+          "queries_with_remote_reads_ms": {
+            "count": 0
+          },
+          "queries_without_remote_reads_ms": {
+            "count": 200,
+            "max": 0.912791,
+            "mean": 0.46765129500000013,
+            "p50": 0.464333,
+            "p95": 0.470334,
+            "p99": 0.495416
+          },
+          "remote_payload_bytes": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "remote_reads": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "short_results": 0
+        },
+        "pass": "first_empty_cache",
+        "unfiltered": {
+          "fifth_percentile_recall_at_10": 0.8,
+          "latency_ms": {
+            "count": 200,
+            "max": 22.07,
+            "mean": 11.225810645,
+            "p50": 10.805042,
+            "p95": 14.698167,
+            "p99": 18.733584
+          },
+          "mean_recall_at_10": 0.9545,
+          "queries_with_remote_reads_ms": {
+            "count": 200,
+            "max": 22.07,
+            "mean": 11.225810645,
+            "p50": 10.805042,
+            "p95": 14.698167,
+            "p99": 18.733584
+          },
+          "queries_without_remote_reads_ms": {
+            "count": 0
+          },
+          "remote_payload_bytes": {
+            "count": 200,
+            "max": 465873.0,
+            "mean": 217704.06,
+            "p50": 210915.0,
+            "p95": 307761.0,
+            "p99": 380384.0
+          },
+          "remote_reads": {
+            "count": 200,
+            "max": 8.0,
+            "mean": 7.76,
+            "p50": 8.0,
+            "p95": 8.0,
+            "p99": 8.0
+          },
+          "short_results": 0
+        }
+      },
+      {
+        "filtered": {
+          "fifth_percentile_recall_at_10": 1.0,
+          "latency_ms": {
+            "count": 200,
+            "max": 0.60175,
+            "mean": 0.47098563499999985,
+            "p50": 0.46891700000000003,
+            "p95": 0.484625,
+            "p99": 0.487625
+          },
+          "mean_recall_at_10": 1.0,
+          "queries_with_remote_reads_ms": {
+            "count": 0
+          },
+          "queries_without_remote_reads_ms": {
+            "count": 200,
+            "max": 0.60175,
+            "mean": 0.47098563499999985,
+            "p50": 0.46891700000000003,
+            "p95": 0.484625,
+            "p99": 0.487625
+          },
+          "remote_payload_bytes": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "remote_reads": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "short_results": 0
+        },
+        "pass": "second_warm",
+        "unfiltered": {
+          "fifth_percentile_recall_at_10": 0.9,
+          "latency_ms": {
+            "count": 200,
+            "max": 26.626166,
+            "mean": 9.393378525000001,
+            "p50": 9.502,
+            "p95": 11.937375,
+            "p99": 13.606917
+          },
+          "mean_recall_at_10": 0.995,
+          "queries_with_remote_reads_ms": {
+            "count": 139,
+            "max": 26.626166,
+            "mean": 10.310585115107916,
+            "p50": 10.114958999999999,
+            "p95": 12.337083,
+            "p99": 17.574083
+          },
+          "queries_without_remote_reads_ms": {
+            "count": 61,
+            "max": 9.895709,
+            "mean": 7.303350393442622,
+            "p50": 7.202375,
+            "p95": 8.990582999999999,
+            "p99": 9.895709
+          },
+          "remote_payload_bytes": {
+            "count": 200,
+            "max": 162373.0,
+            "mean": 34648.89,
+            "p50": 26725.0,
+            "p95": 80583.0,
+            "p99": 105604.0
+          },
+          "remote_reads": {
+            "count": 200,
+            "max": 4.0,
+            "mean": 1.305,
+            "p50": 1.0,
+            "p95": 3.0,
+            "p99": 4.0
+          },
+          "short_results": 0
+        }
+      },
+      {
+        "filtered": {
+          "fifth_percentile_recall_at_10": 1.0,
+          "latency_ms": {
+            "count": 200,
+            "max": 0.648,
+            "mean": 0.47489441499999996,
+            "p50": 0.47133400000000003,
+            "p95": 0.488375,
+            "p99": 0.525875
+          },
+          "mean_recall_at_10": 1.0,
+          "queries_with_remote_reads_ms": {
+            "count": 0
+          },
+          "queries_without_remote_reads_ms": {
+            "count": 200,
+            "max": 0.648,
+            "mean": 0.47489441499999996,
+            "p50": 0.47133400000000003,
+            "p95": 0.488375,
+            "p99": 0.525875
+          },
+          "remote_payload_bytes": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "remote_reads": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "short_results": 0
+        },
+        "pass": "third_namespace_warm",
+        "unfiltered": {
+          "fifth_percentile_recall_at_10": 1.0,
+          "latency_ms": {
+            "count": 200,
+            "max": 10.049666,
+            "mean": 7.454720255000004,
+            "p50": 7.442792,
+            "p95": 8.571375,
+            "p99": 9.355959
+          },
+          "mean_recall_at_10": 1.0,
+          "queries_with_remote_reads_ms": {
+            "count": 0
+          },
+          "queries_without_remote_reads_ms": {
+            "count": 200,
+            "max": 10.049666,
+            "mean": 7.454720255000004,
+            "p50": 7.442792,
+            "p95": 8.571375,
+            "p99": 9.355959
+          },
+          "remote_payload_bytes": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "remote_reads": {
+            "count": 200,
+            "max": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "short_results": 0
+        },
+        "warm_up": {
+          "cache": {
+            "cache_io_errors": 0,
+            "corrupt_entries": 0,
+            "namespace_bytes": 191754240,
+            "nvme_available": true,
+            "nvme_bytes": 191754240,
+            "nvme_entries": 5928,
+            "nvme_hits": 3813,
+            "nvme_limit": 268435456,
+            "nvme_payload_bytes": 98854736,
+            "ram_bytes": 0,
+            "ram_entries": 0,
+            "ram_hits": 0,
+            "ram_payload_bytes": 0,
+            "remote_fetches": 1813,
+            "remote_payload_bytes": 50470590,
+            "warm_bytes": 191754240,
+            "warm_complete": true,
+            "warm_fetches": 732,
+            "warm_payload_bytes": 135579601
+          },
+          "ms": 1777.174
+        }
+      }
+    ],
+    "unfiltered_cold_query_ms": {
+      "count": 11,
+      "max": 35.664875,
+      "mean": 24.15317790909091,
+      "p50": 22.458958000000003,
+      "p95": 35.664875,
+      "p99": 35.664875
+    },
+    "unfiltered_query_execution_ms": {
+      "count": 6000,
+      "max": 55.252375,
+      "mean": 33.50266661116677,
+      "p50": 35.614625,
+      "p95": 42.790416,
+      "p99": 48.042584
+    },
+    "unfiltered_query_ms": {
+      "count": 6000,
+      "max": 55.388917,
+      "mean": 34.05799554750005,
+      "p50": 35.823958000000005,
+      "p95": 42.958166999999996,
+      "p99": 48.271708000000004
+    },
+    "unfiltered_warm_query_ms": {
+      "count": 5989,
+      "max": 55.388917,
+      "mean": 34.076187732175704,
+      "p50": 35.845583,
+      "p95": 42.960041999999994,
+      "p99": 48.288625
+    },
+    "write_arrival_lateness_ms": {
+      "count": 1200,
+      "max": 0.0,
+      "mean": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    },
+    "write_execution_ms": {
+      "count": 1200,
+      "max": 29.67625,
+      "mean": 13.768325350833381,
+      "p50": 13.360292,
+      "p95": 19.767291999999998,
+      "p99": 28.652041
+    },
+    "write_forced_maintenance_ms": {
+      "count": 0
+    },
+    "write_ms": {
+      "count": 1200,
+      "max": 43.455625,
+      "mean": 21.469131522499993,
+      "p50": 22.447000000000003,
+      "p95": 30.153375,
+      "p99": 39.663833000000004
+    },
+    "write_queue_ms": {
+      "count": 1200,
+      "max": 26.235708,
+      "mean": 4.464960345000001,
+      "p50": 2.800542,
+      "p95": 11.556125,
+      "p99": 16.391958000000002
+    }
+  },
+  "source_sha256": {
+    "examples/m24_acceptance.rs": "0f82807a427a93b6d03b79d0504457492cf18d75e572ec38d4c05ce665fd653c",
+    "src/admission.rs": "fbf1d62b3f4d0d892fac5c359fbf91e7e92e5a03b3c0437f39f614fabb19dbd1",
+    "src/segmented.rs": "7afe246a14e8d0a51356e304cbbbaed6018a45b7975cb2c40503977a3954dc69",
+    "src/segmented/cache.rs": "0c21f49761d65f9474085be95ebffed65704b378f66eea090a606ac5f23b3757",
+    "src/segmented/directory.rs": "087ec25d7d06acbdcb350f773ee9f87263f7a647a72ac9c0a57c41047e1fec6a",
+    "src/segmented/serving.rs": "2ac4f34fdd34ab5d66d1b17614cc62c4b6d51542e12fa224678f8f537cd3bea4",
+    "src/segmented/sketch.rs": "578ba5f41772f124982b4b18b863270ccb2bddee5614b7c059d567163da7b7b0",
+    "src/store.rs": "cb8f8d439e5a85a27f40def4e54dee27bb7c9edd4b49c006b4daa33d66662a28",
+    "src/store/s3.rs": "6d562c5d1a3155ac8a6a612783e933e299a070072bb80a69c17734c7051a89c5"
+  },
+  "verify": {
+    "backup": {
+      "backup_http": {
+        "delete": 0,
+        "get": 665,
+        "http_errors": 0,
+        "list": 2,
+        "other": 0,
+        "put": 666,
+        "request_body_bytes": 278592792,
+        "transport_errors": 0
+      },
+      "backup_ms": 7224.566708,
+      "backup_restored_equal": true,
+      "restored_sketch_rebuilds": 0
+    },
+    "cache_loss_open": {
+      "blocks": 5998,
+      "get_payload_bytes": 193597773,
+      "http": {
+        "delete": 0,
+        "get": 671,
+        "http_errors": 0,
+        "list": 2,
+        "other": 0,
+        "put": 2,
+        "request_body_bytes": 156,
+        "transport_errors": 0
+      },
+      "ms": 1240.565333,
+      "runs": 19,
+      "sequence": 11204,
+      "sketch_charged_bytes": 90417536,
+      "sketch_rebuilds": 0,
+      "tail_objects": 19
+    },
+    "cache_loss_results_equal": true,
+    "expected_documents": 1000000,
+    "live_documents": 1000000,
+    "overwritten_ids": 120000,
+    "reopen": {
+      "blocks": 5998,
+      "get_payload_bytes": 193790307,
+      "http": {
+        "delete": 0,
+        "get": 668,
+        "http_errors": 0,
+        "list": 2,
+        "other": 0,
+        "put": 2,
+        "request_body_bytes": 156,
+        "transport_errors": 0
+      },
+      "ms": 1375.8295839999998,
+      "runs": 19,
+      "sequence": 11203,
+      "sketch_charged_bytes": 90417536,
+      "sketch_rebuilds": 0,
+      "tail_objects": 18
+    },
+    "scan_ms": 6228.416166,
+    "unfiltered_mean_recall_by_block_budget": {
+      "oracle_best_8_blocks": 0.885,
+      "serving": 0.877,
+      "serving_16": 0.877,
+      "serving_24": 0.877,
+      "uniform_10": 0.948,
+      "uniform_12": 0.989,
+      "uniform_8": 0.86
+    },
+    "update_wave_quality": {
+      "filtered": {
+        "fifth_percentile_recall_at_10": 1.0,
+        "mean_recall_at_10": 1.0,
+        "queries": 100,
+        "short_results": 0
+      },
+      "unfiltered": {
+        "fifth_percentile_recall_at_10": 0.7,
+        "mean_recall_at_10": 0.8769999999999998,
+        "queries": 100,
+        "short_results": 0
+      }
+    },
+    "update_wave_quality_warm": {
+      "filtered": {
+        "fifth_percentile_recall_at_10": 1.0,
+        "mean_recall_at_10": 1.0,
+        "queries": 100,
+        "short_results": 0
+      },
+      "unfiltered": {
+        "fifth_percentile_recall_at_10": 1.0,
+        "mean_recall_at_10": 1.0,
+        "queries": 100,
+        "short_results": 0
+      }
+    },
+    "value_mismatches": 0,
+    "warm_unfiltered_mean_recall_by_local_blocks": {
+      "serving_local_12": 0.989,
+      "serving_local_24": 1.0,
+      "serving_local_48": 1.0
+    },
+    "warm_up": {
+      "cache": {
+        "cache_io_errors": 0,
+        "corrupt_entries": 0,
+        "namespace_bytes": 192876544,
+        "nvme_available": true,
+        "nvme_bytes": 222789632,
+        "nvme_entries": 7270,
+        "nvme_hits": 12887,
+        "nvme_limit": 268435456,
+        "nvme_payload_bytes": 335338681,
+        "ram_bytes": 0,
+        "ram_entries": 0,
+        "ram_hits": 0,
+        "ram_payload_bytes": 0,
+        "remote_fetches": 0,
+        "remote_payload_bytes": 0,
+        "warm_bytes": 192876544,
+        "warm_complete": true,
+        "warm_fetches": 0,
+        "warm_payload_bytes": 0
+      },
+      "ms": 4.435334
+    }
+  },
+  "version": 1,
+  "visible_payload_bytes_after_serve": 278592942,
+  "working_tree_dirty": false
+}
