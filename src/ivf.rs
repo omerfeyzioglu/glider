@@ -4,7 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, BinaryHeap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +113,155 @@ fn closest(metric: Metric, vector: &[f32], centers: &[Vec<f32>]) -> usize {
         .0
 }
 
+/// The `n` centers nearest to `vector` as `(index, routing score)`, ordered by
+/// `(score, index)`: the same deterministic tie rule as IVF assignment.
+pub fn nearest_centers(
+    metric: Metric,
+    vector: &[f32],
+    centers: &[Vec<f32>],
+    n: usize,
+) -> Vec<(usize, f64)> {
+    let mut ranked: Vec<_> = centers
+        .iter()
+        .enumerate()
+        .map(|(i, center)| (i, metric.routing_score(vector, center)))
+        .collect();
+    let order = |a: &(usize, f64), b: &(usize, f64)| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0));
+    if n < ranked.len() {
+        ranked.select_nth_unstable_by(n, order);
+        ranked.truncate(n);
+    }
+    ranked.sort_by(order);
+    ranked
+}
+
+/// Lloyd iterations: assign every point to its closest center, then move each
+/// nonempty center to its members' mean (squared Euclidean, cosine) or
+/// coordinate median (Manhattan). Empty centers keep their position.
+fn refine(metric: Metric, points: &[&[f32]], centers: &mut [Vec<f32>], iterations: usize) {
+    let mut groups = vec![Vec::new(); centers.len()];
+    for _ in 0..iterations {
+        for group in &mut groups {
+            group.clear();
+        }
+        for (i, point) in points.iter().enumerate() {
+            groups[closest(metric, point, centers)].push(i);
+        }
+        for (center, members) in centers.iter_mut().zip(&groups) {
+            // Empty partitions keep their center. No division by zero or lost rows.
+            if members.is_empty() {
+                continue;
+            }
+            for (d, component) in center.iter_mut().enumerate() {
+                *component = match metric {
+                    Metric::SquaredEuclidean | Metric::Cosine => {
+                        (members
+                            .iter()
+                            .map(|&i| f64::from(points[i][d]))
+                            .sum::<f64>()
+                            / members.len() as f64) as f32
+                    }
+                    Metric::Manhattan => {
+                        let mut values: Vec<_> = members.iter().map(|&i| points[i][d]).collect();
+                        let middle = values.len() / 2;
+                        *values.select_nth_unstable_by(middle, f32::total_cmp).1
+                    }
+                };
+            }
+        }
+    }
+}
+
+/// Seeded priority of an ID for bounded training samples (SplitMix64 of the
+/// seed-mixed ID). Lower priorities are sampled first; ties break by ID.
+pub fn sample_priority(seed: u64, id: u64) -> u64 {
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    mix(seed ^ mix(id))
+}
+
+/// A bounded deterministic training sample: offered `(ID, vector)` rows are
+/// kept iff their `(sample_priority, ID)` is among the `capacity` smallest.
+/// Memory is `capacity` vectors regardless of how many rows are streamed, and
+/// the result does not depend on offer order. Callers offer each ID once,
+/// with vectors of one dimension.
+pub struct TrainingSample {
+    capacity: usize,
+    seed: u64,
+    /// Max-heap of `(priority, ID, slot in vectors)`.
+    keys: BinaryHeap<(u64, u64, usize)>,
+    vectors: Vec<Vec<f32>>,
+}
+
+impl TrainingSample {
+    pub fn new(capacity: usize, seed: u64) -> Self {
+        Self {
+            capacity,
+            seed,
+            keys: BinaryHeap::with_capacity(capacity),
+            vectors: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn offer(&mut self, id: u64, vector: &[f32]) {
+        let priority = sample_priority(self.seed, id);
+        if self.vectors.len() < self.capacity {
+            self.keys.push((priority, id, self.vectors.len()));
+            self.vectors.push(vector.to_vec());
+        } else if let Some(&(largest, largest_id, slot)) = self.keys.peek() {
+            if (priority, id) < (largest, largest_id) {
+                self.keys.pop();
+                self.keys.push((priority, id, slot));
+                self.vectors[slot].copy_from_slice(vector);
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.vectors.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.vectors.is_empty()
+    }
+
+    /// Sampled `(ID, vector)` rows in `(priority, ID)` order.
+    pub fn into_rows(self) -> Vec<(u64, Vec<f32>)> {
+        let mut keys = self.keys.into_vec();
+        keys.sort_unstable();
+        let mut vectors: Vec<_> = self.vectors.into_iter().map(Some).collect();
+        keys.into_iter()
+            .map(|(_, id, slot)| (id, vectors[slot].take().unwrap()))
+            .collect()
+    }
+}
+
+/// Bounded deterministic centroid training on a sample in `(priority, ID)`
+/// order, as `TrainingSample::into_rows` returns it. The first `count` sample
+/// rows (a seeded uniform choice) are the initial centers, refined by
+/// `iterations` Lloyd iterations over the sample only. Returns
+/// `min(count, sample rows)` centers; empty clusters keep their center.
+/// Callers assign rows to the returned final centers with `nearest_centers`.
+pub fn train_bounded(
+    metric: Metric,
+    sample: &[(u64, Vec<f32>)],
+    count: usize,
+    iterations: usize,
+) -> Vec<Vec<f32>> {
+    let points: Vec<&[f32]> = sample.iter().map(|(_, vector)| vector.as_slice()).collect();
+    let mut centers: Vec<Vec<f32>> = points
+        .iter()
+        .take(count)
+        .map(|point| point.to_vec())
+        .collect();
+    refine(metric, &points, &mut centers, iterations);
+    centers
+}
+
 impl<S: ObjectStore> Database<S> {
     /// Load a previously published index for this exact sequence and configuration,
     /// or train and publish it as one immutable derived object. A successful call
@@ -190,38 +339,16 @@ impl<S: ObjectStore> Database<S> {
                     .unwrap_or(0);
             }
         }
-        let mut groups = vec![Vec::new(); count];
-        for _ in 0..options.iterations {
-            for group in &mut groups {
-                group.clear();
-            }
-            for (i, (_, point)) in points.iter().enumerate() {
-                groups[closest(self.config.metric, &point.vector, &centers)].push(i);
-            }
-            for (center, members) in centers.iter_mut().zip(&groups) {
-                // Empty partitions keep their center. No division by zero or lost rows.
-                if members.is_empty() {
-                    continue;
-                }
-                for (d, component) in center.iter_mut().enumerate() {
-                    *component = match self.config.metric {
-                        Metric::SquaredEuclidean | Metric::Cosine => {
-                            (members
-                                .iter()
-                                .map(|&i| f64::from(points[i].1.vector[d]))
-                                .sum::<f64>()
-                                / members.len() as f64) as f32
-                        }
-                        Metric::Manhattan => {
-                            let mut values: Vec<_> =
-                                members.iter().map(|&i| points[i].1.vector[d]).collect();
-                            let middle = values.len() / 2;
-                            *values.select_nth_unstable_by(middle, f32::total_cmp).1
-                        }
-                    };
-                }
-            }
-        }
+        let vectors: Vec<&[f32]> = points
+            .iter()
+            .map(|(_, point)| point.vector.as_slice())
+            .collect();
+        refine(
+            self.config.metric,
+            &vectors,
+            &mut centers,
+            options.iterations,
+        );
         let mut postings = vec![Vec::new(); count];
         // Assignment must use the final updated centers, not the previous iteration.
         for (&id, point) in points {
@@ -322,5 +449,120 @@ impl<S: ObjectStore> Database<S> {
         }
         output.neighbors.sort_by(order);
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Seeded synthetic rows: `count` vectors of `dimensions` in [0, 100).
+    fn rows(seed: u64, count: usize, dimensions: usize) -> Vec<(u64, Vec<f32>)> {
+        (0..count as u64)
+            .map(|id| {
+                let vector = (0..dimensions as u64)
+                    .map(|d| (sample_priority(seed, id * 1000 + d) % 10_000) as f32 / 100.)
+                    .collect();
+                (id, vector)
+            })
+            .collect()
+    }
+
+    fn sample(seed: u64, capacity: usize, offered: &[(u64, Vec<f32>)]) -> Vec<(u64, Vec<f32>)> {
+        let mut sample = TrainingSample::new(capacity, seed);
+        for (id, vector) in offered {
+            sample.offer(*id, vector);
+        }
+        sample.into_rows()
+    }
+
+    #[test]
+    fn training_sample_keeps_the_smallest_priorities_in_any_offer_order() {
+        for seed in [0, 7, 42] {
+            let data = rows(seed, 500, 4);
+            let kept = sample(seed, 64, &data);
+            let mut expected: Vec<_> = data
+                .iter()
+                .map(|(id, _)| (sample_priority(seed, *id), *id))
+                .collect();
+            expected.sort_unstable();
+            let expected: Vec<u64> = expected[..64].iter().map(|(_, id)| *id).collect();
+            let ids: Vec<u64> = kept.iter().map(|(id, _)| *id).collect();
+            assert_eq!(ids, expected, "seed={seed}");
+            assert!(
+                kept.iter().all(|(id, v)| *v == data[*id as usize].1),
+                "seed={seed}"
+            );
+            let reversed: Vec<_> = data.iter().rev().cloned().collect();
+            assert_eq!(sample(seed, 64, &reversed), kept, "seed={seed}");
+            assert_eq!(sample(seed, 1000, &data).len(), 500, "seed={seed}");
+        }
+        assert_ne!(
+            sample(1, 64, &rows(1, 500, 4)),
+            sample(2, 64, &rows(1, 500, 4))
+        );
+    }
+
+    #[test]
+    fn bounded_training_is_deterministic_and_assigns_to_final_centers() {
+        for seed in [3_u64, 42] {
+            let data = rows(seed, 2000, 8);
+            for metric in [Metric::SquaredEuclidean, Metric::Manhattan, Metric::Cosine] {
+                let first = train_bounded(metric, &sample(seed, 512, &data), 16, 2);
+                let second = train_bounded(metric, &sample(seed, 512, &data), 16, 2);
+                let bits = |centers: &[Vec<f32>]| -> Vec<Vec<u32>> {
+                    centers
+                        .iter()
+                        .map(|c| c.iter().map(|x| x.to_bits()).collect())
+                        .collect()
+                };
+                assert_eq!(bits(&first), bits(&second), "seed={seed} {metric:?}");
+                assert_eq!(first.len(), 16, "seed={seed} {metric:?}");
+                assert!(
+                    first.iter().flatten().all(|x| x.is_finite()),
+                    "seed={seed} {metric:?}"
+                );
+                for (_, vector) in &data[..50] {
+                    let nearest = nearest_centers(metric, vector, &first, 2);
+                    assert_eq!(nearest[0].0, closest(metric, vector, &first));
+                    assert!(nearest[0].1 <= nearest[1].1, "seed={seed} {metric:?}");
+                }
+            }
+            // The sample rule and trainer are pinned: a stored seed must
+            // reproduce the same centers in later versions.
+            let centers = train_bounded(Metric::SquaredEuclidean, &sample(seed, 512, &data), 16, 2);
+            let mut digest = Sha256::new();
+            for value in centers.iter().flatten() {
+                digest.update(value.to_le_bytes());
+            }
+            let expected = match seed {
+                3 => "3730d6e9d2b8a22a4bf7f8162a91956a5d31683a19a681b7fca23b5f12eba97b",
+                _ => "72242320f6f36541f3ccda52d8b6b917d73dc5df4f749734c75a292b08867ae8",
+            };
+            assert_eq!(format!("{:x}", digest.finalize()), expected, "seed={seed}");
+            // Centers are capped at the sample size; zero iterations keep the
+            // seeded initial rows.
+            let small = sample(seed, 5, &data);
+            let centers = train_bounded(Metric::SquaredEuclidean, &small, 16, 0);
+            let initial: Vec<_> = small.into_iter().map(|(_, v)| v).collect();
+            assert_eq!(centers, initial, "seed={seed}");
+        }
+    }
+
+    #[test]
+    fn nearest_centers_break_score_ties_by_index() {
+        let centers = vec![vec![2.0], vec![0.0], vec![2.0], vec![-2.0]];
+        let ranked = nearest_centers(Metric::SquaredEuclidean, &[1.0], &centers, 4);
+        let order: Vec<usize> = ranked.iter().map(|(i, _)| *i).collect();
+        assert_eq!(order, [0, 1, 2, 3]);
+        let top: Vec<usize> = nearest_centers(Metric::SquaredEuclidean, &[1.0], &centers, 2)
+            .iter()
+            .map(|(i, _)| *i)
+            .collect();
+        assert_eq!(top, [0, 1]);
+        assert_eq!(
+            nearest_centers(Metric::Manhattan, &[1.0], &centers, 9).len(),
+            4
+        );
     }
 }

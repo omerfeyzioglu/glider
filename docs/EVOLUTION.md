@@ -300,3 +300,18 @@ share the CPU and end-to-end p95 stayed near 53 ms: routing cost per query, not
 serialization, bounds this workload. Idle cache warm-up likewise reads its
 range outside the cache lock, so queries never wait for its GET.
 [Evidence](../benchmarks/M31.md#concurrent-queries-m34).
+
+## 2026-10-02 — Clustered postings need block ranking, not whole postings
+
+M37 stage 2 trains centroids on a bounded 16,384-row seeded sample and lays
+out cluster-contiguous blocks and packs offline on SIFT1M. The best eight
+postings hold at least 0.994 of the exact top-10, but reading whole postings
+in centroid order within 8 range requests and 1 MiB reaches only 0.741 mean
+recall at 1,000,000 rows: an encoded row costs about 157 bytes, so postings
+are either larger than the cap or too many to fetch. Ranking the blocks of
+the 16 nearest postings (exact nearest-row distance standing in for sketch
+scores) reaches 0.979 mean and 0.9 p5 at both 250,000 and 1,000,000 rows with
+256 centroids, while the design's 1,024 centroids at 1,000,000 rows miss the
+p5 gate. Five-percent boundary duplication and more training iterations did
+not help. Stage 3 must confirm this with the real five-bit sketches.
+[Evidence](../benchmarks/M37.md#offline-clustering-probe).
