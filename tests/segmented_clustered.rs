@@ -803,6 +803,8 @@ fn clustered_seals_and_merges_match_exact_search() {
         drop(db);
         let mut db = open(&store, metric);
         assert!(db.clustered_view_error().is_none(), "{context}");
+        // Partially listed posting packs bind their persisted sketches.
+        assert_eq!(db.sketch_rebuilds(), 0, "{context}");
         assert_layout(&db, &format!("{context}, reopened"));
         assert_full_budget_is_exact(&mut db, &model, &mut rng, &format!("{context}, reopened"));
         // Cleanup leaves exactly the selected view's catalog and centroids.
