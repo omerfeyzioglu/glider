@@ -336,3 +336,137 @@ fn query_can_include_fields_for_reranked_routed_and_resident_hits() {
         .shutdown(glider::admission::Shutdown::Drain)
         .unwrap();
 }
+
+/// Every error status carries `{"error": "<message>"}` and nothing else,
+/// including framework rejections that axum answers with text or no body.
+#[test]
+fn every_error_response_is_json_with_an_unchanged_status() {
+    use axum::{body::Body, http::Request as HttpRequest};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(temp.path());
+    let service = config.start().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let app = router(service.client(), config.token.clone());
+    let send = |method: &str, path: &str, content_type: Option<&str>, body: Vec<u8>| {
+        let mut builder = HttpRequest::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", "Bearer secret");
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        let request = builder.body(Body::from(body)).unwrap();
+        let app = app.clone();
+        runtime.block_on(async move {
+            let response = app.oneshot(request).await.unwrap();
+            let (parts, body) = response.into_parts();
+            let bytes = body.collect().await.unwrap().to_bytes();
+            (parts, String::from_utf8(bytes.to_vec()).unwrap())
+        })
+    };
+    let json = Some("application/json");
+    let cases: [(&str, &str, Option<&str>, Vec<u8>, u16); 10] = [
+        ("POST", "/v1/write", json, b"{not json".to_vec(), 400),
+        (
+            "POST",
+            "/v1/write",
+            json,
+            br#"{"upsert":"x"}"#.to_vec(),
+            422,
+        ),
+        ("POST", "/v1/write", json, br#"{"bogus":1}"#.to_vec(), 422),
+        ("POST", "/v1/write", Some("text/plain"), b"{}".to_vec(), 415),
+        ("POST", "/v1/write", None, b"{}".to_vec(), 415),
+        ("POST", "/v1/write", json, vec![b' '; 3 << 20], 413),
+        ("GET", "/v1/write", None, Vec::new(), 405),
+        ("GET", "/no/such/route", None, Vec::new(), 404),
+        ("GET", "/v1/points/abc", None, Vec::new(), 400),
+        (
+            "POST",
+            "/v1/query",
+            json,
+            br#"{"vector":[1,1,1],"k":0}"#.to_vec(),
+            400,
+        ),
+    ];
+    for (method, path, content_type, body, status) in cases {
+        let (parts, body) = send(method, path, content_type, body);
+        assert_eq!(parts.status.as_u16(), status, "{method} {path}: {body}");
+        assert_eq!(
+            parts.headers["content-type"], "application/json",
+            "{method} {path}: {body}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|error| panic!("{method} {path}: {error}: {body}"));
+        let object = value.as_object().unwrap();
+        assert!(
+            object.len() == 1
+                && object["error"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+            "{method} {path}: {body}"
+        );
+        if status == 405 {
+            assert!(parts.headers.contains_key("allow"), "Allow kept");
+        }
+    }
+    // Successful and unauthorized responses are untouched.
+    assert_eq!(send("GET", "/healthz", None, Vec::new()).0.status, 200);
+    drop(runtime);
+    service
+        .shutdown(glider::admission::Shutdown::Drain)
+        .unwrap();
+}
+
+/// Rows above the block limit are refused with a 400 naming the limit, large
+/// valid requests are admitted, and the namespace keeps accepting writes.
+#[test]
+fn write_limits_are_consistent_over_http() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(temp.path());
+    let (service, address, runtime) = serve(&config);
+    let point = |id: u64, bytes: usize| {
+        format!(
+            r#"{{"id":{id},"vector":[1,2,3],"metadata":{{"blob":"{}"}}}}"#,
+            "x".repeat(bytes)
+        )
+    };
+    let (status, body) = call(
+        address,
+        "POST",
+        "/v1/write",
+        &format!(r#"{{"upsert":[{}]}}"#, point(1, 300_000)),
+        "secret",
+    );
+    assert_eq!(status, 400, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|text| text.contains("document 1") && text.contains("one block")),
+        "{body}"
+    );
+    assert_eq!(call(address, "GET", "/v1/points/1", "", "secret").0, 404);
+    // About 500 KB of encoded payload: above the former 320 KiB queue cap.
+    let upserts: Vec<_> = (2..7).map(|id| point(id, 100_000)).collect();
+    let body = format!(r#"{{"upsert":[{}]}}"#, upserts.join(","));
+    assert!(body.len() > 320 * 1024);
+    let (status, response) = call(address, "POST", "/v1/write", &body, "secret");
+    assert_eq!(status, 200, "{response}");
+    let (status, response) = call(
+        address,
+        "POST",
+        "/v1/write",
+        &format!(r#"{{"upsert":[{}]}}"#, point(7, 10)),
+        "secret",
+    );
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(call(address, "GET", "/v1/points/6", "", "secret").0, 200);
+    drop(runtime);
+    service
+        .shutdown(glider::admission::Shutdown::Drain)
+        .unwrap();
+}

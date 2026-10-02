@@ -30,22 +30,51 @@ fn metric_byte(metric: Metric) -> u8 {
 
 /// Raw bytes one record adds to a block.
 pub(super) fn record_len(record: &BlockRecord) -> usize {
-    17 + match &record.mutation {
+    match &record.mutation {
         Mutation::Put {
             vector, metadata, ..
-        } => put_len(vector, metadata),
-        Mutation::Delete { .. } => 0,
+        } => put_row_len(vector, metadata),
+        Mutation::Delete { .. } => DELETE_ROW_LEN,
     }
 }
 
-/// Raw bytes a put's vector and metadata add after the record header.
-pub(super) fn put_len(vector: &[f32], metadata: &BTreeMap<String, String>) -> usize {
-    4 * vector.len()
+/// Fixed record header: id u64, sequence u64 and kind u8.
+const RECORD_HEADER: usize = 17;
+/// Raw bytes a tombstone adds to a block.
+pub(super) const DELETE_ROW_LEN: usize = RECORD_HEADER;
+
+/// Raw bytes a put adds to a block: the record header, its vector and its
+/// metadata. Admission and sealing both size puts with this function.
+pub(super) fn put_row_len(vector: &[f32], metadata: &BTreeMap<String, String>) -> usize {
+    RECORD_HEADER
+        + 4 * vector.len()
         + 4
         + metadata
             .iter()
             .map(|(key, value)| 8 + key.len() + value.len())
             .sum::<usize>()
+}
+
+/// Whether a record of `row_len` raw bytes fits alone in a block.
+pub(super) fn row_fits(row_len: usize) -> bool {
+    block_len([]) + row_len <= MAX_RAW_BLOCK_BYTES
+}
+
+/// Reject a put that could never be sealed because its row cannot share a
+/// block with anything, using the size the seal planner applies.
+pub(super) fn check_put_fits(
+    id: u64,
+    vector: &[f32],
+    metadata: &BTreeMap<String, String>,
+) -> Result<()> {
+    let row_len = put_row_len(vector, metadata);
+    if row_fits(row_len) {
+        return Ok(());
+    }
+    Err(Error::Invalid(format!(
+        "document {id} needs {row_len} raw bytes; at most {} fit in one block          (vector and metadata combined)",
+        MAX_RAW_BLOCK_BYTES - block_len([])
+    )))
 }
 
 /// Raw length of a block holding records of the given raw lengths.
