@@ -85,6 +85,8 @@ fn http_service_writes_queries_and_survives_restart() {
     assert_eq!(status, 200, "{body}");
     // Sequence 1 is the first start's takeover record.
     assert!(body.contains(r#""sequence":2"#), "{body}");
+    let write: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(write.get("conflict").is_none(), "{body}");
     let (status, body) = call(
         address,
         "POST",
@@ -120,6 +122,8 @@ fn http_service_writes_queries_and_survives_restart() {
     let retry =
         r#"{"delete":[2],"request_id":{"boundary":1,"nonce":"0123456789abcdef0123456789abcdef"}}"#;
     let first = call(address, "POST", "/v1/write", retry, "secret").1;
+    let retried_write: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert!(retried_write.get("conflict").is_none(), "{first}");
     assert_eq!(call(address, "POST", "/v1/write", retry, "secret").1, first);
     assert_eq!(call(address, "GET", "/v1/points/2", "", "secret").0, 404);
     let (_, body) = call(
@@ -130,6 +134,8 @@ fn http_service_writes_queries_and_survives_restart() {
         "secret",
     );
     assert!(body.contains("retained"), "{body}");
+    let lookup: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(lookup["outcome"].get("conflict").is_none(), "{body}");
     let (status, body) = call(address, "GET", "/metrics", "", "wrong");
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("glider_committed_sequence 3\n"), "{body}");
