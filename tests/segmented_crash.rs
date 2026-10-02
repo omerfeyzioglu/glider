@@ -4,8 +4,9 @@
 //! workload converts the namespace to a clustered view (M37) twice, so every
 //! staged posting pack, centroid, catalog and root create is a crash point.
 //! A third converts early and then writes group-commit requests through
-//! clustered seals and posting merges; it also delays DELETEs until the run
-//! ends and checks a backup restored from each recovered namespace.
+//! clustered seals and posting merges and checks a backup restored from each
+//! recovered namespace. Every workload also delays each DELETE until the run
+//! ends, and every root publication's run manifest creates are crash points.
 
 use glider::{
     retry::{Request, RequestId},
@@ -351,7 +352,7 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, mode: Mode) 
     check(&clean, &model, "clean run");
     drop(clean);
     for at in (0..operations).step_by(stride.max(1)) {
-        let faults: &[Fault] = if mode == Mode::Clustered && removes[at] {
+        let faults: &[Fault] = if removes[at] {
             &[Fault::Before, Fault::After, Fault::Delayed]
         } else {
             &[Fault::Before, Fault::After]
@@ -444,7 +445,13 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, mode: Mode) 
                 ));
             }
             check(&db, &acknowledged, &format!("{context}, after maintenance"));
+            let runs = db.run_count();
             drop(db);
+            // Cleanup removed every staged or replaced run manifest: one
+            // remains per run of the selected root.
+            let keys = store(&case).list().unwrap();
+            let manifests = keys.iter().filter(|key| key.starts_with("sgmanifest-"));
+            assert_eq!(manifests.count(), runs, "{context}: run manifests");
             if convert {
                 // Cleanup removed every staged orphan and replaced view.
                 let keys = store(&case).list().unwrap();
@@ -473,6 +480,12 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, mode: Mode) 
                 let destination = MemoryStore::default();
                 serving.backup_to(destination.clone()).unwrap();
                 serving.close().unwrap();
+                // The backup holds its root's run manifests.
+                let manifests = destination.list().unwrap();
+                let manifests = manifests
+                    .iter()
+                    .filter(|key| key.starts_with("sgmanifest-"));
+                assert_eq!(manifests.count(), runs, "{context}: backup manifests");
                 let restored = SegmentedDatabase::open(destination, config())
                     .unwrap()
                     .with_cluster_probes(usize::MAX);

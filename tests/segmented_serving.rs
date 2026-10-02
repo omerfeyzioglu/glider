@@ -1239,6 +1239,17 @@ fn idle_maintenance_warms_the_cache_and_survives_its_loss() {
 
     // Partial loss under a warm handle: a query that finds an entry missing
     // falls back to remote reads, and the next pass refetches what was lost.
+    // Idle maintenance after the reopen may have sealed the takeover record
+    // into a new root, so the cold choice is taken again for this root; a
+    // zero local limit makes it independent of the cache.
+    let cold: Vec<_> = queries
+        .iter()
+        .map(|query| {
+            db.database()
+                .search_selective_within(query, 10, cold_budget, &[])
+                .unwrap()
+        })
+        .collect();
     let files: Vec<_> = std::fs::read_dir(cache.join("glider-block-cache-v1"))
         .unwrap()
         .map(|entry| entry.unwrap().path())

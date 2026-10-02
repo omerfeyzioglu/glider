@@ -354,7 +354,7 @@ reads. Opening uses them for run indexes, the log tail and sketch frames.
 
 ### Clustered view (M37)
 
-A root v4 selects one immutable clustered view: a centroid object
+A root v4 (or a v5 with a `clustered` field) selects one immutable clustered view: a centroid object
 (`sgcentroid-*`, `GLCENT01`) and a catalog (`sgcluster-*`, `GLCLCAT1`), each
 bound by length and SHA-256 in the root, whose formats and validators are in
 `docs/M37_CLUSTERED_INDEX.md`. The catalog lists, per cluster, extents of
@@ -464,6 +464,71 @@ fail, cleanup removes nothing, `SegmentedServing` refuses to start, and a
 conversion rebuilds the view as a new epoch. A posting block that fails its
 digest at query time fails that query, as canonical blocks do.
 
+### Root manifests (root v5)
+
+Roots v1, v2 and v4 embed every run's complete block list as JSON (about
+270 bytes per block), so every publication rewrote every block reference:
+2.25 MB per root and 46% of all uploaded bytes in the 1,000,000-row M37
+update-wave replay (`benchmarks/M39.md`), growing linearly with blocks.
+Every root the engine publishes is now version 5: v4's JSON header
+(generation, sequence, configuration, retry state, optional `fences`,
+optional `clustered` view) with, per run, its sequences, index reference and
+a `manifest` reference `{key, length, sha256}` to an immutable run manifest
+`sgmanifest-{attempt}` holding the run's block list. Manifest v1 is binary,
+little-endian: `GLRMAN01`, pack count and block count (u32), each pack once
+in order of first use (u16 key length, `sgpack-` key, payload length u32),
+then per block in run order its pack ordinal, offset, length and partition
+(u32), first and last ID (u64), row count (u32) and raw SHA-256 (68 bytes a
+block). The decoder enforces exact lengths, counts, first-use pack order,
+unique keys and every block-reference rule, so the encoding is canonical; it
+is at most 16 MiB. Root zero stays v1. Readers accept v1, v2, v4 and v5;
+older binaries reject v5 (its runs have no `blocks`).
+
+Publication: a root step builds the new root in memory with full block
+lists, then binds each run to a manifest. A run whose index object and
+blocks equal a run of the selected root reuses that run's reference; any
+other run (a seal's new run, a consolidated or pruned run, runs whose blocks
+moved to a reclaimed pack, and on the first publication after opening a
+v1/v2/v4 root, every run) gets a new manifest, created one per maintenance
+step like packs and indexes (consolidation, a synchronous unit, creates its
+own in the same call). Binding compares contents, never a cached flag, so a
+root cannot reference a stale manifest; manifests staged for the pending
+root are found again by the SHA-256 of their bytes when a step rebuilds it,
+and forgotten when any root is selected. Uploaded bytes per publication are
+then the header plus manifests of changed runs: a seal writes one manifest
+of its own blocks, and posting merges and conversions write none. In the
+replay a publication fell from 2.25 MB to 253 KB and all uploads from 529 to
+311 MB.
+Semantics per step: a manifest create is a staged orphan, like a pack; an
+error poisons the handle and the previous root stays selected. The root
+create is the only switch; an uncertain create poisons and reopen selects
+whichever root exists. Opening loads the selected root's manifests (16 per
+batched read), authenticates each against its length and digest and decodes
+it before validating the whole root; a missing or corrupt manifest fails the
+open (`Corrupt`), never falling back to an older root. Takeover reads only
+root headers. Cleanup retains the selected root's manifests; replaced and
+orphaned ones are obsolete keys that are never reused, so a late DELETE
+cannot remove a later root's manifest. Query views hold decoded roots and
+never read manifests, so like indexes they are not pinned by retired roots.
+Backup copies the selected root's manifests after authenticating them.
+
+Alternatives: (a) a binary root keeping embedded block lists is about four
+times smaller but still proportional to every block; (b) block lists inside
+run index objects would make a reclamation, which moves blocks without
+changing IDs, rewrite whole indexes (24 bytes per ID, up to 2 MiB) instead of
+a manifest (68 bytes per block); (c) an LSM-style manifest of delta segments
+over a base needs edit semantics and a merge policy, while runs are already
+the unit that changes and are bounded by the 2 MiB consolidation limit and
+64 per root, so one manifest per run bounds both the number of segments and
+each publication without separate maintenance; (d) content-addressed keys
+would let a reused key be deleted late by a deposed writer or delayed
+cleanup; unique keys with a digest in the reference keep the never-reused
+rule. The clustered catalog stays one object: it is rewritten only by
+clustered seals, merges and conversions (13.8 MB of 529 MB uploaded in the
+replay); splitting it is left until measurements require it. The retry state
+stays in the root header; it is bounded (at most 128 receipts and 12,800
+revision pairs) independent of collection size.
+
 ### Group commit
 
 `SegmentedDatabase::apply_requests` publishes several independent requests in
@@ -504,7 +569,8 @@ and a full seal synchronously, reported as that command's maintenance time.
 A failed idle read leaves state unchanged, is counted and retried after the
 next command; an uncertain write poisons the engine and fails the service.
 
-`backup_to` copies root zero, the selected root, its indexes, packs (each
+`backup_to` copies root zero, the selected root, its run manifests (each
+checked against the root's length and digest), indexes, packs (each
 verified against the root's block digests before its PUT; packs carry their
 sketches) and the acknowledged log tail into an empty destination, writes `metadata`
 last, then opens the destination and compares sequence, root generation and
@@ -526,7 +592,8 @@ segmented namespace; `SegmentedServing` serves it, and the declared M21
 250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
 measured 10,000-row independent-arrival boundary and alternatives are in
 `benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4, index v1,
-root v1/v2/v4 (plus v3 fence markers), centroid v1, catalog v1, log v1/v2/v3
+root v1/v2/v4/v5 (plus v3 fence markers), run manifest v1, centroid v1,
+catalog v1, log v1/v2/v3
 and block v1/v2. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
