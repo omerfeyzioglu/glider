@@ -27,17 +27,19 @@ use std::{
     sync::Arc,
 };
 
-/// An extent is small while it has fewer current rows than six full blocks.
-pub(super) const SMALL_EXTENT_ROWS: usize = 6 * 170;
+/// An extent is small while it has fewer current rows than three full blocks.
+pub(super) const SMALL_EXTENT_ROWS: usize = 3 * 170;
 /// A cluster is due for a merge when it has more small extents than this:
 /// one base plus three deltas, the design's steady-state target.
 pub(super) const MAX_SMALL_EXTENTS: usize = 3;
 /// Current rows one output group may gather: one pack of full blocks.
 const GROUP_ROWS: usize = MAX_PACK_BLOCKS * 170;
 /// Output groups per round, bounding a round's creates before its root.
-const MAX_GROUPS: usize = 16;
+const MAX_GROUPS: usize = 32;
 /// Extents without a current row that justify a round on their own.
 const DEAD_EXTENTS: usize = 16;
+// Two small extents always fit one output group, which fills one pack.
+const _: () = assert!(2 * (SMALL_EXTENT_ROWS - 1) <= GROUP_ROWS);
 
 /// What a completed merge round published.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -66,7 +68,7 @@ pub struct ClusteredLayout {
     pub derived_extents: usize,
     pub posting_packs: usize,
     pub max_extents_per_cluster: usize,
-    /// Most extents of one cluster with fewer than six blocks of current rows.
+    /// Most extents of one cluster with fewer than three blocks of current rows.
     pub max_small_extents: usize,
     /// Extents none of whose rows is current.
     pub dead_extents: usize,
@@ -109,9 +111,9 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             return Ok(false);
         };
         let (latest, tail) = (&self.latest, &self.tail);
-        let rows = self.sketches.posting_block_rows(|id, sequence| {
-            sketch::posting_current(tail, latest, id, sequence)
-        });
+        let rows = self
+            .sketches
+            .posting_block_rows(|id, sequence| sketch::posting_current(tail, latest, id, sequence));
         let mut due = Vec::new();
         let mut dead = Vec::new();
         for cluster in &view.catalog.clusters {
@@ -266,8 +268,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .catalog
                 .with_changes(&state.removed, mem::take(&mut state.added))?;
             let bytes = state.view.encode_catalog(&catalog)?;
-            let reference =
-                clustered::object_ref(format!("sgcluster-{}", state.attempt), &bytes);
+            let reference = clustered::object_ref(format!("sgcluster-{}", state.attempt), &bytes);
             self.poisoned = true;
             self.create_staged(&reference.key, &bytes)?;
             self.poisoned = false;
@@ -284,9 +285,9 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     pub fn clustered_layout(&self) -> Option<ClusteredLayout> {
         let view = self.cluster.as_ref()?;
         let (latest, tail) = (&self.latest, &self.tail);
-        let rows = self.sketches.posting_block_rows(|id, sequence| {
-            sketch::posting_current(tail, latest, id, sequence)
-        });
+        let rows = self
+            .sketches
+            .posting_block_rows(|id, sequence| sketch::posting_current(tail, latest, id, sequence));
         let mut layout = ClusteredLayout {
             epoch: view.epoch,
             clusters: view.ids.len(),
@@ -313,7 +314,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 }
             }
             layout.extents += cluster.extents.len();
-            layout.max_extents_per_cluster = layout.max_extents_per_cluster.max(cluster.extents.len());
+            layout.max_extents_per_cluster =
+                layout.max_extents_per_cluster.max(cluster.extents.len());
             layout.max_small_extents = layout.max_small_extents.max(small);
         }
         Some(layout)
@@ -369,7 +371,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             }
             for record in decoded.records {
                 let Mutation::Put { id, .. } = &record.mutation else {
-                    return Err(Error::Corrupt(format!("posting tombstone: {}", extent.pack)));
+                    return Err(Error::Corrupt(format!(
+                        "posting tombstone: {}",
+                        extent.pack
+                    )));
                 };
                 if sketch::posting_current(&self.tail, &self.latest, *id, record.sequence) {
                     rows.push(record);
@@ -396,13 +401,22 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.poisoned = false;
         self.replace_root(root);
         let mut listed: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
-        for extent in view.catalog.clusters.iter().flat_map(|cluster| &cluster.extents) {
+        for extent in view
+            .catalog
+            .clusters
+            .iter()
+            .flat_map(|cluster| &cluster.extents)
+        {
             listed
                 .entry(extent.pack.as_str())
                 .or_default()
                 .extend(extent.blocks.iter().map(|block| block.offset as usize));
         }
-        let sources: BTreeSet<&str> = state.removed.iter().map(|(pack, _)| pack.as_str()).collect();
+        let sources: BTreeSet<&str> = state
+            .removed
+            .iter()
+            .map(|(pack, _)| pack.as_str())
+            .collect();
         let sketches = Arc::make_mut(&mut self.sketches);
         for pack in sources {
             let offsets = listed.get(pack);
@@ -427,16 +441,5 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         });
         self.schedule_obsolete();
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn thresholds_keep_a_merge_within_one_pack() {
-        use super::*;
-        // Two small extents always fit one output group.
-        assert!(2 * (SMALL_EXTENT_ROWS - 1) <= GROUP_ROWS);
-        assert_eq!(GROUP_ROWS.div_ceil(170), MAX_PACK_BLOCKS);
     }
 }

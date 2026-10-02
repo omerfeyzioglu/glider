@@ -1235,7 +1235,8 @@ fn plan_clustered_seal(
     let mut raw = 0;
     for (ids, length) in plan_deletes(deletes) {
         if blocks.len() > start
-            && (blocks.len() - start == MAX_PACK_BLOCKS || raw + length > MAX_PACK_BYTES - 64 * 1024)
+            && (blocks.len() - start == MAX_PACK_BLOCKS
+                || raw + length > MAX_PACK_BYTES - 64 * 1024)
         {
             packs.push((start..blocks.len(), false));
             (start, raw) = (blocks.len(), 0);
@@ -2294,7 +2295,11 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// `None`): a row is live when it is the current version and `routed`
     /// accepts its ID. With a clustered view, versions a posting covers are
     /// routed through it instead.
-    fn activate_sketches(&mut self, packs: Option<&BTreeSet<String>>, routed: impl Fn(u64) -> bool) {
+    fn activate_sketches(
+        &mut self,
+        packs: Option<&BTreeSet<String>>,
+        routed: impl Fn(u64) -> bool,
+    ) {
         let (latest, tail) = (&self.latest, &self.tail);
         Arc::make_mut(&mut self.sketches).activate(packs, |id, run, block| {
             !tail.contains_key(&id)
@@ -2823,7 +2828,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             let mut end = start;
             let mut blocks = Vec::new();
             let mut fingerprints = None;
-            let view = seal.clustered.as_ref().map(|clustered| clustered.view.clone());
+            let view = seal
+                .clustered
+                .as_ref()
+                .map(|clustered| clustered.view.clone());
             if let (Some(clustered), Some(view)) = (&seal.clustered, &view) {
                 let (range, posting) = clustered.packs[seal.next_pack as usize].clone();
                 for block in range.clone() {
@@ -2895,7 +2903,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     .catalog
                     .with_changes(&BTreeSet::new(), added)?;
                 let bytes = clustered.view.encode_catalog(&catalog)?;
-                let reference = clustered::object_ref(format!("sgcluster-{}", seal.attempt), &bytes);
+                let reference =
+                    clustered::object_ref(format!("sgcluster-{}", seal.attempt), &bytes);
                 self.poisoned = true;
                 self.create_staged(&reference.key, &bytes)?;
                 self.poisoned = false;
@@ -2922,14 +2931,17 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 blocks: seal.references,
             });
         }
-        let view = seal
-            .clustered
-            .and_then(|clustered| clustered.catalog)
-            .map(|(reference, index)| {
-                let view = root.clustered.as_mut().expect("clustered seals keep the view");
-                view.catalog = reference;
-                index
-            });
+        let view =
+            seal.clustered
+                .and_then(|clustered| clustered.catalog)
+                .map(|(reference, index)| {
+                    let view = root
+                        .clustered
+                        .as_mut()
+                        .expect("clustered seals keep the view");
+                    view.catalog = reference;
+                    index
+                });
         root.validate(self.config)?;
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &encode(&root)?)?;
@@ -3446,7 +3458,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         if state.references.is_none() {
             self.poisoned = true;
-            let (references, sketch) = self.publish_pack(&state.key.clone(), &state.blocks, None)?;
+            let (references, sketch) =
+                self.publish_pack(&state.key.clone(), &state.blocks, None)?;
             self.poisoned = false;
             state.references = Some(references);
             state.sketch = Some(sketch);

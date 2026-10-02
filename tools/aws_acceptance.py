@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--instance-type", default="c7g.2xlarge")
     parser.add_argument("--max-minutes", type=int, default=120)
     parser.add_argument("--cleanup-datasets", action="store_true")
+    parser.add_argument("--clustered", action="store_true",
+                        help="convert to an M37 clustered view after load (GLIDER_M24_CLUSTERED=1)")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     run_id = "m39-" + secrets.token_hex(4)
@@ -55,6 +57,7 @@ def main():
         "SECRET": creds["SecretAccessKey"], "TOKEN": creds["SessionToken"],
         "REGION": args.region, "BUCKET": args.bucket, "PREFIX": args.prefix,
         "ROWS": args.rows, "ROUNDS": args.rounds, "RUN": run_id, "REVISION": args.revision,
+        "CLUSTERED": int(args.clustered),
     }.items():
         script = script.replace(f"@@{key}@@", str(value))
     assert "@@" not in script

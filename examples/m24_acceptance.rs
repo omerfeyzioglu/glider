@@ -6,7 +6,8 @@ use glider::{
     admission::{Engine, Limits, Service, Shutdown, Snapshot},
     retry::{Request, RequestId},
     segmented::{
-        ReadBudget, SegmentedDatabase, SegmentedOptions, SegmentedServing, SegmentedServingOptions,
+        ConvertOptions, ReadBudget, SegmentedDatabase, SegmentedOptions, SegmentedServing,
+        SegmentedServingOptions,
     },
     store::{
         s3::{AmazonS3Builder, ReadLimits, RequestCounts, S3Store},
@@ -37,6 +38,14 @@ fn rows() -> u64 {
         .and_then(|value| value.parse().ok())
         .unwrap_or(250_000)
 }
+/// `GLIDER_M24_CLUSTERED=1` converts the loaded namespace to an M37
+/// clustered view (default conversion options) at the end of `load`, and
+/// `serve`/`verify` then require that view; queries keep the serving budget
+/// and probe the default 16 clusters. Unset, nothing changes.
+fn clustered() -> bool {
+    env::var("GLIDER_M24_CLUSTERED").is_ok_and(|value| value == "1")
+}
+
 const DIMENSIONS: usize = 128;
 const FILTER: (&str, &str) = ("cohort", "one-percent");
 
@@ -303,12 +312,17 @@ fn open_serving(
     let db = SegmentedServing::open(store, config(), options(), serving_options(cache))?;
     let open_ms = ms(started.elapsed());
     let after = metrics.snapshot();
+    if clustered() && db.database().clustered_epoch().is_none() {
+        return Err("GLIDER_M24_CLUSTERED=1 but the namespace has no clustered view".into());
+    }
     let observation = json!({"ms":open_ms,"http":counts(&before,&after),
         "get_payload_bytes":bytes.load(Ordering::Relaxed),
         "sketch_charged_bytes":db.database().selective_index_bytes(),
         "sketch_rebuilds":db.database().sketch_rebuilds(),
         "runs":db.database().run_count(),"blocks":db.database().block_count(),
-        "tail_objects":db.database().tail_objects(),"sequence":db.database().sequence()});
+        "tail_objects":db.database().tail_objects(),"sequence":db.database().sequence(),
+        "clustered_epoch":db.database().clustered_epoch(),
+        "clustered_layout":db.database().clustered_layout()});
     Ok((
         db,
         Handles {
@@ -372,8 +386,21 @@ fn load(args: &[String]) -> Result<Value> {
             }
         }
     }
+    let loaded_ms = ms(started.elapsed());
+    let conversion = if clustered() {
+        let started = Instant::now();
+        let summary = db.convert_clustered(ConvertOptions::default())?;
+        let convert_ms = ms(started.elapsed());
+        // Idle maintenance removes the conversion's obsolete objects.
+        while db.maintenance_step()? {}
+        json!({"summary":summary,"ms":convert_ms,"cleanup_ms":ms(started.elapsed())-convert_ms,
+            "layout":db.database().clustered_layout(),"peak_rss_bytes":rss()})
+    } else {
+        Value::Null
+    };
     let after = handles.metrics.snapshot();
-    let result = json!({"rows":rows(),"open":open,"load_ms":ms(started.elapsed()),
+    let result = json!({"rows":rows(),"open":open,"load_ms":loaded_ms,
+        "clustered":clustered(),"conversion":conversion,
         "http":counts(&before,&after),"longest_maintenance_step_ms":ms(longest_step),
         "runs":db.database().run_count(),"blocks":db.database().block_count(),
         "tail_objects":db.database().tail_objects(),"sequence":sequence,
@@ -826,7 +853,7 @@ fn serve(args: &[String]) -> Result<Value> {
     let mut acknowledged = acknowledged.lock().unwrap().clone();
     acknowledged.sort_unstable();
     Ok(
-        json!({"rounds":rounds,"open":open,"static_quality":static_quality,
+        json!({"rounds":rounds,"clustered":clustered(),"open":open,"static_quality":static_quality,
         "offered":{"write_batches":rounds*4,"logical_mutations":rounds*400,"queries":rounds*40},
         "acknowledged":{"write_batches":writes.len(),"queries":queries_done.len()},
         "overloaded":{"writes":losses[0],"queries":losses[2]},
@@ -1114,7 +1141,7 @@ fn verify(args: &[String]) -> Result<Value> {
     }
     db.close()?;
     Ok(
-        json!({"reopen":reopen,"scan_ms":scan_ms,"live_documents":seen,
+        json!({"clustered":clustered(),"reopen":reopen,"scan_ms":scan_ms,"live_documents":seen,
         "expected_documents":rows(),"value_mismatches":mismatches,
         "overwritten_ids":generation.len(),"update_wave_quality":quality_cold,
         "unfiltered_mean_recall_by_block_budget":budgets,"warm_up":warm_up,

@@ -3,7 +3,8 @@
 //! pruning, reclamation, cleanup and cache warm-up advance in bounded units
 //! that the committer runs only while no command is queued.
 use super::{
-    root_key, QueryHit, QueryOptions, ReadBudget, SegmentedDatabase, SegmentedOptions, View,
+    root_key, ConversionSummary, ConvertOptions, QueryHit, QueryOptions, ReadBudget,
+    SegmentedDatabase, SegmentedOptions, View,
 };
 use crate::{
     admission::{Engine, EngineMetrics, QueryResult, Snapshot},
@@ -172,6 +173,32 @@ impl<S: ObjectStore> SegmentedServing<S> {
             return Err(Error::RecoveryRequired);
         }
         Ok(())
+    }
+
+    /// Finish staged maintenance, then convert the namespace to a clustered
+    /// view (or rebuild it as a new epoch); see
+    /// [`SegmentedDatabase::convert_clustered`]. Idle maintenance removes the
+    /// replaced objects afterwards.
+    pub fn convert_clustered(&mut self, options: ConvertOptions) -> Result<ConversionSummary> {
+        if self.db.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        while self.db.seal.is_some() {
+            self.db.seal_step()?;
+        }
+        while self.db.prune.is_some() {
+            self.db.prune_step()?;
+        }
+        while self.db.reclaim.is_some() {
+            self.db.reclaim_step()?;
+        }
+        while self.db.merge.is_some() {
+            self.db.merge_step()?;
+        }
+        let summary = self.db.convert_clustered(options)?;
+        self.scan_pending = true;
+        self.merge_pending = true;
+        Ok(summary)
     }
 
     /// Kind of the most recent maintenance unit, for diagnostics.
