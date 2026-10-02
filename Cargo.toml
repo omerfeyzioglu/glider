@@ -1,7 +1,15 @@
 [package]
 name = "glider"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+rust-version = "1.98.1"
+authors = ["Ömer Feyzioğlu"]
+description = "Single-node vector database with S3 as the authoritative store and a local SSD cache"
+repository = "https://github.com/omerfeyzioglu/glider"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["vector-database", "vector-search", "ann", "s3", "object-storage"]
+categories = ["database-implementations", "database"]
 
 [features]
 default = []
@@ -24,6 +32,9 @@ zstd = { version = "0.13", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"], optional = true }
 
 [dev-dependencies]
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
 libc = "0.2"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Local release-build crash, paused-writer, cache-loss, backup/restore and conversion drills."""
+"""Local release-build crash, paused-writer, cache-loss, backup/restore, conversion and
+automatic conversion drills."""
 import argparse
 import http.client
 import json
@@ -253,6 +254,44 @@ def drill(seed):
             stop(process)
             process = None
             print(f"PASS convert seed={seed}", flush=True)
+
+            stage = "auto-convert"
+            # The unconverted namespace converts itself as idle maintenance
+            # once a seal (at 32 log objects) leaves enough live rows.
+            auto_env = {**env, "GLIDER_AUTO_CLUSTER_ROWS": "16"}
+            process = start(auto_env, log)
+            status = request(port, "GET", "/v1/status")["clustering"]
+            assert status["state"] == "none" and status["auto_cluster_rows"] == 16, status
+            auto_ids = []
+            for point_id in range(100, 140):
+                answer = request(port, "POST", "/v1/write",
+                                 write_body(point_id, request_id(port)))
+                assert answer["conflict"] is None, answer
+                auto_ids.append(point_id)
+            deadline = time.monotonic() + 30
+            while request(port, "GET", "/v1/status")["clustering"]["state"] != "clustered":
+                if time.monotonic() > deadline:
+                    raise RuntimeError("automatic conversion did not publish")
+                time.sleep(0.05)
+            def verify_auto():
+                verify(port, stable_ids)
+                for point_id in auto_ids:
+                    point = request(port, "GET", f"/v1/points/{point_id}")
+                    assert point["vector"] == [float(point_id), 0.0, 0.0], point
+                hits = request(port, "POST", "/v1/query", {"vector": [0, 0, 0], "k": 64})
+                found = {item["id"] for item in hits["results"]}
+                assert set(stable_ids + auto_ids) <= found, hits
+            verify_auto()
+            stop(process)
+            process = None
+            process = start(env, log)
+            status = request(port, "GET", "/v1/status")["clustering"]
+            assert status["state"] == "clustered" and status["epoch"] == 1, status
+            assert status["centroids"] == 1 and status["auto_recluster_factor"] == 4, status
+            verify_auto()
+            stop(process)
+            process = None
+            print(f"PASS auto-convert seed={seed}", flush=True)
         except Exception as exc:
             log.flush()
             log.seek(0)

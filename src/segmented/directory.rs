@@ -81,6 +81,7 @@ impl Page {
 pub(super) struct Directory {
     pages: Vec<Page>,
     last_ids: Vec<u64>,
+    page_starts: Vec<usize>,
     len: usize,
 }
 
@@ -89,6 +90,7 @@ impl Directory {
     pub(super) fn reserve(&mut self, additional: usize) {
         self.pages.reserve(additional.div_ceil(PAGE_SLOTS));
         self.last_ids.reserve(additional.div_ceil(PAGE_SLOTS));
+        self.page_starts.reserve(additional.div_ceil(PAGE_SLOTS));
     }
 
     pub(super) fn len(&self) -> usize {
@@ -106,8 +108,14 @@ impl Directory {
 
     fn refresh_boundaries(&mut self) {
         self.last_ids.clear();
-        self.last_ids
-            .extend(self.pages.iter().map(|page| page.last().unwrap().id));
+        self.page_starts.clear();
+        let mut start = 0;
+        for page in &self.pages {
+            self.last_ids.push(page.last().unwrap().id);
+            self.page_starts.push(start);
+            start += page.len();
+        }
+        debug_assert_eq!(start, self.len);
     }
 
     pub(super) fn get(&self, id: &u64) -> Option<Location> {
@@ -116,6 +124,21 @@ impl Directory {
             .binary_search_by_key(id, |slot| slot.id)
             .ok()
             .map(|index| page.as_slice()[index].location())
+    }
+
+    /// Position of an ID in iteration order, for side tables indexed like
+    /// the directory.
+    pub(super) fn index_of(&self, id: u64) -> Option<(usize, Location)> {
+        let page_index = self.page(id);
+        let page = self.pages.get(page_index)?;
+        let slot_index = page
+            .as_slice()
+            .binary_search_by_key(&id, |slot| slot.id)
+            .ok()?;
+        Some((
+            self.page_starts[page_index] + slot_index,
+            page.as_slice()[slot_index].location(),
+        ))
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = (u64, Location)> + '_ {
@@ -396,9 +419,17 @@ mod tests {
         assert_eq!(directory.len(), 8 * PAGE_SLOTS);
         for id in 0..8 * PAGE_SLOTS as u64 {
             assert_eq!(directory.get(&id).unwrap().run, (id % 2) as usize);
+            let (position, location) = directory.index_of(id).unwrap();
+            assert_eq!(position, id as usize);
+            assert_eq!(location.run, (id % 2) as usize);
         }
         directory.retain(|id, _| id % 2 == 0);
         assert_eq!(directory.len(), held.len());
+        for position in 0..4 * PAGE_SLOTS {
+            let id = (position * 2) as u64;
+            assert_eq!(directory.index_of(id).unwrap().0, position);
+            assert!(directory.index_of(id + 1).is_none());
+        }
         assert!(directory
             .iter()
             .map(|(id, location)| (id, location.run))

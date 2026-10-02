@@ -252,7 +252,12 @@ New blocks use block format version 2: the magic `GLB2`, the raw length as
 u32, then a zstd frame of a binary layout (dimensions, metric, partition,
 record count; per record ID, sequence, kind, little-endian f32 components and
 length-prefixed UTF-8 metadata in key order). Raw layouts are at most 120 KiB
-so a compressed block stays within 128 KiB. Readers accept version 1 JSON
+so a compressed block stays within 128 KiB. A put whose row alone exceeds
+that limit can never be sealed, so the write path refuses it with `Invalid`
+before acknowledgement, sizing the row with the same function the seal
+planner uses; recovery still replays such rows from logs written by older
+binaries, and a seal containing one fails until a later write supersedes it
+in the tail. Readers accept version 1 JSON
 blocks and version 2 by magic; both are authenticated by the root's block
 digest before decoding, and version 2 decoding validates configuration, ID
 order, sequences, finite components, metadata encoding and length. SIFT
@@ -284,9 +289,10 @@ identical bits. A failure to bind after a root publication poisons the
 handle. The latest-ID directory holds sorted 24-byte slots in shared 1,024-slot
 pages. Each backing allocation holds at most 16,384 slots; a root publication copies
 changed pages while an older view remains pinned, grouping changed pages into
-bounded backing allocations. Page-end IDs are also kept in a small contiguous
-array for lookup. Sketch row IDs are stored as u32 offsets
-from the pack's smallest ID when its span allows, else as u64.
+bounded backing allocations. Page-end IDs and each page's ordinal start are
+kept in small contiguous arrays for ID and posting-position lookup. Sketch row
+IDs are stored as u32 offsets from the pack's smallest ID when its span allows,
+else as u64.
 
 `search_selective_within(query, k, budget, filter)` supports two modes. With
 no filter it scores live codes, visiting packs in order of a per-pack lower
@@ -357,7 +363,7 @@ reads. Opening uses them for run indexes, the log tail and sketch frames.
 
 ### Clustered view (M37)
 
-A root v4 selects one immutable clustered view: a centroid object
+A root v4 (or a v5 with a `clustered` field) selects one immutable clustered view: a centroid object
 (`sgcentroid-*`, `GLCENT01`) and a catalog (`sgcluster-*`, `GLCLCAT1`), each
 bound by length and SHA-256 in the root, whose formats and validators are in
 `docs/M37_CLUSTERED_INDEX.md`. The catalog lists, per cluster, extents of
@@ -373,43 +379,99 @@ directory and the log tail stay authoritative for `get`, exact search,
 retry and recovery, and a posting row is current only if the directory holds
 exactly its `(ID, sequence)` as a live version and no tail write shadows it.
 
-The view's centroid object records its source root sequence, the view
-boundary. Every live version sealed at or below it has exactly one posting
-row; versions sealed later stay in per-seal packs and their sketches. Writes
-after a conversion are unchanged: logs acknowledge, seals publish per-seal
-runs, and consolidation, pruning, reclamation and cleanup carry the view into
-each new root unchanged (version 4). Routing loads the posting sketches and
-only the canonical sketches of packs holding live versions above the
-boundary, and canonical rows at or below it are never active, so each
-current version has one routing row. Posting rows shadowed after opening keep
-their bits; queries compare their `(ID, sequence)` with the directory and
-tail instead (in routing only when a row would lower its block's best score),
-and reopening compacts them away.
+Coverage invariant: every live sealed version that no acknowledged tail
+write shadows has exactly one posting row in the catalog's extents, and
+routing holds exactly one row per current version. Opening derives
+coverage from the postings: a directory version is covered when a loaded
+posting row holds exactly its `(ID, sequence)`; two copies of one version,
+or an uncovered version inside a posting pack, make the view unavailable.
+Only canonical packs holding uncovered live versions are loaded and only
+their uncovered rows are active (none for a namespace converted and sealed
+by this binary; a stage 3 binary's per-seal packs sealed after its
+conversion stay routed this way until a new epoch). Queries skip a
+canonical record whose routing row is not live, and reclamation carries a
+moved row's liveness to its new pack. Posting rows shadowed after opening
+keep their bits; queries compare their `(ID, sequence)` with the directory
+and tail instead (in routing only when a row would lower its block's best
+score), and reopening compacts them away.
+
+Clustered seals (stage 4): with a loaded view, `start_seal` assigns each
+frozen put to its nearest center (ties by cluster ID) and plans
+cluster-contiguous blocks (at most 170 rows and 120 KiB raw, partition = the
+cluster ID) laid out in cluster-ID order into packs of at most 12 blocks;
+tombstones go to separate ID-sorted packs. Each put pack carries a
+`GLSKT003` sketch and is both the run's canonical pack and a posting pack:
+its blocks become `Canonical` extents. Steps create the packs, the run
+index, a new catalog (`sgcluster-{attempt}`: the selected catalog plus
+these extents) and a root v4 selecting it at the seal boundary, with the
+same epoch and centroid object. Acknowledgement, displaced tail versions,
+retry state and log replay are unchanged; only the root create publishes,
+earlier objects are orphans, and an uncertain create poisons the handle.
+Without a loaded view (none, or unavailable) seals keep the per-seal layout
+and carry the root's view reference unchanged.
+
+Posting merges (stage 5, `start_merge`/`merge_step`, an idle serving unit
+planned after each seal or merge): an extent is small while it has fewer
+current rows than three full blocks (510). A round merges, for each cluster
+with more than three small extents, its smallest extents (at least two,
+while they fit one 12-block pack) into one cluster-contiguous `Derived`
+extent, and drops extents with no current row; up to 32 output groups per
+round. It freezes the root and catalog (seals, consolidation, pruning,
+reclamation and conversion wait; tail writes continue), reads one source
+extent per step (one range GET, each block authenticated by its catalog
+digest; a read error leaves the round to retry), copies rows that are
+current and not shadowed by the tail, and creates each output pack, then
+one catalog, then one root. Before the root the previous catalog serves and
+staged objects are orphans; after it, replaced blocks leave their packs'
+sketches (a catalog may list only some blocks of a posting pack), the
+merged packs' rows are activated, and derived packs no catalog extent lists
+become obsolete. Canonical seal packs stay referenced by their runs.
+Consolidation and pruning carry the catalog unchanged; reclamation skips
+posting packs (and does nothing while the view is unavailable). Cleanup
+retains the selected root's runs and the catalog's packs; obsolete keys are
+never reused, so a late DELETE cannot remove a later generation's object.
+Backup copies each pack once (a clustered seal's pack is both canonical and
+posting) after checking it against the root's or catalog's digests.
 
 A selective query on a view scores every centroid, probes the nearest
 `probes` clusters (default 16, ties by cluster ID), ranks every block of the
-probed postings that has a current row together with the per-seal
-candidates by five-bit sketch distance, and takes ranked blocks in order
+probed postings that has a current row together with any uncovered
+canonical candidates by five-bit sketch distance, and takes ranked blocks in order
 within the remote request and byte limits as before (cached blocks under the
 M35 local limit); every block inside a chosen span is reranked exactly,
 checking the full filter, and the tail is merged. The resident predicate
 stays exact from resident vectors of current posting and canonical rows.
 Probing every cluster with unbounded limits equals exact search.
 
-`convert_clustered` (`glider-admin convert`) builds a view under exclusive
-ownership in bounded steps: a sample pass keeps the 16,384 smallest
+`convert_clustered` (`glider-admin convert`, or `SegmentedServing`'s
+automatic conversion below) builds a view under exclusive ownership in
+bounded steps: a sample pass keeps the 16,384 smallest
 `(sample_priority(seed, ID), ID)` live sealed rows, two Lloyd iterations
 train centers (about 4,000 rows per cluster by default; cosine centers are
 normalized), an assignment pass keeps two bytes per row, and gather passes
 each read every canonical pack once and buffer at most `gather_bytes` of
 clusters' rows before writing their posting packs. It then creates the
-centroid object, the catalog (after checking that posting rows equal live
-sealed rows) and the root v4 at the next generation; the sequence, retry
-state, runs and tail are unchanged. Root-changing maintenance waits for it;
-writes may continue. Before the root create the previous root (v1/v2, or the
-previous view's v4) serves and every staged object is an orphan that a
-reopen's cleanup removes; any create error poisons the handle, and reopen
-selects whichever root exists. After the root, the handle drops its routing
+centroid object, the catalog (after checking that posting rows equal the
+gathered rows, and the frozen live sealed rows when no seal intervened) and
+the root v4 at the next generation; the sequence, retry state, runs and
+tail are unchanged. The conversion freezes the selected root's runs and
+their live sealed puts. Writes may continue. Pruning, reclamation and
+merges wait for it. Seals and consolidation of runs sealed after the
+freeze may publish between its steps: frozen runs keep their positions,
+so frozen `(run, block)` locations stay valid; a frozen put a later seal
+shadows is not gathered (assignments are kept for every put of a source
+block, so passes stay aligned); and the published root carries the newer
+runs, whose versions no posting covers and stay routed through their
+canonical packs. With a selected view those seals are clustered seals of
+the old epoch: their packs are canonical extents of its catalog until the
+new root and plain uncovered canonical packs under the new view. The
+root create waits for a staged seal. Before the root create the previous root (v1/v2,
+or the previous view's v4) serves and every staged object is an orphan:
+cleanup retains it while the conversion is staged, a reopen's cleanup
+removes it, and so does cleanup after an abandoned attempt. A failed
+read leaves the conversion staged to retry the same step; any create
+error poisons the handle, and reopen selects whichever root exists; any
+other error abandons the attempt. After the root, the handle drops its routing
 state and loads the new view as an open does; the old view's packs stay
 pinned while a query view holds it, then become obsolete. Converting a
 converted namespace builds the next epoch. Backup copies the centroid
@@ -425,6 +487,71 @@ view unavailable: exact search, reads and writes work, selective queries
 fail, cleanup removes nothing, `SegmentedServing` refuses to start, and a
 conversion rebuilds the view as a new epoch. A posting block that fails its
 digest at query time fails that query, as canonical blocks do.
+
+### Root manifests (root v5)
+
+Roots v1, v2 and v4 embed every run's complete block list as JSON (about
+270 bytes per block), so every publication rewrote every block reference:
+2.25 MB per root and 46% of all uploaded bytes in the 1,000,000-row M37
+update-wave replay (`benchmarks/M39.md`), growing linearly with blocks.
+Every root the engine publishes is now version 5: v4's JSON header
+(generation, sequence, configuration, retry state, optional `fences`,
+optional `clustered` view) with, per run, its sequences, index reference and
+a `manifest` reference `{key, length, sha256}` to an immutable run manifest
+`sgmanifest-{attempt}` holding the run's block list. Manifest v1 is binary,
+little-endian: `GLRMAN01`, pack count and block count (u32), each pack once
+in order of first use (u16 key length, `sgpack-` key, payload length u32),
+then per block in run order its pack ordinal, offset, length and partition
+(u32), first and last ID (u64), row count (u32) and raw SHA-256 (68 bytes a
+block). The decoder enforces exact lengths, counts, first-use pack order,
+unique keys and every block-reference rule, so the encoding is canonical; it
+is at most 16 MiB. Root zero stays v1. Readers accept v1, v2, v4 and v5;
+older binaries reject v5 (its runs have no `blocks`).
+
+Publication: a root step builds the new root in memory with full block
+lists, then binds each run to a manifest. A run whose index object and
+blocks equal a run of the selected root reuses that run's reference; any
+other run (a seal's new run, a consolidated or pruned run, runs whose blocks
+moved to a reclaimed pack, and on the first publication after opening a
+v1/v2/v4 root, every run) gets a new manifest, created one per maintenance
+step like packs and indexes (consolidation, a synchronous unit, creates its
+own in the same call). Binding compares contents, never a cached flag, so a
+root cannot reference a stale manifest; manifests staged for the pending
+root are found again by the SHA-256 of their bytes when a step rebuilds it,
+and forgotten when any root is selected. Uploaded bytes per publication are
+then the header plus manifests of changed runs: a seal writes one manifest
+of its own blocks, and posting merges and conversions write none. In the
+replay a publication fell from 2.25 MB to 253 KB and all uploads from 529 to
+311 MB.
+Semantics per step: a manifest create is a staged orphan, like a pack; an
+error poisons the handle and the previous root stays selected. The root
+create is the only switch; an uncertain create poisons and reopen selects
+whichever root exists. Opening loads the selected root's manifests (16 per
+batched read), authenticates each against its length and digest and decodes
+it before validating the whole root; a missing or corrupt manifest fails the
+open (`Corrupt`), never falling back to an older root. Takeover reads only
+root headers. Cleanup retains the selected root's manifests; replaced and
+orphaned ones are obsolete keys that are never reused, so a late DELETE
+cannot remove a later root's manifest. Query views hold decoded roots and
+never read manifests, so like indexes they are not pinned by retired roots.
+Backup copies the selected root's manifests after authenticating them.
+
+Alternatives: (a) a binary root keeping embedded block lists is about four
+times smaller but still proportional to every block; (b) block lists inside
+run index objects would make a reclamation, which moves blocks without
+changing IDs, rewrite whole indexes (24 bytes per ID, up to 2 MiB) instead of
+a manifest (68 bytes per block); (c) an LSM-style manifest of delta segments
+over a base needs edit semantics and a merge policy, while runs are already
+the unit that changes and are bounded by the 2 MiB consolidation limit and
+64 per root, so one manifest per run bounds both the number of segments and
+each publication without separate maintenance; (d) content-addressed keys
+would let a reused key be deleted late by a deposed writer or delayed
+cleanup; unique keys with a digest in the reference keep the never-reused
+rule. The clustered catalog stays one object: it is rewritten only by
+clustered seals, merges and conversions (13.8 MB of 529 MB uploaded in the
+replay); splitting it is left until measurements require it. The retry state
+stays in the root header; it is bounded (at most 128 receipts and 12,800
+revision pairs) independent of collection size.
 
 ### Group commit
 
@@ -455,17 +582,62 @@ unfiltered results are approximate under the M21 quality policy (mean
 recall@10 >=0.90, fifth percentile >=0.80, <1% short results), and the
 resident predicate is exact. Maintenance never runs concurrently with a
 command: while the queue is empty the committer executes one bounded unit (one
-seal/prune/reclaim step, an in-memory sketch compaction of one pack, a seal
-plan, one run consolidation, a prune/reclaim plan, a four-object cleanup
+seal/merge/prune/reclaim step, an in-memory sketch compaction of one pack, a
+seal plan, one run consolidation, a posting-merge plan (after a seal or
+merge), a prune/reclaim plan, a four-object cleanup
 batch or, when none is due, one cache warm-up read) and then rechecks the
 queue. A seal starts
 at 32 unsealed log objects. If the tail reaches the hard bound of 64 before
-idle time allows the seal, the next write finishes any staged prune/reclaim
+idle time allows the seal, the next write finishes any staged prune/reclaim/merge
 and a full seal synchronously, reported as that command's maintenance time.
 A failed idle read leaves state unchanged, is counted and retried after the
 next command; an uncertain write poisons the engine and fails the service.
 
-`backup_to` copies root zero, the selected root, its indexes, packs (each
+Automatic conversion (`auto_cluster_rows`, `GLIDER_AUTO_CLUSTER_ROWS`,
+default 250,000; 0 disables): when the selected root has no clustered view
+and its sealed runs hold at least that many live rows (checked once per root
+generation), an idle unit starts a conversion with the profile's
+`auto_cluster` options (16 MiB gather passes in `m21`, 64 MiB in `m31`);
+each later idle unit is one conversion step (one canonical pack read,
+training, or one create), after seal steps, seal plans and consolidation,
+which keep the log tail bounded meanwhile. Queries use published views and
+see the previous root until the conversion's root. Its publication unit
+also loads the new view as an open does, so commands wait for those sketch
+reads once. A restart mid-conversion selects the previous root; the new
+owner starts a new attempt and cleans up the old one's orphans. An error
+other than a read abandons the attempt and stops automatic conversion on
+that handle (`conversion_failures`). An explicit `convert_clustered`
+abandons a staged automatic attempt first. The threshold sits where the
+per-seal layout reaches its quality gate (M24, 250,000 rows: static p5
+recall@10 exactly 0.80 and one update-wave run at 0.899 / 0.70) and fails
+it at 1,000,000 rows (M31), while a view converted at 250,000 rows measured
+0.994 / 0.9 static and 0.977 / 0.9 after the update wave
+(`benchmarks/M37.md`).
+
+Automatic rebuild (`auto_recluster_factor`, `GLIDER_AUTO_RECLUSTER_FACTOR`,
+default 4; 0 disables): a view's centroid count is fixed at conversion, so
+with a loaded view the same check starts the next epoch's conversion, with
+the automatic centroid count, once the sealed runs hold more than the
+factor times 4,000 rows per centroid of the view and the automatic count
+for the current size exceeds the view's (so a rebuild always changes the
+count and cannot repeat at one size). The rows at conversion are not
+persisted (no format change); the centroid count stands for them, within a
+factor of sqrt(2) for an automatic count, and an explicit count is treated
+the same way. The default rebuilds a view converted at 250,000 rows (64
+centroids) above 1,024,000 rows with 256. It runs as the same idle units
+with the same publication, crash and cleanup rules; until its root the old
+epoch serves and clustered seals and merges continue on it (merges wait
+while it is staged). An unavailable view is not rebuilt automatically
+(serving refuses to start on one). At 1,000,000 SIFT rows, a 64-centroid
+view measured 0.953 / 0.8 mean / p5 recall@10 at the M31 budget and 32
+probes against 0.981 / 0.9 for 256 centroids (`benchmarks/M37.md`).
+`/v1/status` reports `clustering` (`none`, `converting` with the phase,
+pass/source counters and the epoch and centroid count being built, or
+`clustered` with its epoch and centroid count) and both settings; metrics
+carry the same values and conversion and rebuild counters.
+
+`backup_to` copies root zero, the selected root, its run manifests (each
+checked against the root's length and digest), indexes, packs (each
 verified against the root's block digests before its PUT; packs carry their
 sketches) and the acknowledged log tail into an empty destination, writes `metadata`
 last, then opens the destination and compares sequence, root generation and
@@ -487,7 +659,8 @@ segmented namespace; `SegmentedServing` serves it, and the declared M21
 250,000-row envelope is accepted on local MinIO (`benchmarks/M24.md`). The
 measured 10,000-row independent-arrival boundary and alternatives are in
 `benchmarks/M21.md`. The segmented API defines metadata v2/v3/v4, index v1,
-root v1/v2/v4 (plus v3 fence markers), centroid v1, catalog v1, log v1/v2/v3
+root v1/v2/v4/v5 (plus v3 fence markers), run manifest v1, centroid v1,
+catalog v1, log v1/v2/v3
 and block v1/v2. It acknowledges
 immutable logs, publishes a fixed sequence through an immutable root generation
 after its packs/index, and replays newer contiguous logs; uncertain publication
@@ -1182,7 +1355,9 @@ through the `admission::Engine` trait) to a single blocking committer thread.
 Cloneable clients share a FIFO of writes, exact queries, revision observations
 and result lookups; an engine that publishes views runs queries and document
 reads on reader threads instead (M34 below). At most eight commands and
-320 KiB of encoded payload are admitted by default, including active work. Count and byte exhaustion returns
+1 MiB of encoded payload (`retry::MAX_REQUEST_BYTES`, so every valid request is
+admissible when nothing else is charged) are admitted by default, including
+active work. Count and byte exhaustion returns
 `Overloaded` before retaining a normalized payload; inputs are validated and
 caller-controlled spare capacities are discarded. The queue lock covers bounded
 normalization and bookkeeping, never storage or search. Encoded bytes are an
@@ -1333,8 +1508,19 @@ without changing the engine API; callers use blocking threads. Each S3 handle
 keeps one runtime worker active between synchronous calls so HTTP connection
 tasks process peer closure and pool expiration while the caller is idle. A
 current-thread runtime would suspend those tasks outside `block_on`, permitting
-stale pooled connections to survive a long idle period. This does not add
-automatic request retries or alter write acknowledgement and recovery.
+stale pooled connections to survive a long idle period. Write acknowledgement
+and recovery remain unchanged.
+
+The backend disables the client's global request retries. Each read (`get`,
+range and batched reads, and `list`) makes at most three complete attempts.
+It retries only transport request failures without a response (including closed
+connections and pre-response timeouts), response-body I/O failures, and HTTP
+500/502/503/504. A failed body discards its partial bytes and starts a fresh
+request; full GET envelopes and range results are validated before return.
+Listing starts from its first page again after a retryable page failure and
+never exposes partial results. HTTP 4xx, validation, corruption, and read-limit
+errors are not retried. The two retry delays use jitter around 50 ms and
+200 ms. Exhausted reads return the last error without poisoning the store.
 
 One bucket plus a nonempty, nonoverlapping namespace prefix identifies a database. The caller
 provisions the bucket, credentials and exclusive namespace ownership. The service
@@ -1382,7 +1568,8 @@ API; deployments must opt in and validate their serving/RSS budgets. This change
 no persisted format, write acknowledgement or publication protocol.
 
 Cloneable request metrics count transport-level GET, listing-page, PUT, DELETE and other
-attempts, request body bytes, HTTP error responses and transport errors. These
+attempts, request body bytes, HTTP error responses, transport errors, and
+additional read attempts (`read_retries`). These
 are not device I/O or latency measurements. MinIO integration tests exercise
 conditional creation, pagination, namespace isolation, response-loss uncertainty,
 late conditional requests, corruption, client process exit and abrupt server restart. They do not prove
@@ -1399,9 +1586,9 @@ also erase the only remaining state without a detectable gap. Detecting such ext
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-Independently searchable persisted ANN partitions, metadata indexes, automatic
-exact-versus-IVF planning, sharding, replication, distributed consensus,
-multi-node execution, quantization, networking, SQL compatibility,
-authentication/authorization, production hardening, and GPU execution are outside
-the current implementation. These are not permanent restrictions; additions
+Metadata indexes beyond the declared resident predicate and routed keys,
+automatic exact-versus-IVF planning, sharding, replication, read replicas,
+distributed consensus, multi-node execution, quantization beyond the routing
+sketches, SQL compatibility, authorization beyond one static bearer token, TLS
+and GPU execution are outside the current implementation. These are not permanent restrictions; additions
 require justified design decisions and must preserve the invariants above.

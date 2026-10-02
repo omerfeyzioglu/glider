@@ -10,11 +10,25 @@
 //! no cache is attached, so every query is a cold plan. Exact top-10 (f64,
 //! ID ties) is computed from the corpus.
 //!
-//! Usage: `m37_conversion_probe BASE.fvecs QUERY.fvecs ROWS [CENTROIDS]`.
+//! With `ROUNDS`, it then replays the M31 update wave on the clustered
+//! namespace through `SegmentedServing` (M37 stages 4 and 5): each round,
+//! four writers overwrite 100 IDs of their quarter with generation r+1
+//! (base row `(id + 137 g) % rows`), published as two group-commit logs, and
+//! idle maintenance (clustered seals every 32 logs, posting merges,
+//! consolidation, cleanup) runs to completion. It reports object creates
+//! and uploaded bytes by kind, the clustered layout and cold recall against
+//! the exact top-10 of the updated corpus, then times a reopen of the final
+//! namespace and counts the whole-object GETs and bytes it read by kind.
+//!
+//! Usage: `m37_conversion_probe BASE.fvecs QUERY.fvecs ROWS [CENTROIDS|-] [ROUNDS]`.
 //! Prints one JSON object.
 use glider::{
+    admission::Engine,
     retry::{Request, RequestId},
-    segmented::{ConvertOptions, ReadBudget, SegmentedDatabase, SegmentedOptions},
+    segmented::{
+        ConvertOptions, ReadBudget, SegmentedDatabase, SegmentedOptions, SegmentedServing,
+        SegmentedServingOptions,
+    },
     store::ObjectStore,
     Config, Error, Metric, Mutation,
 };
@@ -44,6 +58,14 @@ struct Memory {
     objects: Arc<Mutex<BTreeMap<String, Arc<Vec<u8>>>>>,
     ranges: Arc<AtomicU64>,
     bytes: Arc<AtomicU64>,
+    /// Creates and uploaded bytes by key kind (the prefix before '-').
+    creates: Arc<Mutex<BTreeMap<String, (u64, u64)>>>,
+    /// Whole-object GETs and their bytes by key kind.
+    gets: Arc<Mutex<BTreeMap<String, (u64, u64)>>>,
+}
+
+fn kind(key: &str) -> String {
+    key.split('-').next().unwrap_or(key).to_owned()
 }
 
 impl Memory {
@@ -65,6 +87,12 @@ impl Memory {
 impl ObjectStore for Memory {
     fn get(&self, key: &str) -> glider::Result<Option<Vec<u8>>> {
         let object = self.objects.lock().unwrap().get(key).cloned();
+        if let Some(bytes) = &object {
+            let mut gets = self.gets.lock().unwrap();
+            let entry = gets.entry(kind(key)).or_default();
+            entry.0 += 1;
+            entry.1 += bytes.len() as u64;
+        }
         Ok(object.map(|bytes| bytes.to_vec()))
     }
     fn get_range(
@@ -94,6 +122,10 @@ impl ObjectStore for Memory {
             return Err(Error::Exists(key.into()));
         }
         objects.insert(key.into(), Arc::new(value.to_vec()));
+        let mut creates = self.creates.lock().unwrap();
+        let entry = creates.entry(kind(key)).or_default();
+        entry.0 += 1;
+        entry.1 += value.len() as u64;
         Ok(())
     }
     fn remove(&self, key: &str) -> glider::Result<()> {
@@ -196,10 +228,15 @@ fn measure(
 
 fn run(args: &[String]) -> Result<Value> {
     let [base, query_path, rows, rest @ ..] = args else {
-        return Err("usage: m37_conversion_probe BASE QUERY ROWS [CENTROIDS]".into());
+        return Err("usage: m37_conversion_probe BASE QUERY ROWS [CENTROIDS|-] [ROUNDS]".into());
     };
     let rows: usize = rows.parse()?;
-    let centroids = rest.first().map(|value| value.parse()).transpose()?;
+    let centroids = rest
+        .first()
+        .filter(|value| *value != "-")
+        .map(|value| value.parse())
+        .transpose()?;
+    let rounds: Option<u64> = rest.get(1).map(|value| value.parse()).transpose()?;
     let mut base_hash = Sha256::new();
     let corpus = read_rows(base, rows, &mut base_hash)?;
     let mut query_hash = Sha256::new();
@@ -313,6 +350,14 @@ fn run(args: &[String]) -> Result<Value> {
         results.push(result);
     }
     let all = store.payload("sgpack-");
+    let clustered_index_bytes = db.selective_index_bytes();
+    let sketch_rebuilds = db.sketch_rebuilds();
+    let wave = match rounds {
+        Some(rounds) => Some(update_wave(
+            db, &store, config, options, &corpus, rows, &queries, rounds,
+        )?),
+        None => None,
+    };
     Ok(json!({
         "probe": "m37_conversion_probe",
         "base_prefix_sha256": format!("{:x}", base_hash.finalize()),
@@ -331,12 +376,189 @@ fn run(args: &[String]) -> Result<Value> {
         "conversion": summary,
         "conversion_ms": conversion_ms,
         "posting_pack_bytes": all.1 - canonical.1,
-        "clustered_index_bytes": db.selective_index_bytes(),
-        "sketch_rebuilds": db.sketch_rebuilds(),
+        "clustered_index_bytes": clustered_index_bytes,
+        "sketch_rebuilds": sketch_rebuilds,
         "results": results,
+        "update_wave": wave,
         "threads": std::thread::available_parallelism()?.get(),
         "os": env::consts::OS,
         "arch": env::consts::ARCH,
+    }))
+}
+
+/// Writer `client`, round `round` overwrites 100 IDs in its own quarter.
+fn batch_ids(rows: usize, client: u64, round: u64) -> impl Iterator<Item = u64> {
+    let quarter = rows as u64 / 4;
+    let slot = round % (quarter / 100);
+    (0..100).map(move |n| client * quarter + slot * 100 + n)
+}
+
+/// The M31 update wave on the converted namespace, then cold recall at the
+/// M31 serving budget against the updated corpus.
+#[allow(clippy::too_many_arguments)]
+fn update_wave(
+    db: SegmentedDatabase<Memory>,
+    store: &Memory,
+    config: Config,
+    options: SegmentedOptions,
+    corpus: &[f32],
+    rows: usize,
+    queries: &[&[f32]],
+    rounds: u64,
+) -> Result<Value> {
+    drop(db);
+    let row = |id: usize| &corpus[id * DIMENSIONS..(id + 1) * DIMENSIONS];
+    let serving_options = SegmentedServingOptions {
+        cache: None,
+        warm_unit_bytes: 0,
+        // The probe converts explicitly and measures that view.
+        auto_cluster_rows: 0,
+        auto_recluster_factor: 0,
+        ..SegmentedServingOptions::m31(std::path::PathBuf::new())
+    };
+    let mut serving =
+        SegmentedServing::open(store.clone(), config, options.clone(), serving_options)?;
+    let creates_before = store.creates.lock().unwrap().clone();
+    let mut generation = vec![0_u64; rows];
+    let (mut maintenance_ms, mut longest_round_ms) = (0_f64, 0_f64);
+    let started = Instant::now();
+    for round in 0..rounds {
+        let mut requests = Vec::new();
+        for writer in 0..4_u64 {
+            let mutations = batch_ids(rows, writer, round)
+                .map(|id| {
+                    generation[id as usize] = round + 1;
+                    let base = (id as usize + 137 * (round as usize + 1)) % rows;
+                    Mutation::Put {
+                        id,
+                        vector: row(base).to_vec(),
+                        metadata: if id % 100 == 0 {
+                            BTreeMap::from([(FILTER.0.into(), FILTER.1.into())])
+                        } else {
+                            BTreeMap::new()
+                        },
+                    }
+                })
+                .collect();
+            let mut nonce = [0_u8; 16];
+            nonce[..8].copy_from_slice(&writer.to_le_bytes());
+            nonce[8..].copy_from_slice(&round.to_le_bytes());
+            requests.push(Request {
+                id: RequestId {
+                    boundary: serving.sequence(),
+                    nonce,
+                },
+                conditions: Vec::new(),
+                mutations,
+            });
+        }
+        // About two log objects per second, as the M31 group commit made.
+        let second = requests.split_off(2);
+        for group in [requests, second] {
+            for result in serving.apply_requests(group) {
+                result?;
+            }
+        }
+        let step = Instant::now();
+        while serving.maintenance_step()? {}
+        let elapsed = step.elapsed().as_secs_f64() * 1e3;
+        maintenance_ms += elapsed;
+        longest_round_ms = longest_round_ms.max(elapsed);
+    }
+    let wave_ms = started.elapsed().as_secs_f64() * 1e3;
+    let creates: BTreeMap<String, Value> = store
+        .creates
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(kind, &(count, bytes))| {
+            let (before_count, before_bytes) = creates_before.get(kind).copied().unwrap_or((0, 0));
+            (
+                kind.clone(),
+                json!({"creates": count - before_count, "bytes": bytes - before_bytes,
+                    "per_round": (count - before_count) as f64 / rounds as f64}),
+            )
+        })
+        .collect();
+    let started = Instant::now();
+    let current = |id: usize| row((id + 137 * generation[id] as usize) % rows);
+    let truth: Vec<Vec<u64>> = parallel(queries.len(), |index| {
+        let mut heap = BinaryHeap::with_capacity(K + 1);
+        for id in 0..rows {
+            let entry = (distance(queries[index], current(id)).to_bits(), id as u64);
+            if heap.len() < K {
+                heap.push(entry);
+            } else if entry < *heap.peek().unwrap() {
+                heap.pop();
+                heap.push(entry);
+            }
+        }
+        heap.into_sorted_vec()
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect()
+    });
+    let oracle_ms = started.elapsed().as_millis();
+    let db = serving.database();
+    let mut results = Vec::new();
+    for (requests, bytes) in [(8, 1024 * 1024), (8, 512 * 1024), (12, 1024 * 1024)] {
+        let budget = ReadBudget {
+            blocks: 12,
+            requests,
+            bytes,
+            local_blocks: 0,
+        };
+        let mut result = measure(db, store, queries, &truth, budget)?;
+        result["probes"] = json!(glider::segmented::DEFAULT_CLUSTER_PROBES);
+        eprintln!("after wave: {result}");
+        results.push(result);
+    }
+    let (tail_objects, runs, blocks) = (db.tail_objects(), db.run_count(), db.block_count());
+    let (layout, index_bytes) = (db.clustered_layout(), db.selective_index_bytes());
+    let counters = serving.counters();
+    serving.close()?;
+    let selected_root = {
+        let objects = store.objects.lock().unwrap();
+        let (key, bytes) = objects
+            .iter()
+            .rfind(|(key, _)| key.starts_with("sgroot-"))
+            .ok_or("no root")?;
+        json!({"key": key, "bytes": bytes.len()})
+    };
+    store.gets.lock().unwrap().clear();
+    store.take_reads();
+    let started = Instant::now();
+    let reopened = SegmentedDatabase::open_with_options(store.clone(), config, options)?;
+    let open_ms = started.elapsed().as_secs_f64() * 1e3;
+    let (open_ranges, open_range_bytes) = store.take_reads();
+    let open_gets: BTreeMap<String, Value> = store
+        .gets
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(kind, &(count, bytes))| (kind.clone(), json!({"gets": count, "bytes": bytes})))
+        .collect();
+    drop(reopened);
+    Ok(json!({
+        "rounds": rounds,
+        "overwritten_rows": rounds * 400,
+        "wave_ms": wave_ms,
+        "maintenance_ms": maintenance_ms,
+        "longest_round_maintenance_ms": longest_round_ms,
+        "creates_by_kind": creates,
+        "counters": counters,
+        "tail_objects": tail_objects,
+        "runs": runs,
+        "blocks": blocks,
+        "layout": layout,
+        "index_bytes": index_bytes,
+        "selected_root": selected_root,
+        "reopen": {"open_ms": open_ms, "gets_by_kind": open_gets,
+            "range_reads": open_ranges, "range_bytes": open_range_bytes},
+        "visible_pack_bytes": store.payload("sgpack-").1,
+        "visible_bytes": store.payload("").1,
+        "oracle_ms": oracle_ms,
+        "results": results,
     }))
 }
 

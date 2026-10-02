@@ -33,7 +33,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        # Release mode: the crash-point matrices take minutes unoptimized.
+        run: cargo test --release --locked
 
       - name: Test benchmark archive tooling
         run: python3 -m unittest discover -s tests -p 'test_*.py'
@@ -46,7 +47,8 @@ jobs:
       - name: Check S3 and segmented features
         run: |
           cargo clippy --all-targets --all-features --locked -- -D warnings
-          cargo test --all-features --locked
+          # Release mode: the crash-point matrices take minutes unoptimized.
+          cargo test --release --all-features --locked
 
   minio:
     # Disposable-MinIO integration, fault and benchmark smoke checks; runs in

@@ -329,3 +329,50 @@ With the real five-bit sketches, 16 probes, 8 requests and 1 MiB reach 0.994
 0.894 for the per-seal layout. A missing or corrupt view fails selective
 serving and is repaired by converting again.
 [Evidence](../benchmarks/M37.md#stage-3-conversion-and-clustered-queries-on-real-packs).
+
+## 2026-10-02 — Clustered seals and bounded posting merges
+
+M37 stages 4-5 keep a converted namespace clustered under writes. A seal
+assigns each put to its nearest center and writes cluster-contiguous packs
+that are both the run's canonical packs and `Canonical` catalog extents,
+published with a new catalog before its root. A merge round copies each
+cluster's small extents (under three blocks of current rows, more than
+three per cluster) into derived extents under one catalog and one root.
+Coverage is derived at open from the posting rows, so no format changed.
+After an in-memory replay of the M31 update wave, 16 probes, 8 requests and
+1 MiB reach 0.977 / 0.9 at 250,000 rows and 0.9585 / 0.8 at 1,000,000 rows;
+root uploads (every block reference per root) bounded the merge policy.
+[Evidence](../benchmarks/M37.md#stages-4-5-clustered-seals-and-posting-merges-under-the-update-wave).
+
+## 2026-10-02 — Root manifests: publications write only changed runs
+
+Every root embedded every run's block list, so each publication rewrote all
+block references: 2.25 MB per root and 46% of uploaded bytes in the
+1,000,000-row update-wave replay, growing with the collection. Root v5 names
+each run's blocks through an immutable, digest-bound run manifest; a
+publication rewrites manifests only for runs whose blocks changed and reuses
+the selected root's references otherwise, one create per maintenance step
+before the root. Per-run manifests were chosen over delta segments with a
+merge policy because runs are already the bounded unit of change. A
+publication fell to 253 KB and all uploads from 529 to 311 MB; older roots
+open unchanged and upgrade on their next publication.
+[Evidence](../benchmarks/M39.md#root-manifests-root-v5-publication-bytes-in-the-update-wave-replay).
+
+## 2026-10-02 — Automatic conversion as idle serving maintenance
+
+Without an operator `convert`, a growing namespace kept per-seal routing
+past the size where it misses the recall gate (0.894 static at 1,000,000
+rows). `SegmentedServing` now converts once the sealed runs hold
+`auto_cluster_rows` live rows (default 250,000, where per-seal p5 recall is
+on the gate), one conversion step per idle unit. A conversion of 1,000,000
+rows takes thousands of units, longer than writes take to fill the 64-object
+log tail, so finishing it synchronously or abandoning it at the bound was
+rejected; instead seals and consolidation of runs newer than the frozen ones
+publish between its steps, and their versions stay routed through canonical
+packs under the new view, which open already supported. Failed reads keep
+the attempt; staged objects are retained from cleanup until its root.
+Because the centroid count is fixed per epoch, a view is rebuilt as the next
+epoch once the namespace holds more than `auto_recluster_factor` (default
+4) times the 4,000 rows per centroid it was sized for; at 1,000,000 rows a
+64-centroid view measured 0.953 / 0.8 against 0.981 / 0.9 for 256
+centroids at the M31 budget.

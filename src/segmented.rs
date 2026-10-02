@@ -16,14 +16,20 @@ mod cache;
 use cache::BlockCache;
 mod clustered;
 mod codec;
-use clustered::ClusterIndex;
+use clustered::{ClusterIndex, ExtentKind};
 mod convert;
-pub use convert::{ConversionSummary, ConvertOptions};
+pub use convert::{automatic_centroids, ConversionProgress, ConversionSummary, ConvertOptions};
 mod directory;
 use directory::Directory;
+mod manifest;
+mod merge;
+pub use merge::{ClusteredLayout, MergeSummary};
 mod serving;
 pub use cache::CacheStats;
-pub use serving::{SegmentedServing, SegmentedServingOptions, ServingCounters};
+pub use serving::{
+    ClusteringState, SegmentedServing, SegmentedServingOptions, ServingCounters,
+    DEFAULT_AUTO_CLUSTER_ROWS, DEFAULT_AUTO_RECLUSTER_FACTOR,
+};
 mod sketch;
 use sketch::{frame, unframe, Framed, PackSketch, SketchSet, FRAME_PREFIX_READ, MAX_SKETCH_BYTES};
 pub use sketch::{ReadBudget, SegmentedOptions};
@@ -128,6 +134,7 @@ fn plan_vector_local(
                 continue;
             }
             if group.len() == 1 {
+                debug_assert!(!codec::row_fits(puts[group[0]].2));
                 return Err(Error::Invalid(format!(
                     "segmented row {} exceeds block limit",
                     id(group[0])
@@ -189,26 +196,34 @@ fn plan_vector_local(
         groups.push(right);
         groups.push(group);
     }
+    planned.extend(plan_deletes(deletes).into_iter().map(|(ids, _)| ids));
+    Ok(planned)
+}
+
+/// ID-sorted tombstone blocks within the raw block limit, with raw lengths.
+fn plan_deletes(deletes: &[(u64, usize)]) -> Vec<(Vec<u64>, usize)> {
+    let empty_size = codec::block_len([]);
     let mut deletes = deletes.to_vec();
     deletes.sort_unstable();
+    let mut planned = Vec::new();
     let mut current = Vec::new();
     let mut size = empty_size;
     for (id, row_size) in deletes {
         if size + row_size > codec::MAX_RAW_BLOCK_BYTES {
-            planned.push(std::mem::take(&mut current));
+            planned.push((std::mem::take(&mut current), size));
             size = empty_size;
         }
         size += row_size;
         current.push(id);
     }
     if !current.is_empty() {
-        planned.push(current);
+        planned.push((current, size));
     }
-    Ok(planned)
+    planned
 }
 
 /// Root-v1 metadata for one block inside an immutable physical pack.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BlockRef {
     pub(crate) object: String,
@@ -334,6 +349,11 @@ pub(crate) struct RunRef {
     pub(crate) index_len: usize,
     pub(crate) index_sha256: String,
     pub(crate) blocks: Vec<BlockRef>,
+    /// The run manifest holding `blocks` in a root v5. Roots v1, v2 and v4
+    /// embed `blocks` instead; a root about to be published is bound by
+    /// `stage_manifest`, which never trusts this field's previous value.
+    #[serde(skip)]
+    manifest: Option<clustered::ObjectRef>,
 }
 
 /// Keys of every takeover's fence objects: takeover records (log
@@ -354,7 +374,10 @@ impl Fences {
 }
 
 /// Root v1 has no fences, v2 adds takeover fences, and v4 adds a clustered
-/// view. Version 3 is reserved for fence markers.
+/// view. Version 3 is reserved for fence markers. Version 5 (`manifest`)
+/// names each run's blocks through a run manifest object instead of
+/// embedding them, with optional fences and view; every publication writes
+/// it. Older versions remain readable.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Root {
@@ -391,15 +414,23 @@ enum RootObject {
 
 /// Decode an object at `root_key(generation)`.
 fn decode_root(bytes: &[u8], config: Config, generation: u64) -> Result<RootObject> {
-    let object = if decode::<MetadataVersion>(bytes)?.version == 3 {
+    let version = decode::<MetadataVersion>(bytes)?.version;
+    let object = if version == 3 {
         let fence: RootFence = decode(bytes)?;
         if fence.generation != generation {
             return Err(Error::Corrupt("segmented fence generation mismatch".into()));
         }
         RootObject::Fence
     } else {
-        let root: Root = decode(bytes)?;
-        root.validate(config)?;
+        // A root v5's runs name their blocks through manifests, which the
+        // opener loads only for the selected root.
+        let root = if version == 5 {
+            manifest::decode_root(bytes, config)?
+        } else {
+            let root: Root = decode(bytes)?;
+            root.validate(config)?;
+            root
+        };
         if root.generation != generation {
             return Err(Error::Corrupt("segmented root generation mismatch".into()));
         }
@@ -410,7 +441,8 @@ fn decode_root(bytes: &[u8], config: Config, generation: u64) -> Result<RootObje
 
 /// The newest root at or below the listed generations, skipping fence
 /// markers above it, which it returns. `Error::Exists` means a listed object
-/// vanished: only a newer root supersedes one, so the caller retries.
+/// vanished: only a newer root supersedes one, so the caller retries. A root
+/// v5 is returned without its block lists (`manifest::load_manifests`).
 fn select_root<S: ObjectStore>(
     store: &S,
     config: Config,
@@ -445,7 +477,23 @@ impl Root {
         }
     }
 
+    /// Validate the complete root, including every run's block list.
     pub(crate) fn validate(&self, config: Config) -> Result<()> {
+        self.validate_header(config)?;
+        for run in &self.runs {
+            if run.blocks.is_empty() {
+                return Err(Error::Corrupt("invalid segmented run reference".into()));
+            }
+            for reference in &run.blocks {
+                validate_block_ref(reference)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate everything but the runs' block lists, which a decoded root
+    /// v5 has not loaded yet.
+    fn validate_header(&self, config: Config) -> Result<()> {
         let fences_valid = match self.version {
             1 => self.fences.is_empty() && self.clustered.is_none(),
             2 => {
@@ -458,12 +506,12 @@ impl Root {
                         .iter()
                         .all(|&generation| generation > 0 && generation < self.generation)
             }
-            4 => {
+            4 | 5 => {
                 self.generation > 0
-                    && self
-                        .clustered
-                        .as_ref()
-                        .is_some_and(|view| view.validate().is_ok())
+                    && match &self.clustered {
+                        Some(view) => view.validate().is_ok(),
+                        None => self.version == 5,
+                    }
                     && !self.fences.logs.contains(&0)
                     && self
                         .fences
@@ -483,7 +531,6 @@ impl Root {
                 || run.first_sequence <= previous_sequence
                 || run.first_sequence > run.last_sequence
                 || run.last_sequence > self.sequence
-                || run.blocks.is_empty()
                 || run.index_len < 48
                 || run.index_len > MAX_INDEX_BYTES
                 || !(run.index_len - 24).is_multiple_of(24)
@@ -492,9 +539,6 @@ impl Root {
                 return Err(Error::Corrupt("invalid segmented run reference".into()));
             }
             previous_sequence = run.last_sequence;
-            for reference in &run.blocks {
-                validate_block_ref(reference)?;
-            }
         }
         Ok(())
     }
@@ -1030,6 +1074,12 @@ fn numbered_key(key: &str, prefix: &str) -> Result<u64> {
     Ok(sequence)
 }
 
+/// Bit `index` of a bitset; false beyond its end.
+fn bit(bits: &[u64], index: usize) -> bool {
+    bits.get(index / 64)
+        .is_some_and(|word| word & (1 << (index % 64)) != 0)
+}
+
 #[derive(Clone, Copy)]
 struct Location {
     run: usize,
@@ -1159,6 +1209,8 @@ struct SealState {
     retry: retry::State,
     /// Planned block membership by ID; records are materialized per pack.
     blocks: Vec<Vec<u64>>,
+    /// Present when the seal assigns puts to a loaded clustered view.
+    clustered: Option<ClusteredSeal>,
     /// Sealed versions a newer tail write displaced during this seal.
     displaced: BTreeMap<u64, (u64, Option<Arc<Document>>)>,
     entries: Vec<IndexEntry>,
@@ -1167,6 +1219,78 @@ struct SealState {
     next_block: usize,
     next_pack: u32,
     index_published: bool,
+}
+
+/// An M37 clustered seal: puts are planned as cluster-contiguous posting
+/// blocks (canonical extents of the view) and tombstones as ID-sorted blocks
+/// in separate packs.
+struct ClusteredSeal {
+    view: Arc<ClusterIndex>,
+    /// Each planned block's partition: its cluster ID, or 0 for tombstones.
+    partitions: Vec<u32>,
+    /// Planned packs as block ranges, flagged when they are posting packs.
+    packs: Vec<(std::ops::Range<usize>, bool)>,
+    /// The staged catalog and the view it selects.
+    catalog: Option<(clustered::ObjectRef, ClusterIndex)>,
+}
+
+/// Plan a clustered seal: assign each put to its nearest center (ties by
+/// cluster ID), lay clusters out in ID order as posting packs, then pack the
+/// ID-sorted tombstone blocks. Returns each block's IDs in block order.
+fn plan_clustered_seal(
+    config: Config,
+    view: Arc<ClusterIndex>,
+    puts: &[(u64, &[f32], usize)],
+    deletes: &[(u64, usize)],
+) -> Result<(Vec<Vec<u64>>, ClusteredSeal)> {
+    let vectors: Vec<&[f32]> = puts.iter().map(|put| put.1).collect();
+    let mut groups: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (index, cluster) in view.assign(config.metric, &vectors).into_iter().enumerate() {
+        groups.entry(cluster).or_default().push(index);
+    }
+    let groups: Vec<(u32, Vec<usize>)> = groups.into_iter().collect();
+    let lengths: Vec<Vec<usize>> = groups
+        .iter()
+        .map(|(_, rows)| rows.iter().map(|&index| puts[index].2).collect())
+        .collect();
+    let mut blocks = Vec::new();
+    let mut partitions = Vec::new();
+    let mut packs = Vec::new();
+    for planned in convert::plan_layout(&lengths)? {
+        let start = blocks.len();
+        for (group, range) in planned {
+            let (cluster, rows) = &groups[group];
+            blocks.push(rows[range].iter().map(|&index| puts[index].0).collect());
+            partitions.push(*cluster);
+        }
+        packs.push((start..blocks.len(), true));
+    }
+    let mut start = blocks.len();
+    let mut raw = 0;
+    for (ids, length) in plan_deletes(deletes) {
+        if blocks.len() > start
+            && (blocks.len() - start == MAX_PACK_BLOCKS
+                || raw + length > MAX_PACK_BYTES - 64 * 1024)
+        {
+            packs.push((start..blocks.len(), false));
+            (start, raw) = (blocks.len(), 0);
+        }
+        raw += length;
+        blocks.push(ids);
+        partitions.push(0);
+    }
+    if blocks.len() > start {
+        packs.push((start..blocks.len(), false));
+    }
+    Ok((
+        blocks,
+        ClusteredSeal {
+            view,
+            partitions,
+            packs,
+            catalog: None,
+        },
+    ))
 }
 
 /// Acknowledged log-tail versions by ID. Documents are shared, so copying the
@@ -1196,6 +1320,10 @@ pub struct SegmentedDatabase<S> {
     tail_logs: VecDeque<u64>,
     known_keys: BTreeSet<String>,
     obsolete: VecDeque<String>,
+    /// Run manifests created for the root being prepared, by SHA-256 of
+    /// their bytes, so a step that rebuilds that root reuses them. Cleared
+    /// when a root is selected: an unreferenced one is then obsolete.
+    staged_manifests: BTreeMap<[u8; 32], clustered::ObjectRef>,
     /// Replaced roots; one that a view still holds pins its packs.
     retired: Vec<Weak<Root>>,
     cache: Option<Arc<Mutex<BlockCache>>>,
@@ -1208,6 +1336,7 @@ pub struct SegmentedDatabase<S> {
     reclaim: Option<ReclaimState>,
     prune: Option<PruneState>,
     convert: Option<convert::ConvertState>,
+    merge: Option<merge::MergeState>,
     /// The selected root's decoded clustered view, if it has one and it
     /// loaded; `cluster_error` says why a selected view did not load.
     cluster: Option<Arc<ClusterIndex>>,
@@ -1454,7 +1583,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     }
 
     /// A copy of the selected root at the next free generation (above every
-    /// fence marker) carrying the namespace's fences.
+    /// fence marker) carrying the namespace's fences, as a root v5 whose
+    /// manifests `stage_manifest` binds before publication.
     fn next_root(&self) -> Result<Root> {
         let mut root = Root::clone(&self.root);
         root.generation = self
@@ -1464,13 +1594,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("segmented root generation exhausted".into()))?;
         root.fences = self.fences.clone();
-        root.version = if root.clustered.is_some() {
-            4
-        } else if root.fences.is_empty() {
-            1
-        } else {
-            2
-        };
+        root.version = 5;
         Ok(root)
     }
 
@@ -1531,6 +1655,27 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             || self.reclaim.is_some()
             || self.prune.is_some()
             || self.convert.is_some()
+            || self.merge.is_some()
+    }
+
+    /// Whether a seal or run consolidation must wait. Both may publish
+    /// while a conversion is staged: they only append or merge runs newer
+    /// than the ones it froze, and the view it then publishes routes the
+    /// newer versions through their canonical packs (a clustered seal's
+    /// packs, extents of the previous epoch, are not in the new catalog).
+    fn root_maintenance_blocked(&self) -> bool {
+        self.seal.is_some()
+            || self.reclaim.is_some()
+            || self.prune.is_some()
+            || self.merge.is_some()
+    }
+
+    /// Live (not deleted) IDs of the sealed runs, excluding the log tail.
+    pub fn sealed_live_rows(&self) -> usize {
+        self.latest
+            .iter()
+            .filter(|(_, location)| !location.entry.deleted)
+            .count()
     }
 
     /// Postings a clustered selective query probes (default
@@ -1712,6 +1857,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 logs.push(sequence);
             } else if key.starts_with("sgpack-")
                 || key.starts_with("sgindex-")
+                || key.starts_with(manifest::PREFIX)
                 || key.starts_with("sgcentroid-")
                 || key.starts_with("sgcluster-")
             {
@@ -1720,11 +1866,12 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 return Err(Error::Corrupt(format!("unexpected segmented key: {key}")));
             }
         }
-        let (root, markers) =
+        let (mut root, markers) =
             select_root(&store, config, &generations).map_err(|error| match error {
                 Error::Exists(_) => Error::Corrupt("selected segmented root missing".into()),
                 error => error,
             })?;
+        manifest::load_manifests(&store, config, &mut root)?;
         let mut fences = root.fences.clone();
         fences.roots.extend(markers);
         let mut latest = Directory::default();
@@ -1784,6 +1931,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             tail_logs: VecDeque::new(),
             known_keys: listed,
             obsolete: VecDeque::new(),
+            staged_manifests: BTreeMap::new(),
             retired: Vec::new(),
             cache: None,
             options_digest: Sha256::digest(encode(&options)?).into(),
@@ -1795,6 +1943,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             reclaim: None,
             prune: None,
             convert: None,
+            merge: None,
             cluster: None,
             cluster_error: None,
             retired_views: Vec::new(),
@@ -1846,27 +1995,36 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Load the routing state the selected root needs. Without a clustered
     /// view that is the sketch of every referenced pack. With one, it is the
     /// view's centroids, catalog and posting sketches, plus the sketches of
-    /// the canonical packs holding sealed versions newer than the view; the
-    /// view's own canonical sources are not routed, so each current version
-    /// has exactly one routing row. A missing or corrupt derived view object
-    /// leaves the view unavailable (`clustered_view_error`); other storage
-    /// errors fail. Invalid sketch frames are rebuilt from authenticated
-    /// blocks.
+    /// the canonical packs holding live versions that no posting copy covers
+    /// (versions a stage 3 binary sealed after its conversion); covered
+    /// canonical rows are never routed, so each current version has exactly
+    /// one routing row. A missing or corrupt derived view object, a duplicate
+    /// posting copy, or an uncovered version inside a posting pack leaves the
+    /// view unavailable (`clustered_view_error`); other storage errors fail.
+    /// Invalid sketch frames are rebuilt from authenticated blocks.
     fn load_routing(&mut self) -> Result<()> {
         Arc::make_mut(&mut self.sketches).clear();
         self.cluster = None;
         self.cluster_error = None;
+        let mut covered = Vec::new();
+        let mut uncovered = BTreeSet::new();
         if let Some(view) = self.root.clustered.clone() {
-            match self.load_view(&view) {
+            let loaded = self.load_view(&view).and_then(|index| {
+                covered = self.covered_versions()?;
+                uncovered = self.uncovered_blocks(&covered, Some(&index))?;
+                Ok(index)
+            });
+            match loaded {
                 Ok(index) => self.cluster = Some(Arc::new(index)),
                 Err(Error::Corrupt(message)) => {
                     Arc::make_mut(&mut self.sketches).clear();
+                    covered.clear();
+                    uncovered.clear();
                     self.cluster_error = Some(message);
                 }
                 Err(error) => return Err(error),
             }
         }
-        let boundary = self.cluster.as_ref().map(|cluster| cluster.boundary);
         let mut packs: BTreeMap<String, Vec<BlockRef>> = BTreeMap::new();
         if self.root.clustered.is_none() {
             for run in &self.root.runs {
@@ -1877,14 +2035,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                         .push(block.clone());
                 }
             }
-        } else if let Some(boundary) = boundary {
-            let mut blocks = BTreeSet::new();
-            for (_, location) in self.latest.iter() {
-                if !location.entry.deleted && location.entry.sequence > boundary {
-                    blocks.insert((location.run, location.entry.block as usize));
-                }
-            }
-            for (run, block) in blocks {
+        } else if self.cluster.is_some() {
+            for (run, block) in uncovered {
                 let block = &self.root.runs[run].blocks[block];
                 packs
                     .entry(block.object.clone())
@@ -1926,12 +2078,65 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             Arc::make_mut(&mut self.sketches).install(sketch);
         }
         Arc::make_mut(&mut self.sketches).refresh(&self.root, self.root.clustered.is_some())?;
-        self.activate_sketches(None);
+        let latest = self.latest.clone();
+        self.activate_sketches(None, |id| {
+            latest
+                .index_of(id)
+                .is_none_or(|(position, _)| !bit(&covered, position))
+        });
         let (latest, tail) = (&self.latest, &self.tail);
-        Arc::make_mut(&mut self.sketches)
-            .activate_postings(|id, sequence| sketch::posting_current(tail, latest, id, sequence));
+        Arc::make_mut(&mut self.sketches).activate_postings(None, |id, sequence| {
+            sketch::posting_current(tail, latest, id, sequence)
+        });
         Arc::make_mut(&mut self.sketches).compact_all();
         Ok(())
+    }
+
+    /// One bit per latest-ID directory entry: set when a loaded posting row
+    /// copies exactly that live version. A second copy of a version is a
+    /// corrupt view.
+    fn covered_versions(&self) -> Result<Vec<u64>> {
+        let mut covered = vec![0_u64; self.latest.len().div_ceil(64)];
+        for (id, sequence) in self.sketches.posting_rows() {
+            let Some((position, location)) = self.latest.index_of(id) else {
+                continue;
+            };
+            if location.entry.sequence != sequence || location.entry.deleted {
+                continue;
+            }
+            if bit(&covered, position) {
+                return Err(Error::Corrupt(format!(
+                    "clustered view holds two copies of ID {id}"
+                )));
+            }
+            covered[position / 64] |= 1 << (position % 64);
+        }
+        Ok(covered)
+    }
+
+    /// Root blocks `(run, block)` holding live versions that no posting copy
+    /// covers and no tail write shadows. With a view, such a version inside
+    /// one of its posting packs means the catalog lost its copy.
+    fn uncovered_blocks(
+        &self,
+        covered: &[u64],
+        cluster: Option<&ClusterIndex>,
+    ) -> Result<BTreeSet<(usize, usize)>> {
+        let mut blocks = BTreeSet::new();
+        for (position, (id, location)) in self.latest.iter().enumerate() {
+            if location.entry.deleted || bit(covered, position) || self.tail.contains_key(&id) {
+                continue;
+            }
+            let block = (location.run, location.entry.block as usize);
+            let object = &self.root.runs[block.0].blocks[block.1].object;
+            if cluster.is_some_and(|cluster| cluster.packs.contains_key(object)) {
+                return Err(Error::Corrupt(format!(
+                    "clustered view lost the posting copy of ID {id}"
+                )));
+            }
+            blocks.insert(block);
+        }
+        Ok(blocks)
     }
 
     /// Decode and authenticate the clustered view `view` selects and load
@@ -2004,12 +2209,26 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 })
         };
         if let Some(mut sketch) = decoded {
-            if sketch
-                .bind_posting(layout.payload_len, &layout.blocks)
-                .is_ok()
-                && matches(&sketch)
-            {
-                return Ok(sketch);
+            // The catalog may list only some of a pack's blocks; the others
+            // were merged into other extents and are not routed.
+            let listed: BTreeSet<&[u8; 32]> = layout.blocks.iter().map(|block| &block.2).collect();
+            let keep: Vec<bool> = sketch
+                .block_digests()
+                .map(|digest| listed.contains(digest))
+                .collect();
+            if keep.iter().filter(|&&kept| kept).count() == layout.blocks.len() {
+                if keep.contains(&false) {
+                    let rows: usize = sketch.block_rows().sum();
+                    let mut live = vec![u64::MAX; rows.div_ceil(64)];
+                    sketch.retain_blocks(&mut live, &keep);
+                }
+                if sketch
+                    .bind_posting(layout.payload_len, &layout.blocks)
+                    .is_ok()
+                    && matches(&sketch)
+                {
+                    return Ok(sketch);
+                }
             }
         }
         let mut references = Vec::with_capacity(layout.blocks.len());
@@ -2128,19 +2347,24 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(decoded)
     }
 
-    /// Recompute canonical row liveness. With a clustered view, versions it
-    /// covers are routed through their postings instead.
-    fn activate_sketches(&mut self, packs: Option<&BTreeSet<String>>) {
+    /// Recompute canonical row liveness for the named packs (all when
+    /// `None`): a row is live when it is the current version and `routed`
+    /// accepts its ID. With a clustered view, versions a posting covers are
+    /// routed through it instead.
+    fn activate_sketches(
+        &mut self,
+        packs: Option<&BTreeSet<String>>,
+        routed: impl Fn(u64) -> bool,
+    ) {
         let (latest, tail) = (&self.latest, &self.tail);
-        let boundary = self.cluster.as_ref().map(|cluster| cluster.boundary);
         Arc::make_mut(&mut self.sketches).activate(packs, |id, run, block| {
             !tail.contains_key(&id)
                 && latest.get(&id).is_some_and(|location| {
                     location.run == run
                         && location.entry.block as usize == block
                         && !location.entry.deleted
-                        && boundary.is_none_or(|boundary| location.entry.sequence > boundary)
                 })
+                && routed(id)
         });
     }
 
@@ -2152,6 +2376,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         ]);
         for run in &self.root.runs {
             retained.insert(run.index_object.clone());
+            retained.extend(run.manifest.iter().map(|manifest| manifest.key.clone()));
             for block in &run.blocks {
                 retained.insert(block.object.clone());
             }
@@ -2165,6 +2390,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 .iter()
                 .map(|&generation| root_key(generation)),
         );
+        // A staged conversion's objects are not referenced until its root.
+        retained.extend(self.conversion_staged().iter().cloned());
         if let Some(view) = &self.root.clustered {
             let Some(cluster) = &self.cluster else {
                 // An unreadable catalog does not name its packs: remove
@@ -2182,6 +2409,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Select a new root. A view holding the old one keeps its packs from
     /// cleanup until the view is dropped.
     fn replace_root(&mut self, root: Root) {
+        self.staged_manifests.clear();
         let old = std::mem::replace(&mut self.root, Arc::new(root));
         self.retired.push(Arc::downgrade(&old));
     }
@@ -2200,16 +2428,22 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(())
     }
 
-    /// Publish one pack beginning with its derived sketch frame. Neither is
-    /// state until a root references the pack.
-    fn publish_pack(&mut self, key: &str, blocks: &[Block]) -> Result<(Vec<BlockRef>, PackSketch)> {
+    /// Publish one pack beginning with its derived sketch frame (a `GLSKT003`
+    /// posting sketch when `fingerprints` maps its blocks' clusters). Neither
+    /// is state until a root references the pack.
+    fn publish_pack(
+        &mut self,
+        key: &str,
+        blocks: &[Block],
+        fingerprints: Option<&BTreeMap<u32, [u8; 32]>>,
+    ) -> Result<(Vec<BlockRef>, PackSketch)> {
         let (bytes, references, sketch) = encode_pack_with_sketch(
             key,
             self.config,
             &self.options,
             &self.options_digest,
             blocks,
-            None,
+            fingerprints,
         )?;
         self.create_staged(key, &bytes)?;
         Ok((references, sketch))
@@ -2305,6 +2539,19 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 request.validate(self.config)?;
                 if let Some(outcome) = retry.duplicate(request, sequence)? {
                     return Ok((outcome, false));
+                }
+                // A row that cannot share a block with anything can never be
+                // sealed; refuse it before it is acknowledged. Replay does not
+                // apply this check: older logs may hold such rows.
+                for mutation in &request.mutations {
+                    if let Mutation::Put {
+                        id,
+                        vector,
+                        metadata,
+                    } = mutation
+                    {
+                        codec::check_put_fits(*id, vector, metadata)?;
+                    }
                 }
                 let next = sequence
                     .checked_add(1)
@@ -2537,7 +2784,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.maintenance_active() {
+        if self.root_maintenance_blocked() {
             return Err(Error::MaintenanceRequired);
         }
         if self.tail_objects == 0 {
@@ -2547,26 +2794,25 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let boundary = self.sequence;
         let mut puts = Vec::new();
         let mut deletes = Vec::new();
-        for (&id, (sequence, document)) in self.tail.iter() {
+        for (&id, (_, document)) in self.tail.iter() {
             match document {
                 Some(document) => puts.push((
                     id,
                     document.vector.as_slice(),
-                    codec::record_len(&BlockRecord {
-                        sequence: *sequence,
-                        mutation: Mutation::Delete { id },
-                    }) + codec::put_len(&document.vector, &document.metadata),
+                    codec::put_row_len(&document.vector, &document.metadata),
                 )),
-                None => deletes.push((
-                    id,
-                    codec::record_len(&BlockRecord {
-                        sequence: *sequence,
-                        mutation: Mutation::Delete { id },
-                    }),
-                )),
+                None => deletes.push((id, codec::DELETE_ROW_LEN)),
             }
         }
-        let blocks = plan_vector_local(self.config, &puts, &deletes)?;
+        // With a loaded clustered view every put joins its nearest cluster's
+        // posting extent; otherwise blocks are vector-local groups.
+        let (blocks, clustered) = match self.cluster.clone() {
+            Some(view) => {
+                let (blocks, clustered) = plan_clustered_seal(self.config, view, &puts, &deletes)?;
+                (blocks, Some(clustered))
+            }
+            None => (plan_vector_local(self.config, &puts, &deletes)?, None),
+        };
         drop(puts);
         let mut entries = Vec::new();
         for (ordinal, ids) in blocks.iter().enumerate() {
@@ -2593,6 +2839,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             first_sequence,
             retry: self.retry.clone(),
             blocks,
+            clustered,
             displaced: BTreeMap::new(),
             entries,
             references: Vec::new(),
@@ -2604,8 +2851,36 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(())
     }
 
-    /// Publish at most one pack, index, or root per call. The root is the only
-    /// authority switch; an uncertain create poisons the handle until reopen.
+    /// Materialize the frozen versions of the planned blocks `range`.
+    fn seal_records(&self, seal: &SealState, ids: &[u64]) -> Result<Vec<BlockRecord>> {
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            let (sequence, document) = seal
+                .displaced
+                .get(id)
+                .or_else(|| self.tail.get(id))
+                .filter(|(sequence, _)| *sequence <= seal.boundary)
+                .ok_or_else(|| Error::Corrupt("sealed version missing".into()))?;
+            records.push(BlockRecord {
+                sequence: *sequence,
+                mutation: match document {
+                    Some(document) => Mutation::Put {
+                        id: *id,
+                        vector: document.vector.clone(),
+                        metadata: document.metadata.clone(),
+                    },
+                    None => Mutation::Delete { id: *id },
+                },
+            });
+        }
+        Ok(records)
+    }
+
+    /// Publish at most one pack, index, catalog, run manifest or root per
+    /// call. The root
+    /// is the only authority switch; an uncertain create poisons the handle
+    /// until reopen. A clustered seal stages a catalog listing its posting
+    /// extents, and its root selects that catalog.
     pub fn seal_step(&mut self) -> Result<bool> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
@@ -2616,43 +2891,43 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if seal.next_block < seal.blocks.len() {
             let start = seal.next_block;
             let mut end = start;
-            // Materialize only this pack's sealed versions. Raw lengths bound
-            // compressed lengths from above, up to zstd's small framing
-            // overhead covered by the 64 KiB margin.
-            let mut bytes = 0;
             let mut blocks = Vec::new();
-            while end < seal.blocks.len() && end - start < MAX_PACK_BLOCKS {
-                let mut records = Vec::with_capacity(seal.blocks[end].len());
-                for id in &seal.blocks[end] {
-                    let (sequence, document) = seal
-                        .displaced
-                        .get(id)
-                        .or_else(|| self.tail.get(id))
-                        .filter(|(sequence, _)| *sequence <= seal.boundary)
-                        .ok_or_else(|| Error::Corrupt("sealed version missing".into()))?;
-                    records.push(BlockRecord {
-                        sequence: *sequence,
-                        mutation: match document {
-                            Some(document) => Mutation::Put {
-                                id: *id,
-                                vector: document.vector.clone(),
-                                metadata: document.metadata.clone(),
-                            },
-                            None => Mutation::Delete { id: *id },
-                        },
-                    });
+            let mut fingerprints = None;
+            let view = seal
+                .clustered
+                .as_ref()
+                .map(|clustered| clustered.view.clone());
+            if let (Some(clustered), Some(view)) = (&seal.clustered, &view) {
+                let (range, posting) = clustered.packs[seal.next_pack as usize].clone();
+                for block in range.clone() {
+                    let records = self.seal_records(&seal, &seal.blocks[block])?;
+                    blocks.push(Block::new(
+                        self.config,
+                        clustered.partitions[block],
+                        records,
+                    )?);
                 }
-                let length = codec::block_len(records.iter().map(codec::record_len));
-                if end > start && bytes + length > MAX_PACK_BYTES - 64 * 1024 {
-                    break;
+                end = range.end;
+                fingerprints = posting.then_some(&view.fingerprints);
+            } else {
+                // Materialize only this pack's sealed versions. Raw lengths
+                // bound compressed lengths from above, up to zstd's small
+                // framing overhead covered by the 64 KiB margin.
+                let mut bytes = 0;
+                while end < seal.blocks.len() && end - start < MAX_PACK_BLOCKS {
+                    let records = self.seal_records(&seal, &seal.blocks[end])?;
+                    let length = codec::block_len(records.iter().map(codec::record_len));
+                    if end > start && bytes + length > MAX_PACK_BYTES - 64 * 1024 {
+                        break;
+                    }
+                    bytes += length;
+                    blocks.push(Block::new(self.config, 0, records)?);
+                    end += 1;
                 }
-                bytes += length;
-                blocks.push(Block::new(self.config, 0, records)?);
-                end += 1;
             }
             let key = format!("sgpack-{}-{:08}", seal.attempt, seal.next_pack);
             self.poisoned = true;
-            let (references, sketch) = self.publish_pack(&key, &blocks)?;
+            let (references, sketch) = self.publish_pack(&key, &blocks, fingerprints)?;
             self.poisoned = false;
             drop(blocks);
             seal.references.extend(references);
@@ -2676,9 +2951,36 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.seal = Some(seal);
             return Ok(true);
         }
+        if let Some(clustered) = seal.clustered.as_mut() {
+            if clustered.catalog.is_none() && clustered.packs.iter().any(|(_, posting)| *posting) {
+                let mut added = Vec::new();
+                for (range, posting) in &clustered.packs {
+                    if *posting {
+                        added.extend(clustered::extents_of(
+                            &seal.references[range.clone()],
+                            clustered.view.epoch,
+                            ExtentKind::Canonical,
+                        )?);
+                    }
+                }
+                let catalog = clustered
+                    .view
+                    .catalog
+                    .with_changes(&BTreeSet::new(), added)?;
+                let bytes = clustered.view.encode_catalog(&catalog)?;
+                let reference =
+                    clustered::object_ref(format!("sgcluster-{}", seal.attempt), &bytes);
+                self.poisoned = true;
+                self.create_staged(&reference.key, &bytes)?;
+                self.poisoned = false;
+                clustered.catalog = Some((reference, clustered.view.with_catalog(catalog)));
+                self.seal = Some(seal);
+                return Ok(true);
+            }
+        }
         let mut root = self.next_root()?;
         root.sequence = seal.boundary;
-        root.retry = seal.retry;
+        root.retry = seal.retry.clone();
         if !seal.entries.is_empty() {
             let index = RunIndex {
                 sequence: seal.boundary,
@@ -2691,12 +2993,33 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 index_object: format!("sgindex-{}", seal.attempt),
                 index_len: bytes.len(),
                 index_sha256: format!("{:x}", Sha256::digest(&bytes)),
-                blocks: seal.references,
+                blocks: seal.references.clone(),
+                manifest: None,
             });
         }
+        if let Some((reference, _)) = seal
+            .clustered
+            .as_ref()
+            .and_then(|clustered| clustered.catalog.as_ref())
+        {
+            root.clustered
+                .as_mut()
+                .expect("clustered seals keep the view")
+                .catalog = reference.clone();
+        }
         root.validate(self.config)?;
+        // The new run's manifest (and, for a legacy root, every other run's)
+        // is created one per step before the root.
+        if self.stage_manifest(&mut root)? {
+            self.seal = Some(seal);
+            return Ok(true);
+        }
+        let view = seal
+            .clustered
+            .and_then(|clustered| clustered.catalog)
+            .map(|(_, index)| index);
         self.poisoned = true;
-        self.create_staged(&root_key(root.generation), &encode(&root)?)?;
+        self.create_staged(&root_key(root.generation), &manifest::encode_root(&root)?)?;
         self.poisoned = false;
         if !seal.entries.is_empty() {
             let run = root.runs.len() - 1;
@@ -2710,11 +3033,21 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         self.tail_logs.retain(|&first| first > seal.boundary);
         self.tail_objects = self.tail_logs.len();
         self.replace_root(root);
+        if let Some(view) = view {
+            self.replace_view(view);
+        }
         let packs: BTreeSet<_> = seal.sketches.iter().map(|s| s.pack().to_owned()).collect();
         for sketch in seal.sketches {
             Arc::make_mut(&mut self.sketches).install(sketch);
         }
-        self.refresh_sketches(Some(&packs))?;
+        self.refresh_sketches()?;
+        // New canonical rows are new versions no posting covers; new posting
+        // rows are current unless a later tail write shadows them.
+        self.activate_sketches(Some(&packs), |_| true);
+        let (latest, tail) = (&self.latest, &self.tail);
+        Arc::make_mut(&mut self.sketches).activate_postings(Some(&packs), |id, sequence| {
+            sketch::posting_current(tail, latest, id, sequence)
+        });
         self.schedule_obsolete();
         Ok(true)
     }
@@ -2738,11 +3071,13 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
         }
-        if self.maintenance_active() {
+        if self.root_maintenance_blocked() {
             return Err(Error::MaintenanceRequired);
         }
+        // A staged conversion reads the runs it froze by position.
+        let frozen = self.conversion_frozen_runs();
         let runs = &self.root.runs;
-        let pair = (0..runs.len().saturating_sub(1)).rev().find(|&i| {
+        let pair = (frozen..runs.len().saturating_sub(1)).rev().find(|&i| {
             let left = (runs[i].index_len - 24) / 24;
             let right = (runs[i + 1].index_len - 24) / 24;
             left.ilog2() <= right.ilog2()
@@ -2816,6 +3151,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                     index_len: bytes.len(),
                     index_sha256: format!("{:x}", Sha256::digest(&bytes)),
                     blocks,
+                    manifest: None,
                 },
                 bytes,
             ))
@@ -2825,12 +3161,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             replacement.as_ref().map(|(run, _)| run.clone()),
         );
         root.validate(self.config)?;
-        let root_bytes = encode(&root)?;
         if let Some((run, bytes)) = &replacement {
             self.poisoned = true;
             self.create_staged(&run.index_object, bytes)?;
             self.poisoned = false;
         }
+        // The merged run's manifest; a legacy root also gets the others'.
+        self.stage_manifests(&mut root)?;
+        let root_bytes = manifest::encode_root(&root)?;
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
@@ -2852,23 +3190,28 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             }
         });
         self.replace_root(root);
-        self.refresh_sketches(None)?;
+        self.refresh_sketches()?;
         self.schedule_obsolete();
         Ok(true)
     }
 
     /// Rebind sketches after a root change. Liveness of retained rows does not
-    /// change; only newly installed packs need activation.
-    fn refresh_sketches(&mut self, new_packs: Option<&BTreeSet<String>>) -> Result<()> {
+    /// change; the caller activates newly installed packs.
+    fn refresh_sketches(&mut self) -> Result<()> {
         let covered = self.root.clustered.is_some();
         if let Err(error) = Arc::make_mut(&mut self.sketches).refresh(&self.root, covered) {
             self.poisoned = true;
             return Err(error);
         }
-        if let Some(packs) = new_packs {
-            self.activate_sketches(Some(packs));
-        }
         Ok(())
+    }
+
+    /// Select a new clustered view after a root that changed its catalog.
+    /// A query view holding the old one keeps its packs from cleanup.
+    fn replace_view(&mut self, view: ClusterIndex) {
+        if let Some(old) = self.cluster.replace(Arc::new(view)) {
+            self.retired_views.push(Arc::downgrade(&old));
+        }
     }
 
     /// Remove fully dead block references from one <=1 MiB index run. This
@@ -2957,7 +3300,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(true)
     }
 
-    /// Advance one index PUT or root PUT. Writes may extend the log tail, but
+    /// Advance one index, run manifest or root PUT. Writes may extend the log tail, but
     /// the frozen root directory cannot change until this publication ends.
     pub fn prune_step(&mut self) -> Result<bool> {
         if self.poisoned {
@@ -2976,8 +3319,15 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             self.prune = Some(state);
             return Ok(true);
         }
+        if self.stage_manifest(&mut state.root)? {
+            self.prune = Some(state);
+            return Ok(true);
+        }
         self.poisoned = true;
-        self.create_staged(&root_key(state.root.generation), &encode(&state.root)?)?;
+        self.create_staged(
+            &root_key(state.root.generation),
+            &manifest::encode_root(&state.root)?,
+        )?;
         self.poisoned = false;
         let removed = state.entries.is_empty();
         Arc::make_mut(&mut self.latest).retain(|_, location| {
@@ -3000,7 +3350,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             )
         }));
         self.replace_root(state.root);
-        self.refresh_sketches(None)?;
+        self.refresh_sketches()?;
         self.schedule_obsolete();
         Ok(true)
     }
@@ -3058,8 +3408,16 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         // Merge the packs with the most garbage into one new pack while their
         // estimated live bytes stay within 7/8 of the pack limit; the margin
         // covers estimation error so encoding cannot exceed the limit.
+        // A posting pack of the clustered view stays readable through the
+        // catalog, so rewriting its canonical blocks frees nothing; without
+        // a loaded catalog, nothing is known not to be one.
+        if self.root.clustered.is_some() && self.cluster.is_none() {
+            return Ok(false);
+        }
+        let postings = self.cluster.as_ref().map(|cluster| &cluster.packs);
         let mut candidates: Vec<_> = packs
             .into_iter()
+            .filter(|(key, _)| postings.is_none_or(|postings| !postings.contains_key(key)))
             .filter(|(_, pack)| {
                 // Garbage is measured over block data only; the sketch frame
                 // is not garbage, or a fully live pack could be reclaimed
@@ -3140,7 +3498,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         Ok(true)
     }
 
-    /// Advance reclamation by one block GET, pack PUT, or root PUT. Only the
+    /// Advance reclamation by one block GET, pack, run manifest or root PUT. Only the
     /// root PUT changes authoritative visibility. An uncertain write poisons
     /// this handle, and reopen determines whether publication happened.
     pub fn reclaim_step(&mut self) -> Result<bool> {
@@ -3187,7 +3545,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         }
         if state.references.is_none() {
             self.poisoned = true;
-            let (references, sketch) = self.publish_pack(&state.key.clone(), &state.blocks)?;
+            let (references, sketch) =
+                self.publish_pack(&state.key.clone(), &state.blocks, None)?;
             self.poisoned = false;
             state.references = Some(references);
             state.sketch = Some(sketch);
@@ -3201,7 +3560,22 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             root.runs[run].blocks[block] = state.references.as_ref().unwrap()[index].clone();
         }
         root.validate(self.config)?;
-        let root_bytes = encode(&root)?;
+        // Every run that lost a block to the new pack gets a new manifest,
+        // one create per step.
+        if self.stage_manifest(&mut root)? {
+            self.reclaim = Some(state);
+            return Ok(true);
+        }
+        let root_bytes = manifest::encode_root(&root)?;
+        // With a clustered view a moved row stays routed exactly when its old
+        // canonical row was: postings cover the others.
+        let routed: Option<BTreeSet<u64>> = self.root.clustered.is_some().then(|| {
+            state
+                .locations
+                .iter()
+                .flat_map(|&(run, block)| self.sketches.live_ids(run, block))
+                .collect()
+        });
         self.poisoned = true;
         self.create_staged(&root_key(root.generation), &root_bytes)?;
         self.poisoned = false;
@@ -3209,7 +3583,10 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let sketch = state.sketch.expect("reclaim sketch staged with its pack");
         let packs = BTreeSet::from([sketch.pack().to_owned()]);
         Arc::make_mut(&mut self.sketches).install(sketch);
-        self.refresh_sketches(Some(&packs))?;
+        self.refresh_sketches()?;
+        self.activate_sketches(Some(&packs), |id| {
+            routed.as_ref().is_none_or(|routed| routed.contains(&id))
+        });
         self.schedule_obsolete();
         Ok(true)
     }
@@ -3778,6 +4155,7 @@ mod tests {
             index_len: bytes.len(),
             index_sha256: format!("{:x}", Sha256::digest(&bytes)),
             blocks,
+            manifest: None,
         };
         let mut root = Root::empty(config);
         root.sequence = 1;
@@ -4161,6 +4539,8 @@ mod tests {
         db.apply_request(put(1, 2, 42, 3.)).unwrap();
         assert!(db.seal_step().unwrap()); // index for sequence 1
         db.apply_request(put(2, 3, 7, 4.)).unwrap();
+        assert!(db.seal_step().unwrap()); // run manifest for sequence 1
+        assert_eq!(db.root.sequence, 0);
         assert!(db.seal_step().unwrap()); // root for sequence 1
         assert_eq!(db.root.sequence, 1);
         assert_eq!(db.tail_objects, 2);
@@ -4432,7 +4812,8 @@ mod tests {
         })
         .unwrap();
         boundary += 1;
-        assert!(db.prune_step().unwrap());
+        assert!(db.prune_step().unwrap()); // run manifest
+        assert!(db.prune_step().unwrap()); // root
         assert!(!db.prune_step().unwrap());
         assert_eq!(db.root.runs[0].blocks.len(), 1);
         assert!(db.reclaim_pack_step().unwrap());
@@ -5045,10 +5426,12 @@ mod tests {
                     .unwrap();
             }
             assert!(uncertain.start_prune().unwrap());
-            if fail_prefix.starts_with("sgroot-") {
-                assert!(uncertain.prune_step().unwrap());
-            }
-            assert!(matches!(uncertain.prune_step(), Err(Error::Io(_))));
+            // Manifest creates may precede the root create; step until the
+            // injected failure is reached.
+            let error = (0..16)
+                .find_map(|_| uncertain.prune_step().err())
+                .expect("the injected failure is reached");
+            assert!(matches!(error, Error::Io(_)));
             assert!(matches!(
                 uncertain.start_prune(),
                 Err(Error::RecoveryRequired)
@@ -5070,5 +5453,172 @@ mod tests {
             assert_eq!(recovered.root.runs[0].blocks.len(), 1);
             while recovered.cleanup_step(8).unwrap() != 0 {}
         }
+    }
+
+    fn limit_request(nonce: u8, boundary: u64, mutations: Vec<Mutation>) -> retry::Request {
+        retry::Request {
+            id: retry::RequestId {
+                boundary,
+                nonce: [nonce; 16],
+            },
+            conditions: Vec::new(),
+            mutations,
+        }
+    }
+
+    fn limit_put(id: u64, value_len: usize) -> Mutation {
+        Mutation::Put {
+            id,
+            vector: vec![1., 2.],
+            metadata: BTreeMap::from([("blob".into(), "x".repeat(value_len))]),
+        }
+    }
+
+    /// Value length at which a two-component put with one "blob" metadata
+    /// entry exactly fills a block.
+    fn exact_fit_value_len() -> usize {
+        let empty =
+            codec::put_row_len(&[1., 2.], &BTreeMap::from([("blob".into(), String::new())]));
+        codec::MAX_RAW_BLOCK_BYTES - codec::block_len([]) - empty
+    }
+
+    fn limit_config() -> Config {
+        Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        }
+    }
+
+    #[test]
+    fn a_row_that_cannot_fit_one_block_is_rejected_before_acknowledgement() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), limit_config())
+                .unwrap();
+        let fits = exact_fit_value_len();
+        // One byte over the seal planner's limit is refused with the limit named.
+        let error = db
+            .apply_request(limit_request(1, 0, vec![limit_put(1, fits + 1)]))
+            .unwrap_err();
+        let Error::Invalid(message) = &error else {
+            panic!("expected Invalid, got {error:?}");
+        };
+        assert!(message.contains("document 1") && message.contains("fit in one block"));
+        assert_eq!((db.sequence(), db.tail_objects), (0, 0));
+        // An exact fit is acknowledged and seals.
+        db.apply_request(limit_request(2, 0, vec![limit_put(2, fits)]))
+            .unwrap();
+        db.seal_delta().unwrap();
+        assert_eq!(db.tail_objects, 0);
+        assert_eq!(db.get(2).unwrap().unwrap().metadata["blob"].len(), fits);
+        // One oversized put rejects its whole request: nothing is applied.
+        let error = db
+            .apply_request(limit_request(
+                3,
+                1,
+                vec![limit_put(3, 10), limit_put(4, fits + 1)],
+            ))
+            .unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)));
+        assert!(db.get(3).unwrap().is_none());
+        assert_eq!(db.sequence(), 1);
+        // Grouped requests are decided individually; the group still commits.
+        let results = db.apply_requests(vec![
+            limit_request(4, 1, vec![limit_put(5, 10)]),
+            limit_request(5, 1, vec![limit_put(6, fits + 1)]),
+            limit_request(6, 1, vec![limit_put(7, 10)]),
+        ]);
+        assert!(results[0].is_ok() && results[2].is_ok());
+        assert!(matches!(results[1], Err(Error::Invalid(_))));
+        assert_eq!(db.sequence(), 3);
+        assert!(db.get(6).unwrap().is_none());
+        assert!(db.get(5).unwrap().is_some() && db.get(7).unwrap().is_some());
+    }
+
+    /// The original wedge: acknowledging an unsealable row made every seal
+    /// fail until the tail reached 64 objects and all writes returned 503.
+    #[test]
+    fn rejected_oversized_puts_cannot_wedge_sealing_or_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), limit_config())
+                .unwrap();
+        let oversized = exact_fit_value_len() + 1;
+        for round in 0..(MAX_TAIL_OBJECTS as u64 + 8) {
+            let nonce = (round % 100) as u8 + 1;
+            let boundary = db.sequence();
+            assert!(
+                matches!(
+                    db.apply_request(limit_request(
+                        nonce,
+                        boundary,
+                        vec![limit_put(1, oversized)]
+                    )),
+                    Err(Error::Invalid(_))
+                ),
+                "round {round}"
+            );
+            db.apply_request(limit_request(
+                nonce + 100,
+                boundary,
+                vec![limit_put(100 + round, 8)],
+            ))
+            .unwrap_or_else(|error| panic!("round {round}: {error}"));
+            if round % 4 == 3 {
+                db.start_seal()
+                    .unwrap_or_else(|error| panic!("round {round}: {error}"));
+                while db.seal_step().unwrap() {}
+            }
+        }
+        assert_eq!(db.tail_objects, 0);
+        let boundary = db.sequence();
+        db.apply_request(limit_request(
+            250,
+            boundary,
+            vec![Mutation::Delete { id: 1 }],
+        ))
+        .unwrap();
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(100).unwrap().unwrap().metadata["blob"].len(), 8);
+    }
+
+    /// A row an older binary acknowledged is still replayed on recovery. It
+    /// blocks sealing until a delete or smaller replacement supersedes it in
+    /// the tail; no acknowledged row is dropped silently.
+    #[test]
+    fn a_legacy_oversized_row_recovers_and_can_be_deleted_or_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        drop(SegmentedDatabase::open(LocalStore::open(&path).unwrap(), limit_config()).unwrap());
+        let store = LocalStore::open(&path).unwrap();
+        for (sequence, id) in [(1_u64, 1_u64), (2, 2)] {
+            let request = limit_request(sequence as u8, sequence - 1, vec![limit_put(id, 300_000)]);
+            let record = LogRecordV1 {
+                version: 1,
+                sequence,
+                request,
+                outcome: retry::Outcome {
+                    sequence,
+                    conflict: None,
+                },
+            };
+            store
+                .create(&log_key(sequence), &encode(&record).unwrap())
+                .unwrap();
+        }
+        drop(store);
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(&path).unwrap(), limit_config()).unwrap();
+        assert_eq!(db.get(1).unwrap().unwrap().metadata["blob"].len(), 300_000);
+        let error = db.start_seal().unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+        db.apply_request(limit_request(10, 2, vec![Mutation::Delete { id: 1 }]))
+            .unwrap();
+        db.apply_request(limit_request(11, 3, vec![limit_put(2, 8)]))
+            .unwrap();
+        db.seal_delta().unwrap();
+        assert_eq!(db.tail_objects, 0);
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(2).unwrap().unwrap().metadata["blob"].len(), 8);
     }
 }

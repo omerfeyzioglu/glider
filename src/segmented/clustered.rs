@@ -53,7 +53,7 @@ pub(super) struct ObjectRef {
 }
 
 impl ObjectRef {
-    fn validate(&self, prefix: &str, max: usize) -> Result<()> {
+    pub(super) fn validate(&self, prefix: &str, max: usize) -> Result<()> {
         if !valid_key(&self.key, prefix)
             || self.length == 0
             || self.length > max
@@ -365,10 +365,15 @@ struct PackRanges {
 
 impl Catalog {
     fn validate(&self, centers: &Centroids) -> Result<()> {
-        if self.epoch != centers.epoch || self.clusters.len() != centers.centers.len() {
+        let ids: BTreeSet<_> = centers.centers.iter().map(|center| center.id).collect();
+        self.validate_for(centers.epoch, &ids)
+    }
+
+    /// Validate against a view's epoch and its unique center IDs.
+    fn validate_for(&self, epoch: u64, ids: &BTreeSet<u32>) -> Result<()> {
+        if self.epoch != epoch || self.clusters.len() != ids.len() {
             return Err(corrupt("catalog epoch or clusters"));
         }
-        let ids: BTreeSet<_> = centers.centers.iter().map(|center| center.id).collect();
         let mut previous_id = None;
         let mut pack_ranges: BTreeMap<&str, PackRanges> = BTreeMap::new();
         let mut total_extents = 0;
@@ -454,6 +459,10 @@ impl Catalog {
 
     pub(super) fn encode(&self, centers: &Centroids) -> Result<Vec<u8>> {
         self.validate(centers)?;
+        self.encode_validated()
+    }
+
+    fn encode_validated(&self) -> Result<Vec<u8>> {
         let mut length = 20_usize;
         for cluster in &self.clusters {
             length = length.saturating_add(8);
@@ -597,6 +606,91 @@ impl Catalog {
     }
 }
 
+impl Catalog {
+    /// This catalog without the extents named by `(pack, offset)` in
+    /// `removed` and with `added`, each cluster's extents in `(pack,
+    /// offset)` order. The result is validated when encoded.
+    pub(super) fn with_changes(
+        &self,
+        removed: &BTreeSet<(String, u32)>,
+        added: Vec<Extent>,
+    ) -> Result<Self> {
+        let mut clusters = self.clusters.clone();
+        for cluster in &mut clusters {
+            cluster
+                .extents
+                .retain(|extent| !removed.contains(&(extent.pack.clone(), extent.offset)));
+        }
+        for extent in added {
+            let index = clusters
+                .binary_search_by_key(&extent.cluster_id, |cluster| cluster.id)
+                .map_err(|_| corrupt("extent cluster"))?;
+            clusters[index].extents.push(extent);
+        }
+        for cluster in &mut clusters {
+            cluster
+                .extents
+                .sort_by(|a, b| (&a.pack, a.offset).cmp(&(&b.pack, b.offset)));
+        }
+        Ok(Self {
+            epoch: self.epoch,
+            clusters,
+        })
+    }
+}
+
+/// The extents of one posting pack's blocks, given in pack order: each run
+/// of adjacent blocks of one cluster is one extent.
+pub(super) fn extents_of(
+    references: &[super::BlockRef],
+    epoch: u64,
+    kind: ExtentKind,
+) -> Result<Vec<Extent>> {
+    let mut extents: Vec<Extent> = Vec::new();
+    for reference in references {
+        let block = CatalogBlock {
+            offset: u32::try_from(reference.offset).map_err(|_| corrupt("extent offset"))?,
+            length: u32::try_from(reference.length).map_err(|_| corrupt("extent length"))?,
+            sha256: sketch::digest_bytes(&reference.sha256)?,
+        };
+        let rows = u32::try_from(reference.rows).map_err(|_| corrupt("extent rows"))?;
+        match extents.last_mut() {
+            Some(extent)
+                if extent.pack == reference.object
+                    && extent.cluster_id == reference.partition
+                    && extent.offset + extent.length == block.offset =>
+            {
+                extent.length += block.length;
+                extent.rows += rows;
+                extent.blocks.push(block);
+            }
+            _ => extents.push(Extent {
+                pack: reference.object.clone(),
+                payload_len: u32::try_from(reference.payload_len)
+                    .map_err(|_| corrupt("pack length"))?,
+                offset: block.offset,
+                length: block.length,
+                rows,
+                epoch,
+                cluster_id: reference.partition,
+                kind,
+                role: PostingRole::Primary,
+                blocks: vec![block],
+            }),
+        }
+    }
+    Ok(extents)
+}
+
+/// A reference binding `key` to the length and SHA-256 of `bytes`.
+pub(super) fn object_ref(key: String, bytes: &[u8]) -> ObjectRef {
+    ObjectRef {
+        key,
+        length: bytes.len(),
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+    }
+}
+
 /// Identity of one center that posting sketches bind to: SHA-256 of the
 /// metric byte, the dimension (u32), the center ID (u32) and the f32
 /// coordinates, all little-endian. A posting block is valid for a view only
@@ -613,11 +707,12 @@ pub(super) fn fingerprint(metric: Metric, center: &Center) -> [u8; 32] {
 }
 
 /// The decoded clustered view a root v4 selects: centers in cluster-ID order
-/// and the catalog. `boundary` is the source root sequence: every live
-/// sealed version with a sequence at or below it has a posting copy, and
-/// newer sealed versions are routed through their canonical packs.
+/// and the catalog. Every live sealed version not shadowed by the log tail
+/// has exactly one current posting row in the catalog's extents, except
+/// versions a stage 3 binary sealed after a conversion, which its canonical
+/// sketches route (`load_routing` derives which from the postings).
 pub(super) struct ClusterIndex {
-    pub(super) boundary: u64,
+    pub(super) epoch: u64,
     pub(super) ids: Vec<u32>,
     centers: Vec<Vec<f32>>,
     pub(super) fingerprints: BTreeMap<u32, [u8; 32]>,
@@ -626,16 +721,20 @@ pub(super) struct ClusterIndex {
     pub(super) packs: BTreeMap<String, u32>,
 }
 
+fn catalog_packs(catalog: &Catalog) -> BTreeMap<String, u32> {
+    let mut packs = BTreeMap::new();
+    for extent in catalog.clusters.iter().flat_map(|cluster| &cluster.extents) {
+        packs.insert(extent.pack.clone(), extent.payload_len);
+    }
+    packs
+}
+
 impl ClusterIndex {
     pub(super) fn new(centroids: &Centroids, catalog: Catalog) -> Self {
         let mut centers: Vec<_> = centroids.centers.iter().collect();
         centers.sort_by_key(|center| center.id);
-        let mut packs = BTreeMap::new();
-        for extent in catalog.clusters.iter().flat_map(|cluster| &cluster.extents) {
-            packs.insert(extent.pack.clone(), extent.payload_len);
-        }
         Self {
-            boundary: centroids.source_sequence,
+            epoch: centroids.epoch,
             ids: centers.iter().map(|center| center.id).collect(),
             fingerprints: centers
                 .iter()
@@ -645,9 +744,36 @@ impl ClusterIndex {
                 .into_iter()
                 .map(|center| center.coordinates.clone())
                 .collect(),
+            packs: catalog_packs(&catalog),
             catalog,
-            packs,
         }
+    }
+
+    /// The same centers with another catalog of this epoch.
+    pub(super) fn with_catalog(&self, catalog: Catalog) -> Self {
+        Self {
+            epoch: self.epoch,
+            ids: self.ids.clone(),
+            centers: self.centers.clone(),
+            fingerprints: self.fingerprints.clone(),
+            packs: catalog_packs(&catalog),
+            catalog,
+        }
+    }
+
+    /// Validate and encode a catalog for this view's epoch and centers.
+    pub(super) fn encode_catalog(&self, catalog: &Catalog) -> Result<Vec<u8>> {
+        let ids: BTreeSet<u32> = self.ids.iter().copied().collect();
+        catalog.validate_for(self.epoch, &ids)?;
+        catalog.encode_validated()
+    }
+
+    /// The nearest center's ID for each vector, ties by cluster ID.
+    pub(super) fn assign(&self, metric: Metric, vectors: &[&[f32]]) -> Vec<u32> {
+        super::convert::assign(metric, &self.centers, vectors)
+            .into_iter()
+            .map(|index| self.ids[usize::from(index)])
+            .collect()
     }
 
     /// IDs of the `count` clusters nearest to `query`, ordered by

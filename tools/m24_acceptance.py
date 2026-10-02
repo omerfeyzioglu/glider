@@ -117,6 +117,8 @@ def main():
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--rounds", type=int, default=300, help="seconds of offered load")
     parser.add_argument("--rows", type=int, default=250000, choices=sorted(ENVELOPES))
+    parser.add_argument("--clustered", action="store_true",
+                        help="convert to an M37 clustered view after load (GLIDER_M24_CLUSTERED=1)")
     args = parser.parse_args()
     envelope = ENVELOPES[args.rows]
     for name, expected in envelope["data"].items():
@@ -127,6 +129,7 @@ def main():
     sources = {path: digest(Path(path)) for path in (
         "examples/m24_acceptance.rs", "src/segmented.rs", "src/segmented/sketch.rs",
         "src/segmented/serving.rs", "src/segmented/cache.rs", "src/segmented/directory.rs",
+        "src/segmented/clustered.rs", "src/segmented/convert.rs", "src/segmented/merge.rs",
         "src/admission.rs", "src/store.rs", "src/store/s3.rs")}
     revision = run("git", "rev-parse", "HEAD", capture=True).strip()
     dirty = bool(run("git", "status", "--porcelain", capture=True).strip())
@@ -134,6 +137,9 @@ def main():
     oracle = envelope["oracle"]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env["GLIDER_M24_ROWS"] = str(args.rows)
+    env.pop("GLIDER_M24_CLUSTERED", None)
+    if args.clustered:
+        env["GLIDER_M24_CLUSTERED"] = "1"
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
     run("cargo", "build", "--locked", "--release", "--features", "s3",
         "--example", "m24_acceptance", env=env)
@@ -176,6 +182,7 @@ def main():
     checks = gates(load, serve, verify, visible, envelope)
     result = {
         "version": 1, "dataset": envelope["dataset"], "rows": args.rows, "dimensions": 128,
+        "clustered": args.clustered,
         "metric": "squared_euclidean", "k": 10, "filter": "cohort=one-percent (id % 100 == 0)",
         "backend": "loopback-minio", "minio_image": IMAGE, "dataset_sha256": envelope["data"],
         "oracle": oracle, "oracle_sha256": digest(Path(oracle)),

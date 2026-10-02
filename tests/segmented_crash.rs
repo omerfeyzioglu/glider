@@ -3,10 +3,17 @@
 //! the acknowledged state against a model and exact search. A second
 //! workload converts the namespace to a clustered view (M37) twice, so every
 //! staged posting pack, centroid, catalog and root create is a crash point.
+//! A third converts early and then writes group-commit requests through
+//! clustered seals and posting merges and checks a backup restored from each
+//! recovered namespace. Every workload also delays each DELETE until the run
+//! ends, and every root publication's run manifest creates are crash points.
 
 use glider::{
     retry::{Request, RequestId},
-    segmented::{ConvertOptions, ReadBudget, SegmentedDatabase},
+    segmented::{
+        ConvertOptions, ReadBudget, SegmentedDatabase, SegmentedOptions, SegmentedServing,
+        SegmentedServingOptions,
+    },
     store::ObjectStore,
     Config, Error, Metric, Mutation, Result,
 };
@@ -28,13 +35,27 @@ fn config() -> Config {
 enum Fault {
     Before,
     After,
+    /// A remove that reports success but lands only when the run ends.
+    Delayed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Plain,
+    /// Convert midway, then rebuild the view as a new epoch.
+    Convert,
+    /// Convert early, then group commits, clustered seals and merges.
+    Clustered,
 }
 
 #[derive(Default)]
 struct Plan {
     operations: usize,
+    /// Whether each counted operation was a remove.
+    removes: Vec<bool>,
     fail_at: Option<(usize, Fault)>,
     fired: bool,
+    delayed: Vec<String>,
 }
 
 struct FaultStore<S> {
@@ -44,10 +65,11 @@ struct FaultStore<S> {
 
 impl<S> FaultStore<S> {
     /// Count one mutating operation and report the fault to inject, if any.
-    fn next(&self) -> Option<Fault> {
+    fn next(&self, remove: bool) -> Option<Fault> {
         let mut plan = self.plan.lock().unwrap();
         let index = plan.operations;
         plan.operations += 1;
+        plan.removes.push(remove);
         match plan.fail_at {
             Some((at, fault)) if at == index => {
                 plan.fired = true;
@@ -79,8 +101,8 @@ impl<S: ObjectStore> ObjectStore for FaultStore<S> {
         self.inner.list()
     }
     fn create(&self, key: &str, value: &[u8]) -> Result<()> {
-        match self.next() {
-            Some(Fault::Before) => Err(injected()),
+        match self.next(false) {
+            Some(Fault::Before | Fault::Delayed) => Err(injected()),
             Some(Fault::After) => {
                 self.inner.create(key, value)?;
                 Err(injected())
@@ -89,11 +111,15 @@ impl<S: ObjectStore> ObjectStore for FaultStore<S> {
         }
     }
     fn remove(&self, key: &str) -> Result<()> {
-        match self.next() {
+        match self.next(true) {
             Some(Fault::Before) => Err(injected()),
             Some(Fault::After) => {
                 self.inner.remove(key)?;
                 Err(injected())
+            }
+            Some(Fault::Delayed) => {
+                self.plan.lock().unwrap().delayed.push(key.into());
+                Ok(())
             }
             None => self.inner.remove(key),
         }
@@ -161,6 +187,11 @@ fn batches() -> Vec<Vec<Mutation>> {
 
 type Model = BTreeMap<u64, Option<Vec<f32>>>;
 
+thread_local! {
+    /// Merge rounds the workload published on this test thread.
+    static MERGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn apply(model: &mut Model, mutations: &[Mutation]) {
     for mutation in mutations {
         match mutation {
@@ -170,30 +201,57 @@ fn apply(model: &mut Model, mutations: &[Mutation]) {
     }
 }
 
+/// The requests of batch `index`: one, or two sharing a group-commit log in
+/// the clustered workload.
+fn requests(index: usize, boundary: u64, mutations: &[Mutation], mode: Mode) -> Vec<Request> {
+    let parts: Vec<&[Mutation]> = if mode == Mode::Clustered {
+        let (first, second) = mutations.split_at(mutations.len() / 2);
+        vec![first, second]
+    } else {
+        vec![mutations]
+    };
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(part, mutations)| Request {
+            id: RequestId {
+                boundary,
+                nonce: (index as u128 * 2 + part as u128).to_le_bytes(),
+            },
+            conditions: Vec::new(),
+            mutations: mutations.to_vec(),
+        })
+        .collect()
+}
+
 /// Run writes and maintenance until the first error. Returns the model of
-/// acknowledged state, the sequence it corresponds to and the batch whose
+/// acknowledged state, the sequence it corresponds to and the requests whose
 /// outcome is uncertain, if the failure hit a write.
 fn run<S: ObjectStore>(
     db: &mut SegmentedDatabase<FaultStore<S>>,
-    convert: bool,
-) -> (Model, u64, Option<Vec<Mutation>>) {
+    mode: Mode,
+) -> (Model, u64, Option<Vec<Request>>) {
     let mut model = Model::new();
     for (index, mutations) in batches().into_iter().enumerate() {
-        let request = Request {
-            id: RequestId {
-                boundary: db.sequence(),
-                nonce: (index as u128).to_le_bytes(),
-            },
-            conditions: Vec::new(),
-            mutations: mutations.clone(),
-        };
-        if db.apply_request(request).is_err() {
-            return (model, db.sequence(), Some(mutations));
+        let group = requests(index, db.sequence(), &mutations, mode);
+        if db
+            .apply_requests(group.clone())
+            .iter()
+            .any(|result| result.is_err())
+        {
+            return (model, db.sequence(), Some(group));
         }
         apply(&mut model, &mutations);
         let maintenance: Result<()> = (|| {
-            if index % 5 == 4 {
+            let seal = match mode {
+                Mode::Clustered => index % 2 == 1,
+                _ => index % 5 == 4,
+            };
+            if seal {
                 db.seal_delta()?;
+                while db.merge_postings()?.is_some() {
+                    MERGES.with(|merges| merges.set(merges.get() + 1));
+                }
                 while db.consolidate_runs_step()? {}
             }
             if index % 8 == 7 {
@@ -203,8 +261,12 @@ fn run<S: ObjectStore>(
                 while db.reclaim_pack_step()? {}
                 while db.cleanup_step(3)? > 0 {}
             }
-            // Convert midway, then rebuild the view as a new epoch.
-            if convert && (index == 11 || index == 23) {
+            let convert = match mode {
+                Mode::Plain => false,
+                Mode::Convert => index == 11 || index == 23,
+                Mode::Clustered => index == 1,
+            };
+            if convert {
                 db.convert_clustered(conversion())?;
                 while db.cleanup_step(3)? > 0 {}
             }
@@ -217,7 +279,7 @@ fn run<S: ObjectStore>(
     (model, db.sequence(), None)
 }
 
-fn check<S: ObjectStore>(db: &SegmentedDatabase<FaultStore<S>>, model: &Model, context: &str) {
+fn check<S: ObjectStore>(db: &SegmentedDatabase<S>, model: &Model, context: &str) {
     for (&id, expected) in model {
         let found = db.get(id).unwrap().map(|document| document.vector);
         assert_eq!(&found, expected, "{context}: id {id}");
@@ -265,20 +327,37 @@ fn check<S: ObjectStore>(db: &SegmentedDatabase<FaultStore<S>>, model: &Model, c
 
 /// Run the matrix for every `stride`-th mutating operation (both fault
 /// modes). `store(case)` opens a fresh, empty namespace for each case name.
-fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, convert: bool) {
+fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, mode: Mode) {
+    let convert = mode != Mode::Plain;
     let plan = Arc::new(Mutex::new(Plan::default()));
-    let (model, ..) = run(&mut open(store("clean"), &plan).unwrap(), convert);
+    let (model, ..) = run(&mut open(store("clean"), &plan).unwrap(), mode);
     let operations = plan.lock().unwrap().operations;
+    let removes = plan.lock().unwrap().removes.clone();
     assert!(
         operations > 50,
         "workload too small: {operations} operations"
     );
     let clean = open(store("clean"), &plan).unwrap();
-    assert_eq!(clean.clustered_epoch(), convert.then_some(2));
+    let epochs = match mode {
+        Mode::Plain => None,
+        Mode::Convert => Some(2),
+        Mode::Clustered => Some(1),
+    };
+    assert_eq!(clean.clustered_epoch(), epochs);
+    if mode == Mode::Clustered {
+        let layout = clean.clustered_layout().unwrap();
+        assert!(layout.canonical_extents > 0, "{layout:?}");
+        assert!(MERGES.with(std::cell::Cell::get) > 0, "no merge round ran");
+    }
     check(&clean, &model, "clean run");
     drop(clean);
     for at in (0..operations).step_by(stride.max(1)) {
-        for fault in [Fault::Before, Fault::After] {
+        let faults: &[Fault] = if removes[at] {
+            &[Fault::Before, Fault::After, Fault::Delayed]
+        } else {
+            &[Fault::Before, Fault::After]
+        };
+        for &fault in faults {
             let context = format!("operation {at} of {operations}, {fault:?}");
             let case = format!("case-{at}-{fault:?}");
             let plan = Arc::new(Mutex::new(Plan {
@@ -288,31 +367,73 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, convert: boo
             // A fault may hit namespace creation inside the first open;
             // then nothing was acknowledged and the next open must succeed.
             let (mut acknowledged, sequence, uncertain) = match open(store(&case), &plan) {
-                Ok(mut db) => run(&mut db, convert),
+                Ok(mut db) => run(&mut db, mode),
                 Err(_) => (Model::new(), 0, None),
             };
             assert!(plan.lock().unwrap().fired, "{context}: fault not reached");
+            // Delayed DELETEs land after everything the run did.
+            let late = std::mem::take(&mut plan.lock().unwrap().delayed);
+            for key in late {
+                store(&case).remove(&key).unwrap();
+            }
             let mut db = open(store(&case), &plan).unwrap();
-            // An uncertain batch is all-or-nothing, visible by its sequence.
-            if let Some(mutations) = uncertain {
-                if db.sequence() == sequence + 1 {
-                    apply(&mut acknowledged, &mutations);
+            // An uncertain group is all-or-nothing, visible by its sequences
+            // and its retry receipts; if it is absent, a retry with the same
+            // request IDs commits it.
+            if let Some(group) = uncertain {
+                let lookups: Vec<_> = group
+                    .iter()
+                    .map(|request| db.lookup_request(request.id).unwrap())
+                    .collect();
+                let mutations: Vec<Mutation> = group
+                    .iter()
+                    .flat_map(|request| request.mutations.clone())
+                    .collect();
+                if db.sequence() == sequence + group.len() as u64 {
+                    assert!(
+                        lookups
+                            .iter()
+                            .all(|lookup| matches!(lookup, glider::retry::Lookup::Retained(_))),
+                        "{context}"
+                    );
                 } else {
                     assert_eq!(db.sequence(), sequence, "{context}");
+                    assert!(
+                        lookups
+                            .iter()
+                            .all(|lookup| *lookup == glider::retry::Lookup::Unknown),
+                        "{context}"
+                    );
+                    for result in db.apply_requests(group.clone()) {
+                        result.unwrap();
+                    }
                 }
+                apply(&mut acknowledged, &mutations);
+                // Retrying again publishes nothing.
+                let committed = db.sequence();
+                for result in db.apply_requests(group) {
+                    result.unwrap();
+                }
+                assert_eq!(db.sequence(), committed, "{context}");
             } else {
                 assert_eq!(db.sequence(), sequence, "{context}");
             }
             check(&db, &acknowledged, &context);
             // Maintenance resumes and reclaims after reopen without faults.
             db.seal_delta().unwrap();
+            while db.merge_postings().unwrap().is_some() {}
             while db.consolidate_runs_step().unwrap() {}
             if db.start_prune().unwrap() {
                 while db.prune_step().unwrap() {}
             }
             while db.reclaim_pack_step().unwrap() {}
             while db.cleanup_step(16).unwrap() > 0 {}
-            if convert && acknowledged.values().any(Option::is_some) {
+            if mode == Mode::Clustered && db.clustered_epoch().is_some() {
+                // Seals and merges continue on the recovered view.
+                let layout = db.clustered_layout().unwrap();
+                assert_eq!(layout.uncovered_packs, 0, "{context}: {layout:?}");
+                assert!(layout.max_small_extents <= 3, "{context}: {layout:?}");
+            } else if convert && acknowledged.values().any(Option::is_some) {
                 let epoch = db.clustered_epoch().unwrap_or(0);
                 assert_eq!(db.convert_clustered(conversion()).unwrap().epoch, epoch + 1);
                 while db.cleanup_step(16).unwrap() > 0 {}
@@ -324,7 +445,13 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, convert: boo
                 ));
             }
             check(&db, &acknowledged, &format!("{context}, after maintenance"));
+            let runs = db.run_count();
             drop(db);
+            // Cleanup removed every staged or replaced run manifest: one
+            // remains per run of the selected root.
+            let keys = store(&case).list().unwrap();
+            let manifests = keys.iter().filter(|key| key.starts_with("sgmanifest-"));
+            assert_eq!(manifests.count(), runs, "{context}: run manifests");
             if convert {
                 // Cleanup removed every staged orphan and replaced view.
                 let keys = store(&case).list().unwrap();
@@ -336,6 +463,34 @@ fn matrix<S: ObjectStore>(store: impl Fn(&str) -> S, stride: usize, convert: boo
             }
             let db = open(store(&case), &plan).unwrap();
             check(&db, &acknowledged, &format!("{context}, reopened"));
+            drop(db);
+            if mode == Mode::Clustered {
+                // A backup of the recovered namespace restores the same view.
+                let temp = tempfile::tempdir().unwrap();
+                let mut serving = SegmentedServing::open(
+                    store(&case),
+                    config(),
+                    SegmentedOptions::default(),
+                    SegmentedServingOptions {
+                        cache: None,
+                        ..SegmentedServingOptions::m21(temp.path().to_path_buf())
+                    },
+                )
+                .unwrap();
+                let destination = MemoryStore::default();
+                serving.backup_to(destination.clone()).unwrap();
+                serving.close().unwrap();
+                // The backup holds its root's run manifests.
+                let manifests = destination.list().unwrap();
+                let manifests = manifests
+                    .iter()
+                    .filter(|key| key.starts_with("sgmanifest-"));
+                assert_eq!(manifests.count(), runs, "{context}: backup manifests");
+                let restored = SegmentedDatabase::open(destination, config())
+                    .unwrap()
+                    .with_cluster_probes(usize::MAX);
+                check(&restored, &acknowledged, &format!("{context}, restored"));
+            }
         }
     }
 }
@@ -390,7 +545,7 @@ fn every_create_and_remove_failure_recovers_acknowledged_state() {
                 .clone()
         },
         stride(1),
-        false,
+        Mode::Plain,
     );
 }
 
@@ -410,7 +565,30 @@ fn every_conversion_create_and_remove_failure_recovers_acknowledged_state() {
                 .clone()
         },
         stride(1),
-        true,
+        Mode::Convert,
+    );
+}
+
+/// The clustered workload: every create and remove of a conversion, the
+/// clustered seals (packs, index, catalog, root), the merge rounds (packs,
+/// catalog, root) and cleanup fails before or after landing, and every
+/// remove is also delayed until the run ends. Recovery keeps acknowledged
+/// state, group outcomes are all-or-nothing and retryable, maintenance and
+/// merges resume, and a backup of the result restores it.
+#[test]
+fn every_clustered_seal_and_merge_failure_recovers_acknowledged_state() {
+    let stores = Mutex::new(BTreeMap::<String, MemoryStore>::new());
+    matrix(
+        |case| {
+            stores
+                .lock()
+                .unwrap()
+                .entry(case.into())
+                .or_default()
+                .clone()
+        },
+        stride(1),
+        Mode::Clustered,
     );
 }
 
@@ -439,6 +617,6 @@ fn minio_every_sampled_failure_recovers_acknowledged_state() {
             .unwrap()
         },
         stride(7),
-        false,
+        Mode::Plain,
     );
 }

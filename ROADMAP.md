@@ -911,8 +911,8 @@ Done when: the M21 envelope passes with at most 4 PUT/s and write p95 still
 
 ## M28 — Network service
 
-Status: implemented (`glider-server`, container image, Compose quickstart).
-The concurrent read execution decision still needs a throughput measurement.
+Status: done (`glider-server`, container image, Compose quickstart).
+Concurrent read execution was decided by measurement in M34.
 
 Steps:
 - Add a `glider-server` binary: HTTP/JSON API for collections, batched
@@ -930,7 +930,9 @@ clean checkout.
 
 ## M29 — Operations
 
-Status: in progress. Prometheus metrics are done; admin commands and drills remain.
+Status: done except structured logs. Prometheus metrics, `glider-admin`
+(status, backup, restore, convert) and `tools/drills.py` (kill, paused
+writer, cache loss, backup/restore, conversion) are in place.
 
 Steps:
 - Prometheus metrics (latency classes, queue depth, maintenance backlog,
@@ -963,11 +965,11 @@ the exact oracle, with unsupported queries rejected explicitly.
 
 ## M31 — One million vectors
 
-Status: blocked on M35 and M37. The 1,000,000-row envelope loads and serves
-within RAM, open, write and storage gates, but misses recall (0.894, the best
-possible 8 blocks hold 0.888) and warm query p95 (54.9 ms against 50 ms); see
-`benchmarks/M31.md`. Neighbors of a query spread across packs of independent
-seals, and queries queue behind each other on one executor.
+Status: every gate passes on MinIO with the clustered view (M37, 32 probes)
+except peak engine RSS (235.6 MiB against 192 MiB); see the clustered
+acceptance in `benchmarks/M37.md`. The per-seal layout missed recall (0.894)
+and warm query p95 (54.9 ms) because a query's neighbors spread across packs
+of independent seals (`benchmarks/M31.md`). Reducing RSS is post-1.0 work.
 
 Steps:
 - Declare the 1,000,000-row envelope before measuring: corpus (SIFT1M or a
@@ -993,7 +995,8 @@ later work can extend.
 
 ## M33 — Query results carry documents
 
-Status: in progress.
+Status: done. `include_metadata` and `include_vector` on `/v1/query` and
+`QueryOptions` in the library; server and engine tests cover each hit kind.
 
 Steps:
 - `/v1/query` and the library return each hit's metadata and, on request,
@@ -1005,12 +1008,12 @@ tail hits, and default responses are unchanged.
 
 ## M34 — Concurrent queries
 
-Status: in progress. Queries and document reads run on bounded reader threads
+Status: done. Queries and document reads run on bounded reader threads
 over immutable published views; read-your-writes, snapshot and pack-retention
-tests pass. In the in-memory 1M probe the query queue p95 fell from 39-47 ms
-to 2-7 ms, but four simultaneous queries share the CPU, so end-to-end p95
-stayed at 52-67 ms ([M31 probe](benchmarks/M31.md#concurrent-queries-m34)).
-Heavy maintenance still runs on the committer.
+tests pass. The M31 MinIO run after M33–M36 met warm p95 (45.9 ms, queue p95
+2.2 ms; `benchmarks/M31.md`), and the clustered runs measured 36.6 ms on
+MinIO and 29.4 ms on S3 (`benchmarks/M37.md`, `benchmarks/M39.md`). Heavy
+maintenance still runs on the committer; the gate did not require moving it.
 
 Steps:
 - Execute queries in parallel against an immutable published view (root,
@@ -1025,11 +1028,12 @@ and the M31 load meets warm p95 <=50 ms.
 
 ## M35 — Local SSD as a namespace cache
 
-Status: implemented, not yet measured. The NVMe cache held only blocks
-queries already read (45 MiB of 256 MiB at 1M), and the read budget charged
-cached blocks too. Cached candidates are now reranked under a separate local
-block limit (`GLIDER_LOCAL_BLOCKS`, default 24), idle warm-up fills the cache,
-and status/metrics report warm state; the warm 1M acceptance run remains.
+Status: done. Cached candidates are reranked under a separate local block
+limit (`GLIDER_LOCAL_BLOCKS`, default 24), idle warm-up fills the cache, and
+status/metrics report warm state. In the M31 MinIO run after M33–M36 warm-up
+completed (182.9 MiB), warm recall reached 1.000, every latency gate passed
+and cold-budget recall was unchanged (`benchmarks/M31.md`); the M39 S3 runs
+returned equal results after cache loss.
 
 Steps:
 - Charge the read budget only for remote reads; cached blocks are free.
@@ -1043,8 +1047,9 @@ cold behavior keeps the remote budget, and cache-loss tests still pass.
 
 ## M36 — Restarts without an operator
 
-Status: implemented. Local drills and MinIO takeover tests pass; not yet run
-on AWS S3.
+Status: done. Local drills and MinIO takeover tests pass; the M39 runs
+restarted and reopened 1,000,000-row namespaces on S3 Standard with no lost
+acknowledged writes.
 `glider-server` holds a renewed lease and takes over with permanent fence
 objects at the deposed writer's next log and root keys (`DESIGN.md`,
 "Segmented writer takeover"); `tools/drills.py` restarts a killed server
@@ -1063,11 +1068,13 @@ step, and fencing tests prove a stale writer cannot publish.
 
 ## M37 — Global clustered index
 
-Status: design in `docs/M37_CLUSTERED_INDEX.md`; stages 1-3 (formats,
-offline probe, explicit conversion and clustered queries) are implemented,
-and static cold recall after conversion is 0.994 / 0.970 mean at 250,000 /
-1,000,000 rows within 8 requests and 1 MiB (`benchmarks/M37.md`). Next:
-clustered seals (stage 4). Per-seal locality cannot
+Status: done. Stages 1-5 (formats, offline probe, explicit conversion,
+clustered queries, clustered seals and posting merges) are implemented, and
+the server converts automatically at `GLIDER_AUTO_CLUSTER_ROWS` and rebuilds
+the view as the collection grows. With 32 probes the 1,000,000-row MinIO
+acceptance measured 0.998 static and 0.963 update-wave mean recall@10 within
+8 requests and 1 MiB (`benchmarks/M37.md`); split/reassign (stage 6) was not
+needed. Design: `docs/M37_CLUSTERED_INDEX.md`. Per-seal locality cannot
 bound reads as data grows; Turbopuffer (SPFresh) and OpenData Vector (SPANN
 with LIRE) use global centroid partitions, and OpenData records rejecting
 per-segment indexes for this reason.
@@ -1097,9 +1104,13 @@ exact search, and unsupported expressions are rejected explicitly.
 
 ## M39 — In-region AWS acceptance
 
-Status: planned after M33–M37. Permissions are in place: the test runs on a
-tagged EC2 instance in `eu-central-1` with short-lived credentials, writes its
-results to the test prefix and terminates itself.
+Status: done; gaps recorded. `tools/aws_acceptance.py` runs on a tagged EC2
+instance in `eu-central-1` that terminates itself. On a c7g.2xlarge with the
+clustered view, recall, durability and query latency meet the M31 gates
+(warm p95 29.4 ms, cold p95 57.1 ms); open/reopen (4.87 / 13.36 s), write
+p95 (173.0 ms) and peak RSS (256.7 MiB) do not (`benchmarks/M39.md`). Root
+v5 run manifests then cut bytes per root publication from 2.25 MB to 253 KB
+in the update-wave replay (not yet measured on S3).
 
 Steps:
 - Run the M31 envelope against S3 Standard, record instance type and prices,
@@ -1107,6 +1118,25 @@ Steps:
 
 Done when: latency, request and cost gates are measured in-region, or the
 remaining provider gap is recorded.
+
+## After 1.0
+
+Glider 1.0 is the M25–M39 single node. The next milestones address its
+recorded gaps; each needs declared gates before measurement.
+
+- **Memory.** Bring peak RSS at 1,000,000 rows under the 192 MiB target:
+  resident routing state for canonical runs beside the postings, and
+  published snapshots for concurrent readers, are the measured suspects.
+- **Open time.** Opening reads many index and sketch objects, each a round
+  trip on S3; batch or persist them so open and reopen meet 2 s in-region.
+- **Read replicas and standby.** Read-only processes on the same prefix,
+  and a warm standby that takes over faster than lease expiry plus open.
+- **Query model.** M38: IN, ranges, OR/NOT and paging with metadata indexes,
+  exact filtered search within a declared budget.
+- **Oversized points.** Writes now reject points above one block. A
+  namespace that already holds one (from a pre-release binary) can be
+  repaired only by deleting or replacing the point before 64 log objects
+  accumulate; a tool to resolve a fully stuck tail is not built.
 
 ## Beyond a single service
 
