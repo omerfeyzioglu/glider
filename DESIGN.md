@@ -1575,9 +1575,9 @@ also erase the only remaining state without a detectable gap. Detecting such ext
 additional integrity protocol. Memory use and recovery time grow with the dataset
 and mutation history; there is no bounded-resource guarantee.
 
-Independently searchable persisted ANN partitions, metadata indexes, automatic
-exact-versus-IVF planning, sharding, replication, distributed consensus,
-multi-node execution, quantization, networking, SQL compatibility,
-authentication/authorization, production hardening, and GPU execution are outside
-the current implementation. These are not permanent restrictions; additions
+Metadata indexes beyond the declared resident predicate and routed keys,
+automatic exact-versus-IVF planning, sharding, replication, read replicas,
+distributed consensus, multi-node execution, quantization beyond the routing
+sketches, SQL compatibility, authorization beyond one static bearer token, TLS
+and GPU execution are outside the current implementation. These are not permanent restrictions; additions
 require justified design decisions and must preserve the invariants above.

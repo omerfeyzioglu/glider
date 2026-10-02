@@ -2,19 +2,91 @@
 
 # Glider
 
-Glider is an object-storage-native vector database and search engine written in Rust.
-It provides durable single-writer storage, exact search and metadata filtering,
-bounded concurrent admission, recovery, and backup/restore. IVF-Flat is an
-optional experimental search path; supported serving defaults to exact search.
+[![CI](https://github.com/omerfeyzioglu/glider/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/omerfeyzioglu/glider/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Authoritative data uses versioned logs and snapshots. In-memory state and derived
-indexes are rebuildable; performance changes must preserve durability and recovery.
-Collections larger than RAM are served from S3 through bounded RAM and NVMe
-caches; the 250,000-vector envelope is accepted (see `benchmarks/M24.md`).
+Glider is a single-node vector database that keeps all of its data in S3 (or
+any S3-compatible object store) and uses local RAM and SSD only as
+disposable caches. One `glider-server` process serves one collection over a
+small HTTP/JSON API: writes are acknowledged only once they are durable in
+object storage, a crashed or replaced server is taken over automatically
+without losing acknowledged writes, and approximate nearest-neighbor queries
+read a bounded amount of data per query. It is written in Rust and is meant
+for applications that want vector search with object-storage durability
+and cost on one machine, without operating a replicated cluster.
 
-## Quickstart: HTTP server
+## Key features
 
-`glider-server` serves one collection. Try it on a local directory:
+- **Durable on S3.** Every acknowledged write is part of an immutable log
+  object published with a conditional create; nothing is overwritten in
+  place, and local disks never hold the only copy.
+- **Crash-safe takeover.** A restarted server waits out the old writer's
+  lease, fences it at the object store and replays the log tail; a paused
+  former owner can never commit again. No operator step after a crash.
+- **Clustered ANN with automatic clustering.** Vectors are grouped into a
+  global clustered view (centroids and cluster-contiguous postings) that the
+  server builds by itself at 250,000 rows and rebuilds as the collection
+  grows. Unfiltered queries read at most 8 remote ranges and 1 MiB.
+- **SSD cache.** A local block cache is filled in the background so warm
+  queries need no remote reads; losing it only slows queries.
+- **Filters.** Equality filters on string metadata; one declared predicate
+  is answered exactly, and up to four declared keys steer routing.
+- **Metadata in results.** Queries can return each hit's metadata and
+  vector.
+- **Safe retries.** Every write carries a request ID; resending it returns
+  the original outcome instead of applying the write twice.
+- **Operations.** HTTP API, Docker image and Compose quickstart, Prometheus
+  metrics, `glider-admin` for status, backup, restore and clustering.
+
+## Status
+
+Glider 1.0 is a single-node, single-writer database. Its scope:
+
+- one collection per server process, stored under one object-store prefix
+  (run several processes on separate prefixes for several collections);
+- upsert, delete, get and k-NN query (squared Euclidean, Manhattan or
+  cosine) with equality filters, over HTTP or as a Rust library;
+- validated up to 1,000,000 128-dimensional vectors on MinIO and on AWS S3
+  ([performance](#performance)).
+
+Known limitations:
+
+- No replication, sharding, read replicas or standby; availability during a
+  restart depends on the lease (default 10 s) and the open time.
+- Filters are equality conjunctions only. Only the declared resident
+  predicate is exact; other filters are applied to the routed blocks and
+  may return fewer than `k` results.
+- Peak memory at 1,000,000 vectors (235.6 MiB on MinIO, 256.7 MiB on AWS)
+  is above the 192 MiB target.
+- Opening a large collection on S3 takes seconds (4.87 s, and 13.36 s for
+  a reopen, at 1,000,000 vectors), and S3 write p95 follows conditional-PUT
+  latency (173 ms at 1,000,000 vectors).
+- The dimension, metric, resident filter and routed keys are fixed when a
+  collection is created.
+- Plain HTTP with an optional static bearer token; terminate TLS in a
+  reverse proxy.
+- A point larger than the 120 KiB block limit (for example, huge metadata)
+  is accepted but cannot be sealed, which eventually stops all writes
+  ([known issue](docs/API.md#known-issues)).
+- No built-in scheduled backups; use S3 Versioning and `glider-admin backup`.
+
+## Quickstart
+
+### Docker Compose (with MinIO)
+
+```sh
+docker compose up --build
+```
+
+This starts MinIO, creates the `glider` bucket and serves collection `demo`
+(3 dimensions, resident filter `color=red`) on `localhost:8080`.
+`docker compose down -v` removes the containers and data. The image
+(`Dockerfile`) runs `glider-server` as a non-root user and is configured
+with the [environment variables](#configuration) below.
+
+### From source
+
+Requires Rust 1.98.1 (the version CI uses).
 
 ```sh
 cargo build --release --features server --bin glider-server
@@ -22,444 +94,278 @@ GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
   target/release/glider-server
 ```
 
+`GLIDER_DATA_DIR` stores the collection in a local directory, which is
+convenient for development. For S3, set `GLIDER_S3_BUCKET`,
+`GLIDER_S3_NAMESPACE` and AWS credentials instead:
+
 ```sh
+GLIDER_S3_BUCKET=my-bucket GLIDER_S3_NAMESPACE=collections/demo \
+GLIDER_S3_REGION=eu-central-1 GLIDER_DIMENSIONS=3 \
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+  target/release/glider-server
+```
+
+### First requests
+
+```sh
+# Insert two points (one atomic batch).
 curl -XPOST localhost:8080/v1/write -H 'content-type: application/json' \
   -d '{"upsert":[{"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},{"id":2,"vector":[1,1,1]}]}'
+# {"conflict":null,"request_id":{"boundary":1,"nonce":"..."},"sequence":2}
+
+# Two nearest neighbors, with metadata.
 curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
-  -d '{"vector":[1,1,0.9],"k":2}'
+  -d '{"vector":[1,1,0.9],"k":2,"include_metadata":true}'
+# {"results":[{"distance":0.01000000476837215,"id":2,"metadata":{}},
+#             {"distance":2.8099999570846563,"id":1,"metadata":{"color":"red"}}],"sequence":2}
+
+# Exact filtered query on the declared resident filter.
 curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
   -d '{"vector":[0,0,0],"k":5,"filter":{"color":"red"}}'
+# {"results":[{"distance":0.0,"id":1}],"sequence":2}
+
+# Read one point; then check status.
 curl localhost:8080/v1/points/1
+curl localhost:8080/v1/status
 ```
 
-Or run the server with a local MinIO in containers:
+## Configuration
 
-```sh
-docker compose up --build
-```
+`glider-server` and `glider-admin` read these environment variables (see
+`ServerConfig::from_env` in `src/server/config.rs`). Empty values count as
+unset; an invalid value stops the server with an error.
 
-This starts MinIO, creates the `glider` bucket and serves collection `demo`
-(3 dimensions, resident filter `color=red`) on `localhost:8080`; the curl
-commands above work unchanged. `docker compose down -v` removes the data.
-The image (`Dockerfile`) runs `glider-server` as a non-root user and reads
-the same environment variables.
+| Variable | Default | Meaning |
+|---|---|---|
+| `GLIDER_DIMENSIONS` | required | Vector dimension. Fixed at creation. |
+| `GLIDER_METRIC` | `squared_euclidean` | `squared_euclidean`, `manhattan` or `cosine`. Fixed at creation. |
+| `GLIDER_RESIDENT_FILTER` | unset | One `key=value` equality predicate answered exactly from vectors kept in memory. Fixed at creation. |
+| `GLIDER_ROUTED_KEYS` | unset | Up to four comma-separated metadata keys whose values restrict query routing (sorted and deduplicated). Fixed at creation. |
+| `GLIDER_DATA_DIR` | unset | Store the collection in this local directory; when set, the S3 variables are ignored. |
+| `GLIDER_S3_BUCKET` | required without `GLIDER_DATA_DIR` | Bucket name. |
+| `GLIDER_S3_NAMESPACE` | required without `GLIDER_DATA_DIR` | Key prefix owned by this collection. Use one prefix per collection and never overlap prefixes. |
+| `GLIDER_S3_REGION` | `us-east-1` | Bucket region. |
+| `GLIDER_S3_ENDPOINT` | unset | Endpoint for S3-compatible stores such as MinIO; an `http://` endpoint enables plain HTTP. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | unset | Credentials, read by the `object_store` S3 client (`AmazonS3Builder::from_env`). |
+| `GLIDER_LISTEN` | `127.0.0.1:8080` | Listen address (`0.0.0.0:8080` in the Docker image). |
+| `GLIDER_API_TOKEN` | unset | If set, required as `Authorization: Bearer <token>` on every endpoint except `/healthz` and `/metrics`. |
+| `GLIDER_LEASE_SECONDS` | `10` | Writer lease duration (fractions allowed). After a crash, the next start waits at most this long before taking over. |
+| `GLIDER_CACHE_DIR` | `glider-cache` | Local block cache directory, relative to the working directory (`/var/lib/glider/cache` in the Docker image). Any local disk works: instance-store NVMe, EBS or a container volume. |
+| `GLIDER_CACHE_BYTES` | `268435456` (256 MiB) | Local cache limit. While idle the server copies the collection into the cache up to this limit; set it above `cache.namespace_bytes` from `/v1/status` to keep everything local. |
+| `GLIDER_LOCAL_BLOCKS` | `24` | Cached blocks a query may rerank in addition to its remote budget. `0` makes results independent of the cache contents. |
+| `GLIDER_AUTO_CLUSTER_ROWS` | `250000` | Live sealed rows at which a collection without a clustered view is converted to one in the background. `0` disables. |
+| `GLIDER_AUTO_RECLUSTER_FACTOR` | `4` | Rebuild the clustered view with more clusters once the collection holds more than this factor times the rows it was sized for (about 4,000 per cluster). `0` disables. |
 
-For S3 or MinIO, replace `GLIDER_DATA_DIR` with `GLIDER_S3_BUCKET`,
-`GLIDER_S3_NAMESPACE`, optional `GLIDER_S3_REGION`/`GLIDER_S3_ENDPOINT` and the
-`AWS_*` credentials. Other settings: `GLIDER_LISTEN` (default
-`127.0.0.1:8080`), `GLIDER_METRIC`, `GLIDER_API_TOKEN` (bearer auth),
-`GLIDER_LEASE_SECONDS` (writer lease, default 10), `GLIDER_ROUTED_KEYS` (up to four sorted, unique, nonempty comma-separated
-equality-filter keys, fixed at namespace creation), and the local cache:
+The server uses the 1,000,000-row serving profile
+(`SegmentedServingOptions::m31`): per query 12 candidate blocks, 8 remote
+range requests and 1 MiB, 32 cluster probes, 8 routing threads; at most 4
+concurrent queries; an admission queue of 8 commands and 320 KiB. These are
+not configurable through the environment.
 
-- `GLIDER_CACHE_DIR` (default `glider-cache`) and `GLIDER_CACHE_BYTES`
-  (default 256 MiB): a disposable block cache on any local disk
-  (instance-store NVMe, EBS or a container volume). While idle the server
-  copies the namespace into it, without exceeding the limit. Set the limit
-  above `cache.namespace_bytes` from `/v1/status` to keep the whole namespace
-  local.
-- `GLIDER_AUTO_CLUSTER_ROWS` (default 250,000; `0` disables): when the
-  namespace has no clustered view and its sealed data holds this many live
-  rows, the server builds the M37 clustered view itself as idle maintenance
-  (see Operations). Writes and queries continue meanwhile; queries switch to
-  the view when it is published. The default is where per-seal routing
-  reaches its recall gate (`benchmarks/M37.md`, `DESIGN.md`).
-- `GLIDER_AUTO_RECLUSTER_FACTOR` (default 4; `0` disables): once the
-  namespace holds more than this factor times the rows its clustered view
-  was sized for (4,000 per cluster), the server rebuilds the view with more
-  clusters the same way; the old view serves until the new one is
-  published.
-- `GLIDER_LOCAL_BLOCKS` (default 24): cached blocks a query may rerank
-  locally in addition to its remote budget (12 candidates, 8 range requests,
-  1 MiB), which is charged only for uncached blocks. A warm cache therefore
-  raises recall and avoids remote reads; with an empty or lost cache queries
-  use the remote budget alone. `0` makes results independent of cache
-  contents. The cache is never needed for correctness.
-
-API (JSON except `/metrics`):
+## HTTP API
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/write` | Atomic batch `{"upsert":[…],"delete":[ids],"request_id":{…}?}`; returns `sequence` and the `request_id` to retry with |
-| `POST /v1/query` | `{"vector":[…],"k":10,"filter":{…}?,"include_metadata":false,"include_vector":false}`; either optional flag adds that field to each hit. Unfiltered queries are approximate within a fixed read budget, the declared `GLIDER_RESIDENT_FILTER` is exact, keys in `GLIDER_ROUTED_KEYS` restrict sketch routing, and other equality predicates are checked during reranking (approximate, may return fewer than k) |
-| `GET /v1/points/{id}` | Current vector and metadata, or 404 |
-| `GET /v1/requests/{boundary}/{nonce}` | Resolve an uncertain write by its request ID |
-| `GET /v1/status`, `GET /healthz` | Sequence, queue state, cache warm-up (`cache.state`: `disabled`, `cold`, `warming`, `warm` or `partial`, with cached and namespace bytes) and clustered view (`clustering.state`: `none`, `converting` with `progress` phase, pass/source counters and the epoch being built, or `clustered` with its `epoch` and `centroids`); liveness |
-| `GET /metrics` | Prometheus text metrics for requests, admission, maintenance, cache and sketches; no bearer token required |
+| [`POST /v1/write`](docs/API.md#post-v1write) | Atomic batch `{"upsert":[...],"delete":[...],"request_id":{...}}` (up to 100 operations); returns `sequence` and `request_id` |
+| [`POST /v1/query`](docs/API.md#post-v1query) | `{"vector":[...],"k":10,"filter":{...},"include_metadata":false,"include_vector":false}` |
+| [`GET /v1/points/{id}`](docs/API.md#get-v1pointsid) | Current vector and metadata, or `404` |
+| [`GET /v1/requests/{boundary}/{nonce}`](docs/API.md#get-v1requestsboundarynonce) | Resolve a write whose response was lost |
+| [`GET /v1/status`](docs/API.md#get-v1status) | Sequence, queue, cache warm-up and clustering state |
+| [`GET /healthz`](docs/API.md#get-healthz) | Liveness (no auth) |
+| [`GET /metrics`](docs/API.md#get-metrics) | Prometheus metrics (no auth) |
 
-A write is acknowledged only after durable publication; resend an uncertain
-write with the same `request_id` to get its original outcome. SIGINT/SIGTERM
-drains queued work and releases the writer lease. After a crash or kill, just
-start the server again on the same prefix: it waits out the dead process's
-lease (at most `GLIDER_LEASE_SECONDS`), then takes over and fences the old
-writer at the object store, so a paused old process can never commit again
-(see [recovery](docs/RECOVERY.md)).
+Errors are JSON `{"error": "..."}` with `400` for invalid input, `401`,
+`404`, `409` for request-ID misuse, `429` when the queue is full (retry),
+`500` for corruption and `503` when storage or the worker is unavailable.
+See the [API reference](docs/API.md) for schemas, limits and retry rules.
+
+A Python client needs nothing beyond `requests`:
+
+```python
+import requests, secrets
+
+base = "http://localhost:8080"
+# A client-chosen request ID makes the write safe to resend after a timeout.
+boundary = requests.get(f"{base}/v1/status").json()["sequence"]
+write = {
+    "upsert": [{"id": 10, "vector": [0.5, 0.5, 0.5], "metadata": {"color": "red"}}],
+    "request_id": {"boundary": boundary, "nonce": secrets.token_hex(16)},
+}
+print(requests.post(f"{base}/v1/write", json=write).json())
+
+hits = requests.post(f"{base}/v1/query", json={
+    "vector": [0.4, 0.5, 0.5], "k": 3, "filter": {"color": "red"},
+    "include_metadata": True,
+}).json()["results"]
+for hit in hits:
+    print(hit["id"], hit["distance"], hit["metadata"])
+```
 
 ## Operations
 
-`glider-admin` uses the server's `GLIDER_*` storage, collection and cache
-settings. Stop the server before running `status`, `backup` or `convert` against its
-namespace: each command acquires the writer lease and takes the collection
-over like a server start, so while a server renews the lease it waits one
-lease duration and then fails with a lease error. Each command prints one JSON object. Backup destinations must be
-empty and separate from the source. Local paths and `s3://bucket/prefix`
-locations are accepted; S3 uses the configured region, endpoint and AWS
-credentials.
+- **Status and health.** `GET /v1/status` reports the committed sequence,
+  queue state, cache warm-up (`cache.state`) and clustering
+  (`clustering.state`: `none`, `converting` with progress, or `clustered`).
+  `GET /metrics` exposes request counts and latency histograms per
+  endpoint, queue depth, maintenance, cache and conversion metrics
+  ([list](docs/API.md#get-metrics)).
+- **Shutdown and recovery.** SIGINT/SIGTERM drains queued work and releases
+  the lease. After a crash or kill, start the server again on the same
+  prefix with the same collection settings: it waits at most
+  `GLIDER_LEASE_SECONDS`, fences the old writer and serves every
+  acknowledged write. Resolve writes whose response was lost by request ID.
+  See [RECOVERY.md](docs/RECOVERY.md).
+- **Clustering.** The server converts a collection to the clustered view at
+  `GLIDER_AUTO_CLUSTER_ROWS` and rebuilds it after
+  `GLIDER_AUTO_RECLUSTER_FACTOR`-fold growth, in the background; writes
+  and queries continue, queries use the previous layout until the new one
+  is published, and a crash during a conversion loses nothing (the next
+  start begins a new one and removes the interrupted one's objects). New
+  writes are assigned to the view's clusters as they are sealed.
+- **`glider-admin`** uses the same environment variables. Stop the server
+  first: each command acquires the writer lease like a server start, and
+  fails with a lease error while a server holds it. Each prints one JSON
+  object.
 
-```sh
-cargo build --release --features server --bin glider-admin
-GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
+  ```sh
+  cargo build --release --features server --bin glider-admin
+  export GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red
   target/release/glider-admin status
-GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
-  target/release/glider-admin backup ./backup
-GLIDER_DATA_DIR=./restored GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
-  target/release/glider-admin restore ./backup
-python3 tools/drills.py --seed 29
+  target/release/glider-admin backup ./backup          # or s3://bucket/prefix
+  GLIDER_DATA_DIR=./restored target/release/glider-admin restore ./backup
+  target/release/glider-admin convert                  # build or rebuild the clustered view now
+  ```
+
+  `backup` writes a consistent, validated copy to an empty location that
+  does not overlap the source; `s3://bucket/prefix` locations use the
+  configured region, endpoint and credentials. `restore` copies a backup into an empty
+  destination and validates it; the first server start there takes it over.
+  Never reuse a failed destination. A crash needs no restore.
+  `convert [CENTROIDS]` seals the log tail and builds the clustered view now
+  (about 4,000 rows per cluster by default); it also repairs a missing or
+  corrupt view.
+- **Protecting against mistakes.** Enable S3 Versioning on the bucket with
+  a lifecycle rule that expires noncurrent versions after your retention
+  window and aborts incomplete multipart uploads. Glider never overwrites
+  an object, so versioning only retains the objects that cleanup deletes.
+  To recover, copy the object versions current at the chosen time into a
+  fresh prefix and check it with `glider-admin status` before serving it.
+- **Drills.** `python3 tools/drills.py --seed 29` builds release binaries and
+  checks kill-and-restart, paused-writer fencing, cache loss, backup and
+  restore, and conversion on a local directory, reporting PASS/FAIL.
+
+The [serving guide](docs/SERVING.md) has further procedures.
+
+## Performance
+
+Measured at 1,000,000 vectors of SIFT1M (128 dimensions, squared Euclidean,
+k=10, 200 queries) under the M31 workload: load in 100-row batches, then
+300 s of four writers each overwriting 100 rows per second and four readers
+each querying every 100 ms, then restart, cache-loss and backup checks. Both
+runs use the clustered view (explicit conversion, 32 probes); they predate
+automatic clustering and root manifests.
+
+| Measure | MinIO, Apple M4 ([M37](benchmarks/M37.md#1m-minio-acceptance-on-the-clustered-view), `a636045`) | AWS S3 Standard, c7g.2xlarge ([M39](benchmarks/M39.md#clustered-view-on-an-8-vcpu-instance), `af7fb0e`) | Target |
+|---|---:|---:|---:|
+| Static recall@10 (mean / p5) | 0.998 / 1.0 | 0.998 / 1.0 | >=0.90 / >=0.80 |
+| Recall@10 after updates, cold (mean / p5) | 0.963 / 0.8 | 0.966 / 0.8 | >=0.90 / >=0.80 |
+| Warm unfiltered query p95 | 36.6 ms | 29.4 ms | <=50 ms |
+| Cold unfiltered query p95 | 33.7 ms | 57.1 ms | <=200 ms |
+| Write p95 | 33.0 ms | 173.0 ms | <=150 ms |
+| Open / reopen | 1.43 / 1.73 s | 4.87 / 13.36 s | <=2 s |
+| Peak engine RSS | 235.6 MiB | 256.7 MiB | <=192 MiB |
+
+MinIO ran on loopback on an Apple M4 (10 cores, 16 GiB). The AWS run used a
+c7g.2xlarge (8 Graviton3 vCPU, 16 GiB) in eu-central-1 against S3 Standard;
+its filtered (resident 1%) query p95 was 9.8 ms, and it lost no
+acknowledged writes and returned equal results after cache loss and backup
+restore. Datasets, seeds, raw
+results and the remaining measurements are in [BENCHMARKS.md](BENCHMARKS.md)
+and [benchmarks/](benchmarks/SUMMARY.md).
+
+## Architecture
+
+```text
+clients ── HTTP/JSON ──> glider-server (axum)
+                              │  bounded admission queue
+               ┌──────────────┴───────────────┐
+        single committer                reader threads
+   writes, seals, merges,           queries and point reads on
+   conversion, cleanup, warm-up     immutable published views
+               │                               │
+               ▼                               ▼
+   object store (authoritative)      RAM: ID directory, routing sketches,
+   logs, packs, run indexes,              unsealed log tail
+   run manifests, roots,             SSD: disposable block cache
+   centroids, catalogs
 ```
 
-The server converts a namespace to the clustered view automatically at
-`GLIDER_AUTO_CLUSTER_ROWS`; watch `clustering` in `/v1/status`. A crash or
-restart during the conversion loses nothing: the previous layout keeps
-serving and the next start begins a new conversion and removes the
-interrupted one's objects. The view's cluster count is fixed when it is
-built (about 4,000 rows per cluster); after the collection grows past
-`GLIDER_AUTO_RECLUSTER_FACTOR` times that size the server rebuilds it as a
-new epoch, and `convert` rebuilds it on demand.
+- A write batch becomes one immutable log object, created conditionally,
+  before it is acknowledged.
+- Idle maintenance seals the log tail into immutable packs of vector-local
+  blocks with compact five-bit sketches, and publishes each new state as a
+  root generation that references per-run manifests.
+- The clustered view assigns rows to centroids so a query reads only the
+  nearest clusters' blocks; new seals keep it clustered and small extents
+  are merged in the background.
+- Takeover uses a renewed lease to pace restarts and permanent fence objects
+  so that a deposed writer's next publication fails at the store.
 
-`convert [CENTROIDS]` seals the log tail of the stopped namespace, builds the
-M37 clustered view from its sealed rows (or rebuilds it as a new epoch,
-which also repairs a missing or corrupt view) and publishes it with one
-root; the server then
-answers selective queries from cluster postings
-([design](docs/M37_CLUSTERED_INDEX.md)). Without CENTROIDS the count targets
-about 4,000 live rows per cluster. Later seals assign new writes to the
-view's clusters, and idle maintenance merges each cluster's small extents,
-so the namespace stays clustered under writes.
+[DESIGN.md](DESIGN.md) states the formats, invariants, and crash and
+recovery semantics in full.
 
-For protection against operator or application mistakes, enable S3
-Versioning on the bucket with a lifecycle rule that expires noncurrent
-versions after your retention window (and aborts incomplete multipart
-uploads) rather than relying on a backup feature in glider, which has none
-that runs automatically. glider never overwrites an object, so versioning
-only retains the objects cleanup deletes, for the retention period (they
-are billed until then). To recover, copy the object versions that were
-current at the chosen time into a fresh, empty prefix and check it with
-`glider-admin status` before serving it. `backup` remains the validated,
-consistent copy for moving or archiving a namespace.
+## Library
 
-`restore` copies a backup or stopped namespace into a fresh empty destination
-and validates it; the first server start there takes it over. Never reuse a
-failed destination. A crash needs no restore. The local drill builds release
-binaries offline, kills the server during writes and restarts it on the same
-directory, freezes a server while a second one takes over and checks the
-resumed one cannot write, tests cache loss, then backs up and restores the
-acknowledged state, converts the restored copy and serves it; it reports
-PASS/FAIL with its seed.
+The crate can also be used directly from Rust, including the resident
+in-memory `Database` engine and the segmented engine behind the server. See
+the [library guide](docs/LIBRARY.md).
 
-- [Design](DESIGN.md): current architecture, guarantees and target direction.
-- [Roadmap](ROADMAP.md): milestone status, acceptance criteria and next work.
-- [Serving guide](docs/SERVING.md): validated workloads and operating procedures.
-- [Benchmarks](BENCHMARKS.md): reproducible measurements and their limits.
+## Development
 
-## S3-compatible backend (M2)
-
-Enable the `s3` Cargo feature. Provision a bucket and give one database exclusive
-ownership of a namespace prefix. Use nonoverlapping prefixes. Configure credentials through the client builder
-or standard AWS environment variables; do not place credentials in source files.
-The backend requires strongly consistent GET/LIST and conditional PUT support.
-
-For a deployed single writer, use `ownership::OwnedDatabase::open` in place of
-`Database::open`, then call `close()` on graceful shutdown. A process exit leaves
-an owner claim; the next writer receives a busy error. Inspect it with
-`ownership::claims(&store)`. Clear an exact stale key only after proving the old
-process is stopped and its outstanding requests have quiesced. An enrolled
-namespace rejects raw `Database::open`; stop all legacy writers before first
-enrolling an existing namespace. After a crash or uncertain S3 write, use a
-fresh prefix as described in [the recovery procedure](docs/RECOVERY.md); a
-timed-out old request may still arrive after process exit. See `DESIGN.md` for
-the full guarantees.
-
-```rust,no_run
-use glider::{Config, Metric, ownership::OwnedDatabase, store::s3::{AmazonS3Builder, S3Store}};
-
-let builder = AmazonS3Builder::from_env()
-    .with_bucket_name("my-glider-bucket")
-    .with_region("us-east-1");
-// For MinIO, additionally set .with_endpoint("http://127.0.0.1:9000")
-// and .with_allow_http(true). Use HTTPS for remote deployments.
-let store = S3Store::open(builder, "vectors/example")?;
-let metrics = store.metrics();
-let mut db = OwnedDatabase::open(store, Config {
-    dimensions: 2, metric: Metric::SquaredEuclidean,
-})?;
-db.put(42, vec![1.0, 2.0])?;
-println!("{:?}", metrics.snapshot());
-db.close()?;
-# Ok::<(), glider::Error>(())
-```
-
-This API blocks. In a Tokio application, construct and use the database inside
-`tokio::task::spawn_blocking`; do not call it directly from an async task.
-After a mutation error, discard the database and open a fresh store/database to
-resolve the uncertain outcome. Creates use conditional native publication with
-no automatic retries. The local body/seal protocol is not used on S3.
-
-Run offline unit tests and real integration tests:
+Checks that CI runs:
 
 ```sh
-cargo test --locked --features s3
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --locked
+cargo test --all-features --locked
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 tools/benchmarks.py summary --check
+```
+
+Object-store integration tests run against a disposable, pinned MinIO
+container (requires Docker and Python 3):
+
+```sh
 python3 tools/test_s3.py
 ```
 
-The integration runner requires Docker and Python 3. It starts a pinned MinIO
-image on an ephemeral loopback port, creates a disposable bucket with generated
-test credentials, tests pagination and failure recovery, kills/restarts MinIO,
-and removes its container/data afterward. No existing buckets or credentials are
-used. Service-dependent Rust tests are explicitly ignored in ordinary test runs;
-the runner executes them, and CI invokes the runner.
+Local failure drills: `python3 tools/drills.py --seed 29`. Benchmarks and
+acceptance runs (`tools/m24_acceptance.py` on MinIO, `tools/aws_acceptance.py`
+on EC2 and S3) are described in [BENCHMARKS.md](BENCHMARKS.md). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
 
-MinIO runners bound commands to 10 minutes (Docker commands to 2 minutes),
-authenticated startup to 30 seconds, each failure diagnostic to 5 seconds and
-cleanup to 10 seconds. Timed-out commands and their child processes are killed;
-database requests are not retried. Stage durations and sanitized failure output
-are saved to `target/minio-diagnostics/events.jsonl` and retained by CI, whose
-outer job limit is 20 minutes. Cleanup failure cannot replace the original test
-failure; if Docker is unavailable, removal may require later manual cleanup of
-the named disposable container. These limits bound the test harness, not engine
-request latency or a provider's durability guarantee.
+## Documentation
 
-`S3Store::metrics()` returns a cloneable observer that remains available after the
-store is moved into `Database`. Snapshot differences count actual HTTP client
-attempts, including every list page, request-body bytes (with envelope overhead),
-HTTP error responses and HTTP client call errors (later response-body consumption
-errors are excluded from that counter). Credential requests using that client
-are included. These counters do not measure physical I/O; exact queries generate
-no object requests. MinIO recovery measurements are archived in
-[benchmarks/SUMMARY.md](benchmarks/SUMMARY.md); a cloud-provider latency baseline
-has not been established.
+| Document | Contents |
+|---|---|
+| [docs/API.md](docs/API.md) | HTTP API reference |
+| [docs/LIBRARY.md](docs/LIBRARY.md) | Rust library guide |
+| [docs/RECOVERY.md](docs/RECOVERY.md) | Crash, takeover and restore procedures |
+| [docs/SERVING.md](docs/SERVING.md) | Serving envelopes and operating procedures |
+| [DESIGN.md](DESIGN.md) | Architecture, formats and guarantees |
+| [docs/M37_CLUSTERED_INDEX.md](docs/M37_CLUSTERED_INDEX.md) | Clustered index design |
+| [ROADMAP.md](ROADMAP.md) | Milestones and next work |
+| [BENCHMARKS.md](BENCHMARKS.md), [benchmarks/SUMMARY.md](benchmarks/SUMMARY.md) | Measurements and how to reproduce them |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
+| [docs/EVOLUTION.md](docs/EVOLUTION.md) | History of major decisions |
 
-For the bounded real-provider handoff, see [the S3 pilot](docs/S3_PILOT.md).
-It has a disposable MinIO mode and an explicit AWS mode that checks an active
-Free account plan before writing. Routine CI uses only MinIO.
+## License
 
-## Atomic batch writes
-
-Use a batch to publish several ordered operations with one object-store PUT:
-
-```rust,ignore
-use glider::Mutation;
-use std::collections::BTreeMap;
-db.apply_batch(vec![
-    Mutation::Put {
-        id: 1,
-        vector: vec![1.0, 2.0],
-        metadata: BTreeMap::from([("team".into(), "red".into())]),
-    },
-    Mutation::Delete { id: 2 },
-])?;
-```
-
-A successful call acknowledges every operation together. Operations on the same
-ID run in order. Empty batches and invalid vectors are rejected before writing.
-If publication fails or its result is uncertain, reopen before writing again;
-recovery finds either the complete batch or none of it. The caller chooses a
-batch size that fits one request and memory. Single `put` and `delete` calls keep
-their existing behavior and log format.
-
-For safe retries after a lost acknowledgement, use `apply_request` with an
-unchanged request ID and optional document revision conditions. Its durable
-outcome survives restart, compaction and isolated takeover within a bounded
-128-commit window. See [the retry contract and example](docs/RETRIES.md).
-
-For concurrent callers, [bounded admission](docs/ADMISSION.md) provides one
-commit worker, count/byte limits, cancellation and explicit shutdown.
-
-## Recovery checkpoints (M3)
-
-Call `db.checkpoint()?` to persist the current live state as one immutable segment.
-Reopen loads the latest checkpoint plus newer mutations. Checkpoint errors require
-reopening before further writes, just like uncertain mutations. Logs and older
-checkpoints are retained until explicitly compacted. See [DESIGN.md](DESIGN.md) for
-publication semantics and [BENCHMARKS.md](BENCHMARKS.md) for recovery measurements.
-
-For datasets where one full snapshot object is too large, call
-`db.checkpoint_chunked(8 * 1024 * 1024)?` instead. The argument caps each encoded
-data chunk in bytes; choose a limit that fits at least one document and your
-object-store request budget. Recovery reads the versioned manifest and all its
-chunks. The full live map still resides in memory.
-New single-object snapshots use version 4 and chunked manifests use version 5
-to preserve retry metadata. Older binaries that do not support these versions
-refuse them; existing snapshot versions 1–3 remain readable.
-
-For read-only exact queries without retaining all base vectors in RAM, open a
-streaming reader after publishing a chunked snapshot:
-
-```rust,ignore
-use glider::{store::LocalStore, streaming::StreamingDatabase};
-let reader = StreamingDatabase::open(LocalStore::open(&path)?, config)?;
-let nearest = reader.search(&query, 10)?;
-```
-
-It includes newer mutations, supports exact metadata filtering and reads each
-base chunk on every search. This mode requires version 3 roots, keeps the
-mutation tail and manifest in memory, and is subject to the same exclusive
-namespace ownership rule. It is useful when base-vector RAM matters more than
-remote read latency.
-
-For a known selective equality, retain its matching rows during the validated
-open. The row budget prevents an unexpectedly broad filter from filling RAM:
-
-```rust,ignore
-let reader = StreamingDatabase::open_with_filter(
-    LocalStore::open(&path)?, config, "selected", "true", 64,
-)?;
-let nearest = reader.search_filtered(&query, 10, &[("selected", "true")])?;
-```
-
-That predicate uses resident matching rows plus newer mutations; other queries
-still scan chunks. The posting is rebuilt on every open and makes no durable
-writes. Exceeding the row budget returns an error; use ordinary streaming open
-for a broader filter.
-
-## Compaction (M4)
-
-Call `db.compact()?` to publish a full snapshot and reclaim covered mutations and
-older snapshots. It runs synchronously and preserves live values, deletes and
-sequence numbers. Reopen after a compaction error before writing again; calling
-compaction again finishes interrupted cleanup. Compaction is explicit, so choose
-its frequency based on measured maintenance and recovery costs.
-`db.compact_chunked(8 * 1024 * 1024)?` uses the same bounded-chunk format and
-reclaims obsolete chunks after publishing the new manifest. The byte limit is
-an example, not a measured default for every deployment.
-
-A compacted namespace requires an M4-capable binary. Compaction reclaims logical
-objects; S3 bucket versioning may retain historical versions and delete markers.
-See [DESIGN.md](DESIGN.md) for recovery semantics and [BENCHMARKS.md](BENCHMARKS.md)
-for footprint and amplification measurements.
-
-## Rebuildable IVF-Flat search
-
-`Config.metric` accepts `SquaredEuclidean`, `Manhattan`, or `Cosine`. Cosine
-requires nonzero vectors and queries; `get` returns a normalized vector for a
-cosine collection. Distance is `1 - dot(q, v)` after normalization.
-
-Exact `db.search(query, k)` remains available. To trade recall for fewer distance
-calculations, build the derived in-memory index after loading your data:
-
-```rust,ignore
-use glider::ivf::IvfConfig;
-db.build_ivf(IvfConfig { partitions: 16, iterations: 8, seed: 42 })?;
-let result = db.search_ivf(&query, 10, 4)?; // probe four nearest partitions
-println!("{:?}", result.neighbors);
-```
-
-These parameters are examples, not recommended settings for every dataset.
-Probing all partitions matches exact search; fewer probes can miss neighbors and
-return fewer than k results. Every successful put/delete invalidates the index;
-rebuild before the next IVF query. To save retraining across restarts, call
-`db.load_or_build_ivf(options)?` instead of `build_ivf`: the first call publishes
-an immutable index object, and subsequent opens load it for the same data version
-and options. Reopening alone does not load an index. Cache publication errors
-require reopening before further durable writes; exact search remains available.
-See [DESIGN.md](DESIGN.md) for training, validation and lifecycle semantics.
-
-Run the short comparison with `python3 tools/ann_benchmark.py --output target/ann`.
-See [BENCHMARKS.md](BENCHMARKS.md) and [the latest ANN comparison](benchmarks/ANN.md).
-
-## Metadata equality filtering
-
-Attach a complete string-to-string metadata map to each document. A normal
-`put` replaces any previous metadata with an empty map. Filter pairs are combined
-with AND; a missing key does not match. Empty filters behave like ordinary search.
-
-```rust,ignore
-use glider::ivf::IvfConfig;
-use std::collections::BTreeMap;
-let metadata = BTreeMap::from([("team".to_string(), "red".to_string())]);
-db.put_with_metadata(42, vec![1.0, 2.0], metadata)?;
-let exact = db.search_filtered(&[1.0, 2.0], 10, &[("team", "red")])?;
-db.build_ivf(IvfConfig { partitions: 16, iterations: 8, seed: 42 })?;
-let approximate = db.search_ivf_filtered(&[1.0, 2.0], 10, 4, &[("team", "red")])?;
-let filled = db.search_ivf_filtered_adaptive(&[1.0, 2.0], 10, 4, &[("team", "red")])?;
-```
-
-Full IVF probing matches filtered exact search. Partial probing can return fewer
-than k matches. Adaptive probing scans at least the requested four partitions,
-then expands until it finds k matches or exhausts the index. It reports the
-number of partitions probed. A full scan is exact; an early stop can still miss
-nearer matches. `search_filtered` always takes the exact path, even with a
-built IVF index. Choose an IVF method only when approximate answers are acceptable;
-there is no automatic planner. The [filtered quality results](benchmarks/FILTERING.md)
-show why sparse filters can make partial probing both incomplete and inaccurate.
-Metadata and vectors share the mutation and snapshot durability
-boundary; existing version 1 databases open with empty metadata.
-
-## Bounded single-machine serving
-
-For the initial 2,000-row, 64-dimension deployment, `SingleMachine` owns the
-namespace, enforces capacity, and completes due maintenance before a batch.
-Queries use exact mode; M12 did not justify enabling approximate serving.
-
-```rust
-use glider::{Config, Metric, Mutation, store::LocalStore};
-use glider::serving::{SingleMachine, ServingOptions, SearchMode};
-let config = Config { dimensions: 64, metric: Metric::SquaredEuclidean };
-let mut service = SingleMachine::open(
-    LocalStore::open("vectors")?, config, ServingOptions::m8())?;
-service.apply_batch(vec![Mutation::Put {
-    id: 1, vector: vec![0.; 64], metadata: Default::default(),
-}])?;
-let hits = service.query(&vec![0.; 64], 10, &[], SearchMode::Exact)?;
-let status = service.status();
-service.close()?;
-# Ok::<(), glider::Error>(())
-```
-
-The [M20 SIFT envelope](benchmarks/M20.md) additionally validates 5,000×128
-descriptors with four callers on local MinIO; configuration and scope are in
-[serving operations](docs/SERVING.md#larger-sift-descriptor-envelope).
-
-Use 100-operation batches for the measured M8 maintenance envelope. This
-serial library API has no HTTP listener or background scheduler. See
-[serving operations](docs/SERVING.md) for status, backup/restore, failure handling,
-and the 30-minute soak command. After uncertainty, follow the
-[fresh-prefix recovery procedure](docs/RECOVERY.md).
-
-## Segmented collections (library API)
-
-The HTTP server is built on this engine; the sections above describe the
-resident `Database` engine, which keeps every vector in RAM and suits small
-collections. The two use different namespace formats, and opening one with the
-other fails with an explicit error. With the `s3` feature for object storage,
-`SegmentedServing` keeps only a compact ID directory, persisted per-pack
-five-bit routing sketches and the unsealed log tail in memory. Vectors stay in
-immutable object-storage packs read through a bounded RAM/NVMe block cache.
-Unfiltered queries are approximate: they read a fixed number of routed blocks
-and rerank them exactly. The one equality predicate declared at namespace
-creation is answered exactly from full-precision vectors kept in the sketches;
-declared routed keys restrict candidate rows before block ranking; all filters are checked during reranking (approximate, possibly fewer than k results), and `search_exact` remains the oracle. Run it
-behind `admission::Service`, which executes seal, consolidation, reclamation
-and cleanup in bounded units while no command is queued, and runs up to
-`Limits::queries` queries in parallel on the latest acknowledged state.
-`SegmentedServing::open` takes the namespace over, fencing every earlier
-writer at the object store; hold a `lease::Lease` (as `glider-server` does)
-so a live writer is not deposed.
-
-```rust
-use glider::{admission::{Limits, Service, Shutdown}, Config, Metric};
-use glider::segmented::{SegmentedOptions, SegmentedServing, SegmentedServingOptions};
-let config = Config { dimensions: 128, metric: Metric::SquaredEuclidean };
-let declared = SegmentedOptions {
-    resident_filter: Some(("cohort".into(), "one-percent".into())),
-    routed_keys: vec!["half".into(), "pct".into()],
-};
-let engine = SegmentedServing::open(
-    store, config, declared, SegmentedServingOptions::m21("block-cache".into()))?;
-// Up to four queries run at once on reader threads beside the committer.
-let service = Service::start(engine, Limits { queries: 4, ..Limits::default() })?;
-let client = service.client();
-let hits = client.query(vec![0.; 128], 10, vec![])?.wait()?;
-service.shutdown(Shutdown::Drain)?;
-```
-
-The measured 250,000-row envelope, its gates and the reproduction command are
-in [benchmarks/M24.md](benchmarks/M24.md#single-machine-acceptance-protocol-declared-before-the-run).
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion in this
+project, as defined in the Apache-2.0 license, shall be dual licensed as
+above, without any additional terms or conditions.
