@@ -20,7 +20,7 @@ pub use recovery::stage_segmented_namespace;
 use crate::{
     admission::{self, Client, Service, Shutdown},
     lease::{Keeper, Lease},
-    segmented::SegmentedServing,
+    segmented::{SegmentedDatabase, SegmentedServing},
     Error,
 };
 use std::sync::Arc;
@@ -72,6 +72,40 @@ impl ServerConfig {
                 Err(error)
             }
         }
+    }
+
+    /// Like [`ServerConfig::with_engine`], but on the database itself: the
+    /// handle opens even when its clustered view is unavailable, so a
+    /// conversion can rebuild the view. Fails if the work leaves the handle
+    /// uncertain.
+    pub fn with_database<T>(
+        &self,
+        work: impl FnOnce(&mut SegmentedDatabase<Store>) -> crate::Result<T>,
+    ) -> crate::Result<T> {
+        const ATTEMPTS: usize = 4;
+        let keeper = self.acquire_lease(|| {})?;
+        let mut attempt = 1;
+        let opened = loop {
+            match SegmentedDatabase::take_over_with_options(
+                self.open_store()?,
+                self.collection,
+                self.options.clone(),
+            ) {
+                Err(Error::Exists(_)) if attempt < ATTEMPTS => attempt += 1,
+                other => break other,
+            }
+        };
+        let result = opened.and_then(|mut db| {
+            let value = work(&mut db)?;
+            if db.is_poisoned() {
+                return Err(Error::RecoveryRequired);
+            }
+            Ok(value)
+        });
+        let released = keeper.release();
+        let value = result?;
+        released?;
+        Ok(value)
     }
 
     fn acquire_lease(

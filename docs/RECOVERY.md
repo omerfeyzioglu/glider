@@ -32,7 +32,11 @@ SIGINT/SIGTERM releases the lease, so the next start does not wait.
 
 Restore is needed only to move data or after loss or corruption: a missing
 or corrupt selected root, index or pack, a log gap or invalid metadata fails
-open. Do not delete objects to make it open.
+open. Do not delete objects to make it open. A missing or corrupt derived
+clustered-view object (centroids, catalog or posting pack) does not need a
+restore: the server refuses to start (and queries reading a corrupt posting
+block fail), while `glider-admin convert` rebuilds the view from the
+canonical runs as a new epoch.
 `glider-admin backup <empty-destination>` creates a validated copy of the
 collection while no server holds the lease. With `GLIDER_DATA_DIR` (or
 `GLIDER_S3_NAMESPACE`) set to a fresh empty destination, `glider-admin restore

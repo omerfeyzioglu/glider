@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local release-build crash, paused-writer, cache-loss, and backup/restore drills."""
+"""Local release-build crash, paused-writer, cache-loss, backup/restore and conversion drills."""
 import argparse
 import http.client
 import json
@@ -240,6 +240,19 @@ def drill(seed):
             stop(process)
             process = None
             print(f"PASS backup/restore seed={seed}", flush=True)
+
+            stage = "convert"
+            result = admin(restored_env, "convert", 2)
+            assert result["summary"]["epoch"] == 1, result
+            assert result["summary"]["rows"] >= len(stable_ids), result
+            assert admin(restored_env, "status")["clustered_epoch"] == 1
+            process = start(restored_env, log)
+            verify(port, stable_ids)
+            hits = request(port, "POST", "/v1/query", {"vector": [0, 0, 0], "k": 64})
+            assert set(stable_ids) <= {item["id"] for item in hits["results"]}, hits
+            stop(process)
+            process = None
+            print(f"PASS convert seed={seed}", flush=True)
         except Exception as exc:
             log.flush()
             log.seek(0)
