@@ -121,9 +121,7 @@ Known limitations:
   reverse proxy.
 - A point must fit in one 120 KiB storage block (vector plus metadata, about
   122,000 bytes); larger points are rejected with `400`
-  ([limits](docs/API.md#post-v1write)). A namespace written by a binary that
-  accepted such a point cannot seal until that point is deleted or replaced,
-  and once 64 unsealed log objects accumulate it needs manual repair.
+  ([limits](docs/API.md#post-v1write)).
 - No built-in scheduled backups; use S3 Versioning and `glider-admin backup`.
 
 ## Configuration
@@ -281,10 +279,11 @@ Checks that CI runs:
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --locked
-cargo test --all-features --locked
+cargo test --release --locked
+cargo test --release --all-features --locked
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tools/benchmarks.py summary --check
+python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 ```
 
 Object-store integration tests run against a disposable, pinned MinIO
@@ -309,7 +308,7 @@ on EC2 and S3) are described in [BENCHMARKS.md](BENCHMARKS.md). See
 | [docs/SERVING.md](docs/SERVING.md) | Server operations and resident-library serving envelope |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime and AWS deployment diagrams |
 | [DESIGN.md](DESIGN.md) | Architecture, formats and guarantees |
-| [docs/M37_CLUSTERED_INDEX.md](docs/M37_CLUSTERED_INDEX.md) | Clustered index design |
+| [docs/CLUSTERED_INDEX.md](docs/CLUSTERED_INDEX.md) | Clustered index design |
 | [ROADMAP.md](ROADMAP.md) | Milestones and next work |
 | [BENCHMARKS.md](BENCHMARKS.md), [benchmarks/SUMMARY.md](benchmarks/SUMMARY.md) | Measurements and how to reproduce them |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |

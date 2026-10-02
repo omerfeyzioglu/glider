@@ -1,4 +1,4 @@
-# M37: global clustered index for the segmented engine
+# Clustered index for the segmented engine
 
 Status: stages 1-5 implemented: formats, the offline probe, explicit
 conversion (`convert_clustered`, `glider-admin convert`), clustered queries,

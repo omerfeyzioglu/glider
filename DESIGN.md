@@ -362,7 +362,7 @@ reads. Opening uses them for run indexes, the log tail and sketch frames.
 A root v4 (or a v5 with a `clustered` field) selects one immutable clustered view: a centroid object
 (`sgcentroid-*`, `GLCENT01`) and a catalog (`sgcluster-*`, `GLCLCAT1`), each
 bound by length and SHA-256 in the root, whose formats and validators are in
-`docs/M37_CLUSTERED_INDEX.md`. The catalog lists, per cluster, extents of
+`docs/CLUSTERED_INDEX.md`. The catalog lists, per cluster, extents of
 cluster-contiguous posting packs. Posting packs are ordinary `sgpack-*` packs
 of `GLB2` blocks whose partition is the cluster ID, each block holding one
 cluster's rows sorted by ID (at most 170 rows, 12 blocks per pack), with a

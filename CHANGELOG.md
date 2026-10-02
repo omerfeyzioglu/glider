@@ -73,9 +73,8 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
 - At 1,000,000 vectors, peak RSS exceeds the 192 MiB target, and open
   time and write p95 on S3 exceed their targets
   ([benchmarks/M39.md](benchmarks/M39.md)).
-- A point must fit in one 120 KiB storage block; a namespace that already
-  holds a larger point (written by a pre-release binary) cannot seal until
-  that point is deleted or replaced ([limits](docs/API.md#post-v1write)).
+- A point must fit in one 120 KiB storage block; larger points are rejected
+  with `400` ([limits](docs/API.md#post-v1write)).
 - No TLS; use a reverse proxy.
 
 [1.0.0]: https://github.com/omerfeyzioglu/glider/tree/main
