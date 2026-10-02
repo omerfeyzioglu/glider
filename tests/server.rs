@@ -368,7 +368,7 @@ fn every_error_response_is_json_with_an_unchanged_status() {
         })
     };
     let json = Some("application/json");
-    let cases: [(&str, &str, Option<&str>, Vec<u8>, u16); 10] = [
+    let cases = [
         ("POST", "/v1/write", json, b"{not json".to_vec(), 400),
         (
             "POST",
