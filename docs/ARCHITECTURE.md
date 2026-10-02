@@ -9,45 +9,44 @@ cache does not discard acknowledged writes.
 
 ![Glider runtime architecture](architecture/runtime.svg)
 
-The HTTP API sends requests through bounded admission. One committer handles
-writes and maintenance. Up to four reader threads serve queries and point
-reads against immutable published snapshots. A successful write is
-acknowledged after its complete mutation batch has been created conditionally
-as an immutable log object. Idle maintenance creates packs, indexes and
-manifests before publishing the root that names them.
+The diagram shows the main request paths; these steps explain the storage
+objects listed on its right:
 
-Search uses in-memory routing state to choose candidate blocks, reads cached
-blocks or bounded ranges from object storage, then scores full vectors for
-the final results. The unsealed log tail also participates in reads. Exact
-kNN remains the correctness reference for approximate search; a cold cache
-can change latency and approximate recall while leaving durability intact.
+- **Write:** bounded admission → single committer → conditional creation of
+  one complete mutation-log object → acknowledgement.
+- **Maintenance:** create immutable packs, indexes and manifests, then publish
+  the root generation that names them. Data objects precede the root.
+- **Read:** up to four reader threads use a published snapshot to route to
+  blocks, read bounded object-store ranges or cached blocks, and rerank full
+  vectors. The unsealed log tail also participates.
+- **Restart:** wait for the writer lease, publish permanent fences, select a
+  complete root and replay the contiguous newer log tail. An earlier writer
+  cannot publish after takeover.
 
-On restart, the server selects a complete root and replays the contiguous
-newer log tail. The segmented engine uses a lease and permanent fences so a
-previous writer cannot publish after takeover. See [DESIGN.md](../DESIGN.md)
-for format versions, publication order, failure cases and recovery rules.
+Exact kNN is the reference for approximate search. A cold cache can change
+latency and approximate recall, but not acknowledged state. See
+[DESIGN.md](../DESIGN.md) for format versions, publication and recovery rules.
 
 ## AWS deployment pattern
 
 ![Glider AWS deployment pattern](architecture/aws.svg)
 
-This diagram is one deployment pattern for the existing single-node server,
-not infrastructure shipped by this repository. An Application Load Balancer
-terminates HTTPS in public subnets. A private-subnet EC2 instance runs one
-`glider-server` process for one collection; an S3 gateway endpoint gives it
-access to the bucket. Give each process a distinct S3 namespace prefix. S3
-stores mutation logs, vector data, root generations and writer ownership
-objects. An EBS volume holds only a disposable block cache. The operator
-must provision the VPC, load balancer, compute host, endpoint, bucket,
-credentials and monitoring. This is still one active server, not a
-multi-node availability design.
+This is a deployment pattern for the existing single-node server, not
+infrastructure shipped by the repository. An Application Load Balancer
+terminates HTTPS; one private-subnet EC2 instance runs one `glider-server`
+process for one collection. An S3 gateway endpoint connects it to the bucket,
+where logs, packs, roots and writer ownership objects are durable. EBS holds
+only a disposable cache. Give each collection a distinct S3 namespace prefix.
 
-The server speaks HTTP; configure authentication and terminate HTTPS at the
-edge before exposing it to clients. The repository does not currently ship
-an AWS deployment template or a published prebuilt image. The
-[README quickstart](../README.md#quickstart) is a local Compose demo, while
-the [configuration guide](../README.md#configuration) describes the S3
-environment variables.
+Provision the VPC, load balancer, compute host, endpoint, bucket, credentials,
+monitoring and backups. Configure bearer-token authentication and TLS at the
+edge before exposing the service. Monitor [`/healthz`](API.md#get-healthz),
+[`/metrics`](API.md#get-metrics) and [`/v1/status`](API.md#get-v1status);
+the [serving guide](SERVING.md) covers backup and recovery. There is one active
+server and no built-in standby. The repository does not ship an AWS deployment
+template or a published prebuilt image. The [Compose quickstart](../README.md#quickstart)
+is a local demo; [configuration](../README.md#configuration) lists the S3
+variables.
 
 ## Diagram sources
 

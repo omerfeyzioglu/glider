@@ -5,15 +5,68 @@
 [![CI](https://github.com/omerfeyzioglu/glider/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/omerfeyzioglu/glider/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Glider is a single-node vector database that keeps all of its data in S3 (or
-any S3-compatible object store) and uses local RAM and SSD only as
-disposable caches. One `glider-server` process serves one collection over a
-small HTTP/JSON API: writes are acknowledged only once they are durable in
-object storage, a crashed or replaced server is taken over automatically
-without losing acknowledged writes, and approximate nearest-neighbor queries
-read a bounded amount of data per query. It is written in Rust and is meant
-for applications that want vector search with object-storage durability
-and cost on one machine, without operating a replicated cluster.
+Glider is a single-node vector database with S3-compatible object storage as
+its durable state. One `glider-server` process serves one collection over
+HTTP/JSON. It supports writes, nearest-neighbor search and equality filters;
+local RAM and SSD accelerate reads but hold no acknowledged data exclusively.
+
+## Quickstart
+
+You need Git, Docker with Compose and curl. Docker builds the Rust server;
+**you do not need Rust installed locally**. There is no published binary or
+prebuilt image yet. This Compose setup uses local MinIO and example credentials
+for a demo, not an internet-facing deployment.
+
+### Docker Compose (with MinIO)
+
+```sh
+git clone https://github.com/omerfeyzioglu/glider.git
+cd glider
+docker compose up --build -d
+```
+
+This starts MinIO, creates the `glider` bucket and serves collection `demo`
+(3 dimensions, resident filter `color=red`) at `localhost:8080`. Once
+`docker compose logs glider` shows `listening on 0.0.0.0:8080`, try a write
+and a nearest-neighbor query:
+
+```sh
+curl -sS localhost:8080/v1/write -H 'content-type: application/json' \
+  -d '{"upsert":[{"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},{"id":2,"vector":[1,1,1]}]}'
+
+curl -sS localhost:8080/v1/query -H 'content-type: application/json' \
+  -d '{"vector":[1,1,0.9],"k":2,"include_metadata":true}'
+```
+
+The write returns a `sequence` and `request_id`; the query returns two hits
+ordered by distance. Try an [exact query on `color=red`](docs/API.md#post-v1query),
+[read a point](docs/API.md#get-v1pointsid), or inspect
+[`/v1/status`](docs/API.md#get-v1status). `docker compose down` stops the demo
+and keeps its data; `docker compose down -v` **deletes the demo data**.
+
+For AWS, you must provision the bucket, compute host, networking, credentials
+and TLS edge. See the [deployment architecture](docs/ARCHITECTURE.md#aws-deployment-pattern).
+
+### From source
+
+Requires Rust 1.98.1 (the version CI uses).
+
+```sh
+cargo build --release --features server --bin glider-server
+GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
+  target/release/glider-server
+```
+
+`GLIDER_DATA_DIR` stores the collection in a local directory, which is
+convenient for development. For S3, set `GLIDER_S3_BUCKET`,
+`GLIDER_S3_NAMESPACE` and AWS credentials instead:
+
+```sh
+GLIDER_S3_BUCKET=my-bucket GLIDER_S3_NAMESPACE=collections/demo \
+GLIDER_S3_REGION=eu-central-1 GLIDER_DIMENSIONS=3 \
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+  target/release/glider-server
+```
 
 ## Key features
 
@@ -72,74 +125,6 @@ Known limitations:
   accepted such a point cannot seal until that point is deleted or replaced,
   and once 64 unsealed log objects accumulate it needs manual repair.
 - No built-in scheduled backups; use S3 Versioning and `glider-admin backup`.
-
-## Quickstart
-
-The Docker Compose path needs a Git checkout and Docker with Compose, but **does
-not require Rust on your computer**: the Docker build uses Rust inside its
-builder image. There is currently no published binary installer or prebuilt
-container image. The Compose setup is a local demo with example MinIO
-credentials and an HTTP port; it is not an internet-facing deployment.
-An AWS deployment requires you to provision the S3 bucket, compute host,
-networking, credentials and TLS edge. See the
-[deployment architecture](docs/ARCHITECTURE.md#aws-deployment-pattern).
-
-### Docker Compose (with MinIO)
-
-```sh
-docker compose up --build
-```
-
-This starts MinIO, creates the `glider` bucket and serves collection `demo`
-(3 dimensions, resident filter `color=red`) on `localhost:8080`.
-`docker compose down -v` removes the containers and data. The image
-(`Dockerfile`) runs `glider-server` as a non-root user and is configured
-with the [environment variables](#configuration) below.
-
-### From source
-
-Requires Rust 1.98.1 (the version CI uses).
-
-```sh
-cargo build --release --features server --bin glider-server
-GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red \
-  target/release/glider-server
-```
-
-`GLIDER_DATA_DIR` stores the collection in a local directory, which is
-convenient for development. For S3, set `GLIDER_S3_BUCKET`,
-`GLIDER_S3_NAMESPACE` and AWS credentials instead:
-
-```sh
-GLIDER_S3_BUCKET=my-bucket GLIDER_S3_NAMESPACE=collections/demo \
-GLIDER_S3_REGION=eu-central-1 GLIDER_DIMENSIONS=3 \
-AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
-  target/release/glider-server
-```
-
-### First requests
-
-```sh
-# Insert two points (one atomic batch).
-curl -XPOST localhost:8080/v1/write -H 'content-type: application/json' \
-  -d '{"upsert":[{"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},{"id":2,"vector":[1,1,1]}]}'
-# {"conflict":null,"request_id":{"boundary":1,"nonce":"..."},"sequence":2}
-
-# Two nearest neighbors, with metadata.
-curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
-  -d '{"vector":[1,1,0.9],"k":2,"include_metadata":true}'
-# {"results":[{"distance":0.01000000476837215,"id":2,"metadata":{}},
-#             {"distance":2.8099999570846563,"id":1,"metadata":{"color":"red"}}],"sequence":2}
-
-# Exact filtered query on the declared resident filter.
-curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
-  -d '{"vector":[0,0,0],"k":5,"filter":{"color":"red"}}'
-# {"results":[{"distance":0.0,"id":1}],"sequence":2}
-
-# Read one point; then check status.
-curl localhost:8080/v1/points/1
-curl localhost:8080/v1/status
-```
 
 ## Configuration
 
@@ -215,58 +200,26 @@ for hit in hits:
 
 ## Operations
 
-- **Status and health.** `GET /v1/status` reports the committed sequence,
-  queue state, cache warm-up (`cache.state`) and clustering
-  (`clustering.state`: `none`, `converting` with progress, or `clustered`).
-  `GET /metrics` exposes request counts and latency histograms per
-  endpoint, queue depth, maintenance, cache and conversion metrics
-  ([list](docs/API.md#get-metrics)).
-- **Shutdown and recovery.** SIGINT/SIGTERM drains queued work and releases
-  the lease. After a crash or kill, start the server again on the same
-  prefix with the same collection settings: it waits at most
-  `GLIDER_LEASE_SECONDS`, fences the old writer and serves every
-  acknowledged write. Resolve writes whose response was lost by request ID.
-  See [RECOVERY.md](docs/RECOVERY.md).
-- **Clustering.** The server converts a collection to the clustered view at
-  `GLIDER_AUTO_CLUSTER_ROWS` and rebuilds it after
-  `GLIDER_AUTO_RECLUSTER_FACTOR`-fold growth, in the background; writes
-  and queries continue, queries use the previous layout until the new one
-  is published, and a crash during a conversion loses nothing (the next
-  start begins a new one and removes the interrupted one's objects). New
-  writes are assigned to the view's clusters as they are sealed.
-- **`glider-admin`** uses the same environment variables. Stop the server
-  first: each command acquires the writer lease like a server start, and
-  fails with a lease error while a server holds it. Each prints one JSON
-  object.
+- **While running:** [`GET /v1/status`](docs/API.md#get-v1status) shows the
+  committed sequence, queue, cache and clustering state; [`/metrics`](docs/API.md#get-metrics)
+  exposes Prometheus metrics.
+- **After a crash:** restart on the same prefix with the same collection
+  settings. The server waits for the writer lease, fences the old writer and
+  replays acknowledged writes. Resolve a lost write response by its request
+  ID ([recovery guide](docs/RECOVERY.md)).
+- **Maintenance:** `glider-admin` provides `status`, `backup`, `restore` and
+  `convert`. It needs exclusive access to the collection, so stop the server
+  before running it. The Compose image includes the admin binary:
 
   ```sh
-  cargo build --release --features server --bin glider-admin
-  export GLIDER_DATA_DIR=./data GLIDER_DIMENSIONS=3 GLIDER_RESIDENT_FILTER=color=red
-  target/release/glider-admin status
-  target/release/glider-admin backup ./backup          # or s3://bucket/prefix
-  GLIDER_DATA_DIR=./restored target/release/glider-admin restore ./backup
-  target/release/glider-admin convert                  # build or rebuild the clustered view now
+  docker compose stop glider
+  docker compose run --rm --no-deps --entrypoint glider-admin glider status
+  docker compose start glider
   ```
 
-  `backup` writes a consistent, validated copy to an empty location that
-  does not overlap the source; `s3://bucket/prefix` locations use the
-  configured region, endpoint and credentials. `restore` copies a backup into an empty
-  destination and validates it; the first server start there takes it over.
-  Never reuse a failed destination. A crash needs no restore.
-  `convert [CENTROIDS]` seals the log tail and builds the clustered view now
-  (about 4,000 rows per cluster by default); it also repairs a missing or
-  corrupt view.
-- **Protecting against mistakes.** Enable S3 Versioning on the bucket with
-  a lifecycle rule that expires noncurrent versions after your retention
-  window and aborts incomplete multipart uploads. Glider never overwrites
-  an object, so versioning only retains the objects that cleanup deletes.
-  To recover, copy the object versions current at the chosen time into a
-  fresh prefix and check it with `glider-admin status` before serving it.
-- **Drills.** `python3 tools/drills.py --seed 29` builds release binaries and
-  checks kill-and-restart, paused-writer fencing, cache loss, backup and
-  restore, and conversion on a local directory, reporting PASS/FAIL.
-
-The [serving guide](docs/SERVING.md) has further procedures.
+The [serving guide](docs/SERVING.md) covers backups, restores, clustering and
+S3 Versioning. The local Compose demo does not schedule backups or provide
+multi-node failover.
 
 ## Performance
 
@@ -353,7 +306,8 @@ on EC2 and S3) are described in [BENCHMARKS.md](BENCHMARKS.md). See
 | [docs/API.md](docs/API.md) | HTTP API reference |
 | [docs/LIBRARY.md](docs/LIBRARY.md) | Rust library guide |
 | [docs/RECOVERY.md](docs/RECOVERY.md) | Crash, takeover and restore procedures |
-| [docs/SERVING.md](docs/SERVING.md) | Serving envelopes and operating procedures |
+| [docs/SERVING.md](docs/SERVING.md) | Server operations and resident-library serving envelope |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime and AWS deployment diagrams |
 | [DESIGN.md](DESIGN.md) | Architecture, formats and guarantees |
 | [docs/M37_CLUSTERED_INDEX.md](docs/M37_CLUSTERED_INDEX.md) | Clustered index design |
 | [ROADMAP.md](ROADMAP.md) | Milestones and next work |

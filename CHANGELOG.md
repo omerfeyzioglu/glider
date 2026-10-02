@@ -24,7 +24,8 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   permanent fence objects, so a paused former owner cannot commit.
 - `glider-admin` with `status`, `backup`, `restore` and `convert`; local
   failure drills in `tools/drills.py`.
-- Docker image and a Docker Compose quickstart with MinIO.
+- Docker image with `glider-server` and `glider-admin`, plus a Docker Compose
+  quickstart with MinIO.
 
 ### Storage engine
 
