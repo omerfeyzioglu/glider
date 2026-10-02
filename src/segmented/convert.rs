@@ -269,7 +269,7 @@ pub(super) fn plan_layout(clusters: &[Vec<usize>]) -> Result<Vec<Vec<PlannedBloc
                 blocks.push(((cluster, start..row), raw));
                 (start, raw) = (row, empty);
             }
-            if empty + length > codec::MAX_RAW_BLOCK_BYTES {
+            if !codec::row_fits(length) {
                 return Err(Error::Invalid("segmented row exceeds block limit".into()));
             }
             raw += length;

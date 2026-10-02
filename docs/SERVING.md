@@ -32,7 +32,7 @@ writes whenever `status().recovery_required` is true.
 clients each submit one 100-overwrite batch and ten queries per second through
 [bounded admission](ADMISSION.md). Set `Config.dimensions` to 128 and
 `ServingOptions { max_documents: 5000, ..ServingOptions::m8() }`; retain the
-default eight-command/320 KiB admission limits. Before opening, configure
+default eight-command/1 MiB admission limits. Before opening, configure
 `ReadLimits { objects: 128, object_bytes: 16 * 1024 * 1024,
 namespace_bytes: 32 * 1024 * 1024 }` on the S3 store.
 

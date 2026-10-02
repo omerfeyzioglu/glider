@@ -501,3 +501,48 @@ fn queries_run_up_to_the_configured_bound_and_writes_do_not_wait_for_them() {
     assert_eq!(sequences, [0, 0, 1]);
     service.shutdown(Shutdown::Drain).unwrap();
 }
+
+#[test]
+fn every_valid_request_is_admissible_with_default_limits() {
+    let service = Service::start(Counting(0, None), Limits::default()).unwrap();
+    let client = service.client();
+    let sized = |blob: usize| Request {
+        id: RequestId {
+            boundary: 0,
+            nonce: [1; 16],
+        },
+        conditions: vec![],
+        mutations: vec![Mutation::Put {
+            id: 1,
+            vector: vec![1.],
+            metadata: BTreeMap::from([("blob".into(), "x".repeat(blob))]),
+        }],
+    };
+    let base = serde_json::to_vec(&sized(0)).unwrap().len();
+    let largest = glider::retry::MAX_REQUEST_BYTES - base;
+    assert!(base + largest > 320 * 1024, "must exceed the old queue cap");
+    assert_eq!(
+        client
+            .write(sized(largest))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .value
+            .sequence,
+        1
+    );
+    // One byte more fails validation (400), never admission (429).
+    assert!(matches!(
+        client.write(sized(largest + 1)),
+        Err(AdmissionError::Database(Error::Invalid(_)))
+    ));
+    let filter = vec![(
+        "key".to_string(),
+        "x".repeat(glider::retry::MAX_REQUEST_BYTES),
+    )];
+    assert!(matches!(
+        client.query(vec![1.], 1, filter),
+        Err(AdmissionError::Database(Error::Invalid(_)))
+    ));
+    service.shutdown(Shutdown::Drain).unwrap();
+}

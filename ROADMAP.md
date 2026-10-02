@@ -1133,9 +1133,10 @@ recorded gaps; each needs declared gates before measurement.
   and a warm standby that takes over faster than lease expiry plus open.
 - **Query model.** M38: IN, ranges, OR/NOT and paging with metadata indexes,
   exact filtered search within a declared budget.
-- **Oversized points.** A point larger than the 120 KiB block limit is
-  acknowledged but cannot be sealed; reject it at write time
-  (`docs/API.md`, "Known issues").
+- **Oversized points.** Writes now reject points above one block. A
+  namespace that already holds one (from a pre-release binary) can be
+  repaired only by deleting or replacing the point before 64 log objects
+  accumulate; a tool to resolve a fully stuck tail is not built.
 
 ## Beyond a single service
 
