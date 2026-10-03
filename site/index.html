@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glider: a vector database with S3 as the source of truth</title>
+<meta name="description" content="Glider is an open-source, single-node vector database written in Rust. Object storage is the durable state; crash-safe takeover, clustered ANN search, collections and metadata filters over HTTP/JSON.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#F7F4EE">
+<meta property="og:title" content="Glider: a vector database with S3 as the source of truth">
+<meta property="og:description" content="Single-node, crash-safe vector database in Rust. Durable state lives in S3; local RAM and SSD only accelerate reads. Built to go far on less.">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --paper:#F7F4EE; --sheet:#FFFDF8; --fold:#E6E0D4;
+  --ink:#0E1B2C; --navy:#16304F; --steel:#1E3A5F; --silver:#C9D2DC;
+  --orange:#F07A1A; --orange-ink:#A8480A;
+  --muted:#4A5868;
+  --line:2.5px;
+  --sans:"Archivo",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --gutter:clamp(16px,4vw,40px);
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:24px}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 18px/1.6 var(--sans);-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;overflow-x:hidden}
+img,svg{max-width:100%}
+a{color:var(--steel);text-decoration-thickness:2px;text-underline-offset:4px}
+a:hover{color:var(--orange-ink)}
+:focus-visible{outline:3px solid var(--orange);outline-offset:3px}
+p{margin:0}
+code{font-family:var(--mono);font-size:.88em}
+.wrap{max-width:1180px;margin:0 auto;padding:0 var(--gutter)}
+.skip{position:absolute;left:-999px;top:8px;z-index:50;background:var(--ink);color:var(--paper);padding:10px 14px}
+.skip:focus{left:8px}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+
+/* paper sheets */
+.sheet{position:relative;background:var(--sheet);border:var(--line) solid var(--ink);box-shadow:6px 6px 0 var(--ink)}
+.dog::after{content:"";position:absolute;top:calc(-1 * var(--line));right:calc(-1 * var(--line));width:30px;height:30px;
+  background:linear-gradient(225deg,var(--under,var(--paper)) calc(50% - 1px),var(--ink) calc(50% - 1px) calc(50% + 1.5px),var(--fold) calc(50% + 1.5px));
+  border-left:var(--line) solid var(--ink);border-bottom:var(--line) solid var(--ink)}
+.stack{box-shadow:10px 10px 0 calc(-1 * var(--line)) var(--orange),10px 10px 0 0 var(--ink)}
+
+/* type */
+h1,h2,h3{font-family:var(--sans);font-stretch:115%;font-weight:800;color:var(--ink);margin:0;letter-spacing:-.015em;overflow-wrap:break-word}
+h1{font-size:clamp(2.2rem,5vw,4rem);line-height:1.03}
+h2{font-size:clamp(1.8rem,3.4vw,2.75rem);line-height:1.08}
+h3{font-size:1.15rem;line-height:1.25;font-weight:700}
+.eyebrow{display:inline-block;font:600 .78rem/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink);background:var(--sheet);border:2px solid var(--ink);padding:7px 10px;margin-bottom:22px}
+.lede{font-size:clamp(1.1rem,1.8vw,1.3rem);line-height:1.55;color:var(--muted);max-width:32rem;margin-top:22px}
+.new{display:inline-block;font:600 .7rem/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;background:var(--orange);color:var(--ink);border:2px solid var(--ink);padding:5px 7px;vertical-align:middle;transform:rotate(-2deg)}
+
+/* header */
+.top{padding:22px 0}
+.top .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.brand{display:inline-flex;align-items:center;gap:14px;text-decoration:none;color:var(--ink)}
+.brand svg{width:40px;height:30px;flex:none}
+.word{display:inline-block;font:700 1.15rem/1 var(--sans);font-stretch:125%;letter-spacing:.24em;text-transform:uppercase;padding-bottom:8px;background:linear-gradient(var(--orange),var(--orange)) left bottom/34% 3px no-repeat}
+.nav{display:flex;align-items:center;gap:6px}
+.nav ul{display:flex;gap:4px;list-style:none;margin:0;padding:0}
+.nav ul a{display:block;color:var(--ink);text-decoration:none;font-weight:600;font-size:.95rem;padding:8px 12px}
+.nav ul a:hover{background:var(--sheet);box-shadow:inset 0 0 0 2px var(--ink)}
+@media (max-width:820px){.nav ul{display:none}}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;gap:10px;min-height:52px;padding:0 24px;font:700 1rem/1 var(--sans);text-decoration:none;color:var(--ink);background:var(--sheet);border:var(--line) solid var(--ink);box-shadow:4px 4px 0 var(--ink);transition:transform .12s ease,box-shadow .12s ease}
+.btn:hover{transform:translate(-2px,-2px);box-shadow:6px 6px 0 var(--ink);color:var(--ink)}
+.btn:active{transform:translate(4px,4px);box-shadow:0 0 0 var(--ink)}
+.btn.go{background:var(--orange)}
+.btn.sm{min-height:42px;padding:0 16px;font-size:.92rem}
+.btn svg{width:18px;height:18px}
+.ctas{display:flex;flex-wrap:wrap;gap:14px;margin-top:36px}
+
+section{padding:clamp(88px,12vw,150px) 0 0}
+
+/* hero */
+.hero{padding-top:clamp(36px,6vw,80px)}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:clamp(40px,6vw,80px);align-items:center}
+.hero h1 .hl{background:linear-gradient(transparent 62%,var(--orange) 62%,var(--orange) 90%,transparent 90%)}
+.hero-art{position:relative;padding-top:150px}
+.plane{position:absolute;top:-6px;right:4%;width:min(250px,56%);z-index:2;transform:rotate(-4deg)}
+@media (max-width:940px){.hero-grid{grid-template-columns:minmax(0,1fr)}.hero-art{padding-top:120px}.plane{width:min(190px,52%);top:0}}
+
+/* code card */
+.card{min-width:0}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--navy);border-bottom:var(--line) solid var(--ink);padding:10px 12px 10px 16px}
+.card-title{font:600 .78rem/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--silver)}
+.tabs{display:flex;gap:6px}
+.tabs button{appearance:none;cursor:pointer;font:600 .8rem/1 var(--mono);padding:8px 11px;color:var(--paper);background:transparent;border:2px solid transparent}
+.tabs button:hover{border-color:var(--silver)}
+.tabs button[aria-selected="true"]{background:var(--paper);color:var(--ink);border-color:var(--ink)}
+.card pre{margin:0;padding:22px 22px 24px;overflow-x:auto;font:400 .86rem/1.75 var(--mono);color:var(--ink);background:var(--sheet)}
+.card pre code{font-size:inherit}
+.card-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:2px dashed var(--silver);padding:10px 12px 10px 22px;font:500 .74rem/1.3 var(--mono);color:var(--muted)}
+.copy{appearance:none;cursor:pointer;font:600 .74rem/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink);background:var(--sheet);border:2px solid var(--ink);box-shadow:2px 2px 0 var(--ink);padding:7px 10px}
+.copy:active{transform:translate(2px,2px);box-shadow:none}
+.card-head .copy{background:var(--paper)}
+.k{color:var(--steel);font-weight:600}
+.s{color:var(--orange-ink)}
+.c{color:#5B6878;font-style:italic}
+.p{color:#5B6878;user-select:none}
+
+/* proof band */
+.band{background:var(--navy);color:var(--paper);border-top:var(--line) solid var(--ink);border-bottom:var(--line) solid var(--ink);margin-top:clamp(80px,10vw,130px);padding:clamp(44px,6vw,72px) 0}
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px;margin:0}
+.facts div{border-left:4px solid var(--orange);padding-left:18px}
+.facts dt{font:600 .78rem/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--silver);margin-top:12px}
+.facts dd{margin:0;font:800 clamp(2.2rem,4.2vw,3.4rem)/1 var(--sans);font-stretch:125%;letter-spacing:-.02em;color:var(--paper)}
+.facts dd small{font-size:.45em;font-weight:700;margin-left:4px}
+.facts{display:flex;flex-wrap:wrap}
+.facts>div{flex:1 1 140px;display:flex;flex-direction:column-reverse;justify-content:flex-end}
+.band-note{margin-top:34px;font:500 .9rem/1.5 var(--mono);color:var(--silver)}
+.band-note a{color:var(--paper);font-weight:600}
+.band-note a:hover{color:var(--orange)}
+
+/* section heads */
+.head{max-width:44rem;margin-bottom:clamp(36px,5vw,56px)}
+.head p:not(.eyebrow){margin-top:18px;font-size:1.15rem;color:var(--muted)}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:clamp(36px,6vw,80px);align-items:center}
+.two .head{margin-bottom:0}
+@media (min-width:941px){.two.flip{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr)}.two.flip>.head{order:2}}
+@media (max-width:940px){.two{grid-template-columns:minmax(0,1fr)}}
+
+/* architecture */
+.arch{display:flex;align-items:center;gap:0}
+.node{flex:1 1 0;min-width:0;display:flex;align-items:center;justify-content:center;text-align:center;min-height:120px;padding:18px 14px;font:800 clamp(1rem,1.5vw,1.25rem)/1.2 var(--sans);font-stretch:112%;background:var(--sheet);border:var(--line) solid var(--ink);box-shadow:5px 5px 0 var(--ink)}
+.node.s3{background:var(--steel);color:var(--paper)}
+.node.cache{background:var(--silver)}
+.node.act{background:var(--orange)}
+.bucket{flex:2.3 1 0;min-width:0;position:relative;display:flex;align-items:center;border:var(--line) dashed var(--ink);padding:38px 18px 22px;margin:0 4px}
+.bucket .tagline{position:absolute;top:-15px;left:16px;font:600 .78rem/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;background:var(--paper);border:2px solid var(--ink);padding:6px 9px}
+.arr{flex:none;width:52px;height:24px;display:block}
+.arr.back{transform:scaleX(-1)}
+.arch-note{margin-top:44px;max-width:44rem;font-size:1.15rem;color:var(--muted)}
+.arch-more{margin-top:14px;font-size:1rem}
+@media (max-width:860px){
+  .arch,.bucket{flex-direction:column;align-items:stretch}
+  .node{min-height:76px}
+  .bucket{padding:40px 16px 18px;margin:4px 0}
+  .arr{align-self:center;width:24px;height:44px}
+  .arr svg{display:block}
+  .arr{transform:rotate(90deg);width:44px;height:24px;margin:10px 0}
+  .arr.back{transform:rotate(-90deg)}
+}
+
+/* features */
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:28px}
+.feat{padding:30px 28px 30px;--under:var(--paper)}
+.feat .ic{width:46px;height:46px;margin-bottom:22px;display:block}
+.feat p{margin-top:10px;color:var(--muted);font-size:1rem;line-height:1.55}
+.feat h3 .new{margin-left:6px}
+@media (max-width:980px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:620px){.grid{grid-template-columns:minmax(0,1fr)}}
+
+/* chips */
+.chips{display:flex;flex-wrap:wrap;gap:12px;margin:30px 0 0;padding:0;list-style:none}
+.chips li{font:600 1rem/1 var(--mono);padding:12px 14px;background:var(--sheet);border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink)}
+.chips li:nth-child(2){background:var(--orange)}
+.chips li:nth-child(3){background:var(--silver)}
+.fine{margin-top:22px;font-size:.95rem;color:var(--muted)}
+
+/* limits */
+.limits{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 40px;max-width:60rem}
+.limits li{font-size:1.1rem;padding-left:34px;position:relative}
+.limits li::before{content:"";position:absolute;left:0;top:.42em;width:16px;height:16px;background:var(--orange);border:2px solid var(--ink);transform:rotate(45deg)}
+@media (max-width:720px){.limits{grid-template-columns:minmax(0,1fr)}}
+
+/* footer */
+footer{margin-top:clamp(100px,13vw,160px);background:var(--navy);color:var(--paper);border-top:var(--line) solid var(--ink);padding:56px 0 48px}
+.fgrid{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:36px}
+footer .brand{color:var(--paper)}
+footer .tag{margin-top:16px;color:var(--silver);font-size:1rem}
+footer ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:10px 24px;max-width:36rem}
+footer ul a{color:var(--paper);text-decoration:none;font-weight:600}
+footer ul a:hover{color:var(--orange);text-decoration:underline}
+footer .lic{margin-top:40px;padding-top:22px;border-top:2px dashed rgba(201,210,220,.4);font-size:.9rem;color:var(--silver)}
+footer .lic a{color:var(--paper)}
+
+@media (max-width:600px){.card pre{font-size:.76rem;padding:18px 16px 20px}.feat{padding:24px 22px}}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}.btn,.btn:hover{transition:none;transform:none}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="arrow" viewBox="0 0 52 24"><path d="M4 12H46M36 3l10 9-10 9" fill="none" stroke="#0E1B2C" stroke-width="3.5" stroke-linecap="square"/></symbol>
+    <symbol id="mark" viewBox="0 0 40 30"><path d="M2 14 38 2 16 18Z" fill="#FFFDF8" stroke="#0E1B2C" stroke-width="2.2" stroke-linejoin="round"/><path d="M16 18 38 2 22 28Z" fill="#1E3A5F" stroke="#0E1B2C" stroke-width="2.2" stroke-linejoin="round"/><path d="M2 14 9 11.6 8 16.6Z" fill="#F07A1A" stroke="#0E1B2C" stroke-width="2" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Glider, back to top">
+      <svg aria-hidden="true"><use href="#mark"/></svg>
+      <span class="word">Glider</span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      <ul>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#agents">Agents</a></li>
+        <li><a href="#quickstart">Quickstart</a></li>
+      </ul>
+      <a class="btn sm" href="https://github.com/omerfeyzioglu/glider">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<div class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Open-source vector database</p>
+      <h1>Vector search with <span class="hl">S3</span> as the source of truth.</h1>
+      <p class="lede">Every write is safe in object storage before it is acknowledged, so a crash costs you nothing. Built to go far on less.</p>
+      <div class="ctas">
+        <a class="btn go" href="https://github.com/omerfeyzioglu/glider">
+          <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          View on GitHub
+        </a>
+        <a class="btn" href="#quickstart">Quickstart <span aria-hidden="true">&rarr;</span></a>
+      </div>
+    </div>
+
+    <div class="hero-art">
+      <svg class="plane" viewBox="0 0 320 210" aria-hidden="true" focusable="false">
+        <g transform="translate(9 10)" fill="#0E1B2C">
+          <path d="M8 92 306 14 132 128Z"/><path d="M132 128 306 14 176 196Z"/><path d="M132 128 306 14 108 168Z"/>
+        </g>
+        <g stroke="#0E1B2C" stroke-width="3" stroke-linejoin="round">
+          <path d="M8 92 306 14 132 128Z" fill="#FFFDF8"/>
+          <path d="M132 128 306 14 108 168Z" fill="#C9D2DC"/>
+          <path d="M132 128 306 14 176 196Z" fill="#1E3A5F"/>
+          <path d="M8 92 40 84 34 106Z" fill="#F07A1A"/>
+          <path d="M108 168 132 128 120 172Z" fill="#F07A1A"/>
+        </g>
+        <path d="M90 96 306 14" stroke="#0E1B2C" stroke-width="1.5" stroke-dasharray="5 6" fill="none"/>
+      </svg>
+      <div class="card sheet stack" data-tabs>
+        <div class="card-head">
+          <div class="tabs" role="tablist" aria-label="Example">
+            <button type="button" role="tab" id="t-py" aria-controls="p-py" aria-selected="true">Python</button>
+            <button type="button" role="tab" id="t-http" aria-controls="p-http" aria-selected="false" tabindex="-1">HTTP</button>
+            <button type="button" role="tab" id="t-mcp" aria-controls="p-mcp" aria-selected="false" tabindex="-1">MCP</button>
+          </div>
+        </div>
+        <div role="tabpanel" id="p-py" aria-labelledby="t-py" tabindex="0"><pre><code><span class="k">from</span> glider_client <span class="k">import</span> Client
+
+client = Client(<span class="s">"http://localhost:8080"</span>)
+client.upsert([{<span class="s">"id"</span>: 1, <span class="s">"vector"</span>: [0, 0, 0],
+                <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"red"</span>}}])
+
+hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
+        <div role="tabpanel" id="p-http" aria-labelledby="t-http" tabindex="0" hidden><pre><code><span class="k">curl</span> -sS localhost:8080/v1/query \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"vector":[1,1,0.9],"k":10}'</span></code></pre></div>
+        <div role="tabpanel" id="p-mcp" aria-labelledby="t-mcp" tabindex="0" hidden><pre><code><span class="k">claude</span> mcp add glider \
+  -e GLIDER_COLLECTION=memory -- glider-mcp</code></pre></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="band">
+    <div class="wrap">
+      <h2 class="sr">Measured results</h2>
+      <dl class="facts">
+        <div><dt>vectors on AWS S3</dt><dd>1M</dd></div>
+        <div><dt>recall@10</dt><dd>0.998</dd></div>
+        <div><dt>p95 warm query</dt><dd>31<small>ms</small></dd></div>
+        <div><dt>p95 durable write</dt><dd>98<small>ms</small></dd></div>
+      </dl>
+      <p class="band-note">SIFT1M on S3 Standard from a single c7g.2xlarge. <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#root-manifests-and-fast-open-on-s3">Full benchmarks &rarr;</a></p>
+    </div>
+  </div>
+</div>
+
+<section id="how" aria-labelledby="how-title">
+  <div class="wrap">
+    <div class="head">
+      <p class="eyebrow">How it works</p>
+      <h2 id="how-title">The bucket holds the truth. The SSD makes it fast.</h2>
+    </div>
+    <div class="arch" role="img" aria-label="Write goes to the log on S3, which is folded into packs and a clustered index on S3. A query reads the packs through the SSD cache.">
+      <div class="node act">Write</div>
+      <svg class="arr" aria-hidden="true"><use href="#arrow"/></svg>
+      <div class="bucket">
+        <span class="tagline">S3 bucket</span>
+        <div class="node s3">Log</div>
+        <svg class="arr" aria-hidden="true"><use href="#arrow"/></svg>
+        <div class="node s3">Packs &amp; clustered index</div>
+      </div>
+      <svg class="arr back" aria-hidden="true"><use href="#arrow"/></svg>
+      <div class="node cache">SSD cache</div>
+      <svg class="arr back" aria-hidden="true"><use href="#arrow"/></svg>
+      <div class="node act">Query</div>
+    </div>
+    <p class="arch-note">A write is acknowledged once it is on S3; queries read clustered packs through a local SSD cache.</p>
+    <p class="arch-more"><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">Architecture guide</a> &middot; <a href="runtime.svg">Detailed diagram</a></p>
+  </div>
+</section>
+
+<section id="why" aria-labelledby="why-title">
+  <div class="wrap">
+    <div class="head">
+      <p class="eyebrow">Why Glider</p>
+      <h2 id="why-title">Small engine. Serious guarantees.</h2>
+    </div>
+    <div class="grid">
+      <article class="feat sheet dog">
+        <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><path d="M6 10h34v26H6z" fill="#1E3A5F" stroke="#0E1B2C" stroke-width="2.5"/><path d="M14 23l6 6 12-13" fill="none" stroke="#F07A1A" stroke-width="4" stroke-linecap="square"/></svg>
+        <h3>Crash-safe</h3>
+        <p>A restart fences the old writer at the store and replays the log. No operator step.</p>
+      </article>
+      <article class="feat sheet dog">
+        <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><path d="M23 7a16 16 0 1 1-15 10" fill="none" stroke="#0E1B2C" stroke-width="4"/><path d="M3 9l6 9 9-6" fill="#F07A1A" stroke="#0E1B2C" stroke-width="2.5" stroke-linejoin="round"/></svg>
+        <h3>Retry-safe writes</h3>
+        <p>Every write carries a request ID, so an agent&rsquo;s retried call never applies twice.</p>
+      </article>
+      <article class="feat sheet dog">
+        <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><path d="M6 12h34v8H6zM6 26h34v8H6z" fill="#C9D2DC" stroke="#0E1B2C" stroke-width="2.5"/><path d="M28 6 18 24h9l-6 16 14-21h-9z" fill="#F07A1A" stroke="#0E1B2C" stroke-width="2.5" stroke-linejoin="round"/></svg>
+        <h3>Fast warm reads</h3>
+        <p>A local SSD cache serves warm queries. Lose it and you lose no data.</p>
+      </article>
+      <article class="feat sheet dog">
+        <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><circle cx="14" cy="15" r="8" fill="#1E3A5F" stroke="#0E1B2C" stroke-width="2.5"/><circle cx="32" cy="16" r="6" fill="#C9D2DC" stroke="#0E1B2C" stroke-width="2.5"/><circle cx="22" cy="33" r="9" fill="#F07A1A" stroke="#0E1B2C" stroke-width="2.5"/></svg>
+        <h3>Clusters itself</h3>
+        <p>The server builds its clustered index on its own and rebuilds it as data grows.</p>
+      </article>
+      <article class="feat sheet dog">
+        <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><path d="M12 6h26v26H12z" fill="#C9D2DC" stroke="#0E1B2C" stroke-width="2.5"/><path d="M6 14h26v26H6z" fill="#FFFDF8" stroke="#0E1B2C" stroke-width="2.5"/><path d="M12 24h14M12 31h10" stroke="#F07A1A" stroke-width="3.5"/></svg>
+        <h3>Collections</h3>
+        <p>Create and delete collections over HTTP, each with its own dimension and metric.</p>
+      </article>
+      <article class="feat sheet dog">
+        <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><path d="M5 8h36L27 24v14l-8 4V24Z" fill="#1E3A5F" stroke="#0E1B2C" stroke-width="2.5" stroke-linejoin="round"/><path d="M19 24h8" stroke="#F07A1A" stroke-width="3.5"/></svg>
+        <h3>Metadata filters</h3>
+        <p>Equality, sets, numeric ranges and nested logic, with an exact mode for every match.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="filters" aria-labelledby="filters-title">
+  <div class="wrap two">
+    <div class="head">
+      <p class="eyebrow">Filters</p>
+      <h2 id="filters-title">Filter fast. Go exact when it counts.</h2>
+      <p>Filtered search is approximate by default. Add <code>"exact": true</code> and you get every match, up to <code>k</code>.</p>
+    </div>
+    <div class="card sheet" data-copy>
+      <div class="card-head"><span class="card-title">POST /v1/query</span></div>
+<pre><code>{
+  <span class="k">"vector"</span>: [1, 1, 0.9],
+  <span class="k">"k"</span>: 10,
+  <span class="k">"filter"</span>: {
+    <span class="k">"color"</span>: <span class="s">"red"</span>,
+    <span class="k">"price"</span>: {<span class="k">"$gt"</span>: 1.5, <span class="k">"$lte"</span>: 10},
+    <span class="k">"tag"</span>: {<span class="k">"$in"</span>: [<span class="s">"a"</span>, <span class="s">"b"</span>]}
+  },
+  <span class="k">"exact"</span>: true
+}</code></pre>
+    </div>
+  </div>
+</section>
+
+<section id="agents" aria-labelledby="agents-title">
+  <div class="wrap two flip">
+    <div class="head">
+      <p class="eyebrow">Agent memory &middot; MCP</p>
+      <h2 id="agents-title">Durable memory for your agents.</h2>
+      <p><code>glider-mcp</code> gives any MCP client three tools. Memories survive restarts, and a retried call never stores twice.</p>
+      <ul class="chips" aria-label="MCP tools">
+        <li>remember</li><li>recall</li><li>forget</li>
+      </ul>
+    </div>
+    <div class="card sheet" data-copy>
+      <div class="card-head"><span class="card-title">Terminal</span></div>
+<pre><code><span class="c"># 1. run Glider in multi-collection mode</span>
+<span class="k">docker</span> run -d --name glider -p 8080:8080 \
+  -v glider-data:/var/lib/glider \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data \
+  ghcr.io/omerfeyzioglu/glider:latest
+
+<span class="c"># 2. install the client with the MCP extra</span>
+<span class="k">pip</span> install \
+  <span class="s">"glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span>
+
+<span class="c"># 3. register it with Claude Code</span>
+<span class="k">claude</span> mcp add glider \
+  -e GLIDER_COLLECTION=memory -- glider-mcp</code></pre>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart" aria-labelledby="qs-title">
+  <div class="wrap two">
+    <div class="head">
+      <p class="eyebrow">Quickstart</p>
+      <h2 id="qs-title">Three commands to your first query.</h2>
+      <p>Only Docker and curl. This keeps data in the container; <a href="https://github.com/omerfeyzioglu/glider#configuration">point it at S3</a> to keep it for good.</p>
+    </div>
+    <div class="card sheet stack" data-tabs>
+      <div class="card-head">
+        <div class="tabs" role="tablist" aria-label="Quickstart">
+          <button type="button" role="tab" id="t-qc" aria-controls="p-qc" aria-selected="true">curl</button>
+          <button type="button" role="tab" id="t-qp" aria-controls="p-qp" aria-selected="false" tabindex="-1">Python</button>
+        </div>
+      </div>
+      <div role="tabpanel" id="p-qc" aria-labelledby="t-qc" tabindex="0"><pre><code><span class="c"># 1. start a server</span>
+<span class="k">docker</span> run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data \
+  ghcr.io/omerfeyzioglu/glider:latest
+
+<span class="c"># 2. write two points</span>
+<span class="k">curl</span> -sS localhost:8080/v1/write \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"upsert":[
+    {"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},
+    {"id":2,"vector":[1,1,1]}]}'</span>
+
+<span class="c"># 3. query</span>
+<span class="k">curl</span> -sS localhost:8080/v1/query \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"vector":[1,1,0.9],"k":2,"include_metadata":true}'</span></code></pre></div>
+      <div role="tabpanel" id="p-qp" aria-labelledby="t-qp" tabindex="0" hidden><pre><code><span class="c"># pip install "git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span>
+<span class="k">from</span> glider_client <span class="k">import</span> Client
+
+client = Client(<span class="s">"http://localhost:8080"</span>)
+
+client.upsert([
+    {<span class="s">"id"</span>: 1, <span class="s">"vector"</span>: [0, 0, 0], <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"red"</span>}},
+    {<span class="s">"id"</span>: 2, <span class="s">"vector"</span>: [1, 1, 1]},
+])
+
+<span class="k">for</span> hit <span class="k">in</span> client.query([1, 1, 0.9], k=2):
+    print(hit.id, hit.distance)
+
+<span class="c"># every red point, exactly</span>
+client.query([1, 1, 0.9], k=10, filter={<span class="s">"color"</span>: <span class="s">"red"</span>}, exact=<span class="k">True</span>)</code></pre></div>
+    </div>
+  </div>
+</section>
+
+<section id="limits" aria-labelledby="limits-title">
+  <div class="wrap">
+    <div class="head">
+      <p class="eyebrow">Good to know</p>
+      <h2 id="limits-title">Honest about the edges.</h2>
+    </div>
+    <ul class="limits">
+      <li>One node and one writer; no replication or read replicas.</li>
+      <li>Opening a large collection on S3 takes a few seconds.</li>
+      <li>Filtered search is approximate unless you ask for exact.</li>
+      <li>Plain HTTP: put TLS in front with a reverse proxy.</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <a class="brand" href="#top" aria-label="Glider, back to top">
+          <svg aria-hidden="true"><use href="#mark"/></svg>
+          <span class="word">Glider</span>
+        </a>
+        <p class="tag">Built to go far on less.</p>
+      </div>
+      <nav aria-label="Documentation">
+        <ul>
+          <li><a href="https://github.com/omerfeyzioglu/glider">GitHub</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">API</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">Architecture</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md">Design</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md">Benchmarks</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/SECURITY.md">Security</a></li>
+        </ul>
+      </nav>
+    </div>
+    <p class="lic">Licensed under either of <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-APACHE">Apache License 2.0</a> or <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-MIT">MIT license</a>, at your option.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  function text(pre) {
+    var c = pre.cloneNode(true);
+    c.querySelectorAll(".p").forEach(function (n) { n.remove(); });
+    return c.textContent.replace(/^\n+|\n+$/g, "");
+  }
+  function addCopy(host, getPre) {
+    if (!navigator.clipboard) return;
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copy";
+    btn.textContent = "Copy";
+    btn.setAttribute("aria-label", "Copy code to clipboard");
+    btn.addEventListener("click", function () {
+      navigator.clipboard.writeText(text(getPre())).then(function () {
+        btn.textContent = "Copied";
+      }, function () {
+        btn.textContent = "Failed";
+      }).then(function () {
+        setTimeout(function () { btn.textContent = "Copy"; }, 1600);
+      });
+    });
+    host.appendChild(btn);
+  }
+  document.querySelectorAll("[data-copy]").forEach(function (card) {
+    addCopy(card.querySelector(".card-head"), function () { return card.querySelector("pre"); });
+  });
+  document.querySelectorAll("[data-tabs]").forEach(function (card) {
+    var tabs = Array.prototype.slice.call(card.querySelectorAll('[role="tab"]'));
+    function select(t) {
+      tabs.forEach(function (o) {
+        var on = o === t;
+        o.setAttribute("aria-selected", on ? "true" : "false");
+        o.tabIndex = on ? 0 : -1;
+        document.getElementById(o.getAttribute("aria-controls")).hidden = !on;
+      });
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener("click", function () { select(t); });
+      t.addEventListener("keydown", function (e) {
+        var j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : null;
+        if (j === null) return;
+        e.preventDefault();
+        var n = tabs[(j + tabs.length) % tabs.length];
+        select(n); n.focus();
+      });
+    });
+    addCopy(card.querySelector(".card-head"), function () { return card.querySelector('[role="tabpanel"]:not([hidden]) pre'); });
+  });
+})();
+</script>
+</body>
+</html>
