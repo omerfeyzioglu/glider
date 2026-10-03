@@ -1,6 +1,7 @@
 # Architecture
 
-Glider runs one collection per `glider-server` process. The server keeps
+A `glider-server` process serves one collection, or in multi-collection mode
+many collections that each own a namespace, lease and writer. The server keeps
 routing state in memory and may cache vector blocks on local storage. The
 object store is the durable authority: replacing the process or clearing its
 cache does not discard acknowledged writes.
@@ -34,9 +35,10 @@ latency and approximate recall, but not acknowledged state. See
 This is a deployment pattern for the existing single-node server, not
 infrastructure shipped by the repository. An Application Load Balancer
 terminates HTTPS; one private-subnet EC2 instance runs one `glider-server`
-process for one collection. An S3 gateway endpoint connects it to the bucket,
+process for one or many collections. An S3 gateway endpoint connects it to the bucket,
 where logs, packs, roots and writer ownership objects are durable. EBS holds
-only a disposable cache. Give each collection a distinct S3 namespace prefix.
+only a disposable cache. Give each single collection, or each multi-collection base, a distinct S3
+prefix.
 
 Provision the VPC, load balancer, compute host, endpoint, bucket, credentials,
 monitoring and backups. Configure bearer-token authentication and TLS at the
