@@ -124,6 +124,17 @@ impl<S: ObjectStore> SingleMachine<S> {
         }
         self.db.search_filtered(query, k, filter)
     }
+    pub fn query_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &crate::Filter,
+    ) -> Result<Vec<Neighbor>> {
+        if k > self.options.max_documents {
+            return Err(Error::Invalid("k exceeds serving document bound".into()));
+        }
+        self.db.search_filter(query, k, filter)
+    }
     /// Validate bounds before any maintenance or mutation I/O. Maintenance, when
     /// due, completes BEFORE publication of this batch; failure never means the
     /// submitted batch was committed by this call. The batch's own create error
