@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Glider: a vector database with S3 as the source of truth</title>
-<meta name="description" content="Glider is an open-source, single-node vector database written in Rust. Object storage is the durable state; crash-safe takeover, clustered ANN search and equality filters over HTTP/JSON.">
+<meta name="description" content="Glider is an open-source, single-node vector database written in Rust. Object storage is the durable state; crash-safe takeover, clustered ANN search and metadata filters over HTTP/JSON.">
 <meta name="color-scheme" content="light dark">
 <meta property="og:title" content="Glider: a vector database with S3 as the source of truth">
 <meta property="og:description" content="Single-node, crash-safe vector database in Rust. Durable state lives in S3; local RAM and SSD only accelerate reads.">
@@ -114,7 +114,7 @@ footer ul{list-style:none;padding:0;margin:0 0 16px;display:flex;flex-wrap:wrap;
     <ul class="pills" aria-label="Highlights">
       <li>Crash-safe</li>
       <li>Clustered ANN</li>
-      <li>Equality filters</li>
+      <li>Metadata filters</li>
       <li>MIT OR Apache-2.0</li>
     </ul>
     <div class="btns">
@@ -246,7 +246,7 @@ curl -sS localhost:8080/v1/query -H 'content-type: application/json' \
     <div class="limits">
       <ul>
         <li><strong>Single node, single writer.</strong> No replication, sharding, read replicas or standby. Availability during a restart depends on the writer lease (default 10 s) and the open time.</li>
-        <li><strong>Equality-based filters.</strong> Filters are equality conjunctions on string metadata. Only the declared resident predicate is exact by default; other filters are applied to routed blocks and may return fewer than <code>k</code> results unless you use <code>exact: true</code>.</li>
+        <li><strong>Filtered search is approximate by default.</strong> Metadata is string-valued; filters support equality, sets, numeric ranges and nested logic. Only the declared resident predicate is exact by default; other filters may return fewer than <code>k</code> results unless you use <code>exact: true</code>, which scans every point.</li>
         <li><strong>Memory above target at 1M.</strong> Peak engine RSS at 1,000,000 vectors is 257.9 MiB on AWS (235.6 MiB on MinIO), above the 192 MiB target.</li>
         <li><strong>Opening a large collection on S3 takes seconds.</strong> 3.15 s (4.00 s for a reopen) at 1,000,000 vectors, above the 2 s target.</li>
         <li><strong>TLS via a reverse proxy.</strong> The server speaks plain HTTP with an optional static bearer token; terminate TLS at a proxy or load balancer.</li>
