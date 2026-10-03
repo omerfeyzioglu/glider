@@ -283,6 +283,7 @@ cargo test --release --all-features --locked
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tools/benchmarks.py summary --check
 python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
+python3 tools/check_links.py
 ```
 
 Object-store integration tests run against a disposable, pinned MinIO
@@ -290,6 +291,7 @@ container (requires Docker and Python 3):
 
 ```sh
 python3 tools/test_s3.py
+python3 tools/quickstart_smoke.py
 ```
 
 Local failure drills: `python3 tools/drills.py --seed 29`. Benchmarks and
