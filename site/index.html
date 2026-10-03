@@ -287,62 +287,39 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
 <section id="playground" aria-labelledby="pg-title">
   <div class="wrap">
     <div class="head">
-      <p class="eyebrow">Search playground</p>
-      <h2 id="pg-title">Move a vector. Find its neighbors.</h2>
-      <p>Explore distance metrics and metadata filters on 24 sample points. Change the query and see which neighbors make the cut.</p>
+      <p class="eyebrow">Query playground</p>
+      <h2 id="pg-title">Follow the query.<br>Watch the reads disappear.</h2>
+      <p>Route in memory. Read a few blocks. Find your neighbors. Run the same search with a warm cache and see what changes.</p>
     </div>
-    <noscript><p>This interactive demo needs JavaScript. You can run real queries using the <a href="#quickstart">quickstart</a>.</p></noscript>
     <div class="sheet pg-shell" id="pg-app" hidden>
-      <div class="pg-top">
-        <span class="pg-stamp">2D sample &middot; exact search &middot; in your browser</span>
-        <div class="pg-presets" role="group" aria-label="Example queries">
-          <span>Try:</span>
-          <button type="button" data-preset="neighbors">Nearest neighbors</button>
-          <button type="button" data-preset="filter">Sparse filter</button>
-          <button type="button" data-preset="direction">Same direction</button>
-        </div>
+      <div class="pg-top"><span class="pg-stamp">GLIDER / CLUSTERED SEARCH</span><span class="pg-dataset">4,096 vectors &middot; 16 dimensions</span></div>
+      <div class="pg-controls">
+        <div class="pg-field"><label for="pg-query">Query</label><select id="pg-query"><option value="0">Near a vector</option><option value="1">Cluster boundary</option></select></div>
+        <div class="pg-field"><label for="pg-effort">Search breadth</label><select id="pg-effort"><option value="lean">Lean</option><option value="balanced" selected>Balanced</option><option value="wide">Wide</option></select></div>
+        <fieldset class="pg-cache"><legend>Cache state</legend><div class="pg-segments"><button type="button" data-tier="cold" aria-pressed="true">Cold</button><button type="button" data-tier="ssd" aria-pressed="false">SSD</button><button type="button" data-tier="ram" aria-pressed="false">RAM</button></div></fieldset>
       </div>
-      <form id="pg-form" novalidate>
-        <div class="pg-controls">
-          <div class="pg-field"><label for="pg-x">Query X</label><input id="pg-x" type="number" min="0" max="10" step="0.1" value="6.5" required></div>
-          <div class="pg-field"><label for="pg-y">Query Y</label><input id="pg-y" type="number" min="0" max="10" step="0.1" value="4.5" required></div>
-          <div class="pg-field"><label for="pg-metric">Distance metric</label><select id="pg-metric"><option value="squared_euclidean">Squared L2</option><option value="manhattan">Manhattan</option><option value="cosine">Cosine</option></select></div>
-          <div class="pg-field"><label for="pg-k">Top K</label><select id="pg-k"><option>1</option><option>3</option><option selected>5</option><option>10</option></select></div>
-          <div class="pg-field"><label for="pg-kind">Metadata: kind</label><select id="pg-kind"><option value="all">All kinds</option><option value="docs">docs</option><option value="memory">memory</option><option value="ops">ops</option></select></div>
-          <div class="pg-field"><label for="pg-price">Metadata: price</label><select id="pg-price"><option value="all">Any price</option><option value="3">&le; 3</option><option value="5">&le; 5</option><option value="0">&le; 0 (no matches)</option></select></div>
-        </div>
-      </form>
-      <p class="pg-error" id="pg-error" role="alert" hidden></p>
       <div class="pg-main">
-        <div>
-          <svg id="pg-map" class="pg-map" viewBox="0 0 480 420" role="group" tabindex="0" aria-label="Query vector map" aria-describedby="pg-map-help"></svg>
-          <ul class="pg-legend" aria-label="Map legend"><li><span class="pg-dot pg-docs"></span>docs</li><li><span class="pg-dot pg-memory"></span>memory</li><li><span class="pg-dot pg-ops"></span>ops</li><li><span class="pg-dot pg-diamond"></span>query</li></ul>
-          <p class="pg-hint" id="pg-map-help">Click the map to move the query, or use arrow keys while the map is focused. Outlined points are top-k hits; faded points fail the filter. X and Y inputs work too.</p>
+        <div class="pg-journey">
+          <div class="pg-step-head"><span class="pg-step">01</span><h3>Route in RAM</h3><span id="pg-probes"></span></div>
+          <div id="pg-clusters" class="pg-clusters" aria-label="Cluster routing"></div>
+          <div class="pg-flow" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="pg-step-head"><span class="pg-step">02</span><h3>Read selected blocks</h3><span id="pg-block-count"></span></div>
+          <div id="pg-blocks" class="pg-blocks" aria-label="Block read sources"></div>
+          <div class="pg-legend"><span><i class="pg-object"></i>Object storage</span><span><i class="pg-ssd"></i>SSD</span><span><i class="pg-ram"></i>RAM</span><span><i></i>Unread</span></div>
+          <p class="pg-story" id="pg-story"></p>
         </div>
-        <div>
-          <div class="pg-result-head"><h3>Nearest neighbors</h3><span class="pg-count" id="pg-count" role="status" aria-live="polite" aria-atomic="true"></span></div>
-          <table class="pg-table" id="pg-table"><caption id="pg-metric-note"></caption><thead><tr><th scope="col">Point</th><th scope="col">Kind / price</th><th scope="col">Distance</th></tr></thead><tbody id="pg-results"></tbody></table>
-          <p class="pg-empty" id="pg-empty" hidden>No points match. Try another kind or price limit.</p>
-          <p class="pg-hint">Distances use Glider&rsquo;s f32 vector storage and f64 scoring rules, ordered by distance then ID.</p>
+        <div class="pg-neighbors">
+          <div class="pg-step-head"><span class="pg-step">03</span><h3>Rerank + merge tail</h3></div>
+          <ol id="pg-results" class="pg-results" aria-label="Nearest neighbors"></ol>
+          <button type="button" class="pg-fresh" id="pg-fresh" aria-pressed="false">+ Add a fresh vector</button>
+          <p class="pg-tail" id="pg-tail">New writes join the search from the in-memory log tail.</p>
         </div>
       </div>
-      <div class="card sheet pg-code" data-copy>
-        <div class="card-head"><span class="card-title">Run this query in Glider</span></div>
-        <pre><code id="pg-query-code"></code></pre>
-      </div>
-      <details class="pg-reproduce">
-        <summary>Load this dataset into a real Glider server</summary>
-        <p>Start a server in multi-collection mode in one terminal (Docker required, port 8080 must be free):</p>
-        <div class="card sheet pg-code" data-copy><div class="card-head"><span class="card-title">Start server</span></div><pre><code>docker run --rm -p 8080:8080 \
-  -v glider-playground-data:/var/lib/glider \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data \
-  ghcr.io/omerfeyzioglu/glider:latest</code></pre></div>
-        <p>In another terminal, create the collection and write the sample points. Then run the query above. Each metric uses its own collection because a collection&rsquo;s metric is fixed at creation.</p>
-        <div class="card sheet pg-code" data-copy><div class="card-head"><span class="card-title">Create collection &amp; load points</span></div><pre><code id="pg-setup-code"></code></pre></div>
-        <p>Browse the collection in the server&rsquo;s <a href="http://localhost:8080/console">built-in console</a>, or explore the <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">full HTTP API</a>.</p>
-      </details>
+      <dl class="pg-stats" aria-live="polite" aria-atomic="true"><div><dt>Recall@5</dt><dd id="pg-recall"></dd></div><div><dt>Object-store reads</dt><dd id="pg-reads"></dd></div><div><dt>Fetched bytes</dt><dd id="pg-bytes"></dd></div><div><dt>Cache hits</dt><dd id="pg-hits"></dd></div></dl>
+      <div class="pg-bottom"><span>Recorded with Glider</span><details><summary>Inside this run</summary><p>These are recorded queries from Glider&rsquo;s Rust segmented engine: seeded 16-dimensional vectors, a 16-centroid clustered index, five-bit block routing, full-precision squared L2 reranking and a durable log tail. Each state includes engine results, exact-search recall and actual range-read/cache counters.</p><p>The recording uses an in-memory object-store backend and a filesystem block cache. SSD is prewarmed; RAM repeats that query. Search breadth changes centroid probes and remote read limits. Warm-up I/O is separate from query reads. Block colors show read sources; cluster positions are an index view. This run reports no network latency.</p><p><a href="explorer-data.json" download>Download query records</a> &middot; <a href="https://github.com/omerfeyzioglu/glider/blob/main/site/README.md">Reproduce this run</a></p></details></div>
     </div>
-    <p class="pg-note">This is an exact-search illustration using synthetic vectors, not text embeddings. It runs locally in your browser, without a Glider server or S3 connection. To evaluate ANN recall, latency or durability, use the <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md">reproducible benchmarks</a> or run your own workload.</p>
+    <p id="pg-error" class="pg-error" role="alert" hidden>Query records could not be loaded. Reload to try again, or <a href="#quickstart">run Glider locally</a>.</p>
+    <noscript><p>Enable JavaScript to explore the query, or <a href="#quickstart">run Glider locally</a>.</p></noscript>
   </div>
 </section>
 

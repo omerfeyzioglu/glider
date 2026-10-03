@@ -164,10 +164,6 @@ jobs:
           GLIDER_SERVER_BIN: target/release/glider-server
         run: python3 -m unittest discover -s clients/python/tests
 
-      - name: Check playground against the exact engine
-        env:
-          GLIDER_SERVER_BIN: target/release/glider-server
-        run: python3 -m unittest discover -s tests -p 'test_site_playground.py'
 
   docker:
     runs-on: ubuntu-latest
