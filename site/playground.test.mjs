@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {STEPS, MEASURED, initial, advance, view} from './playground-model.mjs';
+import {STEPS, initial, advance, view} from './playground-model.mjs';
 import recording from './search-recording.mjs';
 
 function walk() {
@@ -35,11 +35,9 @@ test('the write fills S3 only, and the first query fills both caches', () => {
   assert.ok(!warm.hops.some(h => h.from === 's3' || h.to === 's3'));
 });
 
-test('counters show measured latencies and where each answer came from', () => {
+test('counters show where each answer came from', () => {
   const [start, written, cold, warm, crashed, restarted] = walk();
   assert.deepEqual([start, written, cold, warm, crashed, restarted].map(v => v.source.value), ['—', '—', 'S3', 'RAM', '—', 'S3']);
-  assert.deepEqual([written, cold, warm, restarted].map(v => v.latency.value), [MEASURED.write, MEASURED.cold, MEASURED.warm, MEASURED.cold]);
-  assert.equal(crashed.latency.value, '—');
   assert.deepEqual([cold, warm, crashed, restarted].map(v => v.results), [true, true, false, true]);
 });
 
@@ -66,10 +64,3 @@ test('results are the engine recording for the question shown', () => {
   for (const r of recording.results) assert.match(r.url, /^https:\/\/github\.com\/omerfeyzioglu\/glider\/blob\/main\//);
 });
 
-test('the page cites the measured numbers it shows', () => {
-  const benchmarks = readFileSync(new URL('../benchmarks/M39.md', import.meta.url), 'utf8');
-  const current = benchmarks.slice(benchmarks.indexOf('## Current main on S3'));
-  assert.match(current, /\| Warm unfiltered p95 \| [^|]+ \| 29\.8 ms \|/);
-  assert.match(current, /\| Cold unfiltered p95 \| [^|]+ \| 57\.0 ms \|/);
-  assert.match(current, /\| Write p95 \(p50\) \| [^|]+ \| 86\.9 ms/);
-});

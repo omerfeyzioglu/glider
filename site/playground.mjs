@@ -49,8 +49,6 @@ function render() {
   el('pg-caption').textContent = v.caption;
   el('pg-source').textContent = v.source.value;
   el('pg-source-note').textContent = v.source.note;
-  el('pg-latency').textContent = v.latency.value;
-  el('pg-latency-note').textContent = v.latency.note;
   el('pg-lost').textContent = String(v.lost);
   el('pg-lost-note').textContent = v.lostNote;
   el('pg-app').classList.toggle('pg-has-results', v.results);
