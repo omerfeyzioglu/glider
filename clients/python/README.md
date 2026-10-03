@@ -15,8 +15,8 @@ pip install "git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/py
 
 ## Quickstart
 
-Start a server (data is lost when the container stops; see the
-[server README](../../README.md) for S3 and persistent storage):
+Start a server (data is lost when the container stops; see
+[installing Glider](../../docs/INSTALL.md) for S3 and persistent storage):
 
 ```sh
 docker run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
@@ -41,11 +41,6 @@ client.delete([1])
 
 A server started without `GLIDER_DIMENSIONS` serves many collections; see
 [Collections](#collections) below.
-
-`query(..., exact=True)`, `get_many`, `scan`, `count` and `delete_by_filter`
-need server endpoints that are newer than the 1.0.1 image (`exact` on
-`/v1/query`, `/v1/scan`, `/v1/points/get`); use a server built from a release
-that includes them.
 
 ## API
 
@@ -76,7 +71,7 @@ fields the server did not return are `None`. Errors raise `GliderError` with
 
 Start the server without `GLIDER_DIMENSIONS` to serve many collections, each
 with its own dimension and metric (see the
-[server README](../../README.md#configuration) and
+[configuration](../../docs/CONFIGURATION.md) and
 [API](../../docs/API.md#collections)). Create them over HTTP and bind a client
 to one; every data call of a bound client (writes, queries, points, scans, and
 the request-ID resolution behind write retries) then goes to
@@ -143,7 +138,7 @@ memories. Text is embedded locally with
 1. Run Glider in multi-collection mode (no `GLIDER_DIMENSIONS`). The MCP
    server creates its collection with the model's dimension and the cosine
    metric on first use. The volume keeps the memories across container
-   restarts (S3 works too, see the server README):
+   restarts (S3 works too, see [installing Glider](../../docs/INSTALL.md)):
 
    ```sh
    docker run -d --name glider -p 8080:8080 \
