@@ -11,6 +11,7 @@
 <meta property="og:description" content="Single-node, crash-safe vector database in Rust. Durable state lives in S3; local RAM and SSD only accelerate reads. Built to go far on less.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="playground.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -204,6 +205,7 @@ footer .lic a{color:var(--paper)}
     <nav class="nav" aria-label="Primary">
       <ul>
         <li><a href="#how">How it works</a></li>
+        <li><a href="#playground">Playground</a></li>
         <li><a href="#agents">Agents</a></li>
         <li><a href="#quickstart">Quickstart</a></li>
       </ul>
@@ -219,13 +221,13 @@ footer .lic a{color:var(--paper)}
     <div>
       <p class="eyebrow">Open-source vector database</p>
       <h1>Vector search with <span class="hl">S3</span> as the source of truth.</h1>
-      <p class="lede">Every write is safe in object storage before it is acknowledged, so a crash costs you nothing. Built to go far on less.</p>
+      <p class="lede">Every write is durable in object storage before it is acknowledged. A restart recovers your data; RAM and SSD are disposable caches. Built to go far on less.</p>
       <div class="ctas">
         <a class="btn go" href="https://github.com/omerfeyzioglu/glider">
           <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
           View on GitHub
         </a>
-        <a class="btn" href="#quickstart">Quickstart <span aria-hidden="true">&rarr;</span></a>
+        <a class="btn" href="#playground">Try a query <span aria-hidden="true">&rarr;</span></a>
       </div>
     </div>
 
@@ -273,13 +275,75 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
       <dl class="facts">
         <div><dt>vectors on AWS S3</dt><dd>1M</dd></div>
         <div><dt>recall@10</dt><dd>0.998</dd></div>
-        <div><dt>p95 warm query</dt><dd>31<small>ms</small></dd></div>
-        <div><dt>p95 durable write</dt><dd>98<small>ms</small></dd></div>
+        <div><dt>p95 warm query</dt><dd>29.8<small>ms</small></dd></div>
+        <div><dt>p95 durable write</dt><dd>86.9<small>ms</small></dd></div>
       </dl>
-      <p class="band-note">SIFT1M on S3 Standard from a single c7g.2xlarge. <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#root-manifests-and-fast-open-on-s3">Full benchmarks &rarr;</a></p>
+      <p class="band-note">SIFT1M &middot; 128 dimensions &middot; k=10 &middot; S3 Standard &middot; c7g.2xlarge, eu-central-1. Recall is the static mean; latency is from concurrent readers and writers. <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#current-main-on-s3">Methodology &amp; raw results &rarr;</a></p>
     </div>
   </div>
 </div>
+
+<section id="playground" aria-labelledby="pg-title">
+  <div class="wrap">
+    <div class="head">
+      <p class="eyebrow">Search playground</p>
+      <h2 id="pg-title">Move a vector. Find its neighbors.</h2>
+      <p>Explore distance metrics and metadata filters on 24 sample points. Change the query and see which neighbors make the cut.</p>
+    </div>
+    <noscript><p>This interactive demo needs JavaScript. You can run real queries using the <a href="#quickstart">quickstart</a>.</p></noscript>
+    <div class="sheet pg-shell" id="pg-app" hidden>
+      <div class="pg-top">
+        <span class="pg-stamp">2D sample &middot; exact search &middot; in your browser</span>
+        <div class="pg-presets" role="group" aria-label="Example queries">
+          <span>Try:</span>
+          <button type="button" data-preset="neighbors">Nearest neighbors</button>
+          <button type="button" data-preset="filter">Sparse filter</button>
+          <button type="button" data-preset="direction">Same direction</button>
+        </div>
+      </div>
+      <form id="pg-form" novalidate>
+        <div class="pg-controls">
+          <div class="pg-field"><label for="pg-x">Query X</label><input id="pg-x" type="number" min="0" max="10" step="0.1" value="6.5" required></div>
+          <div class="pg-field"><label for="pg-y">Query Y</label><input id="pg-y" type="number" min="0" max="10" step="0.1" value="4.5" required></div>
+          <div class="pg-field"><label for="pg-metric">Distance metric</label><select id="pg-metric"><option value="squared_euclidean">Squared L2</option><option value="manhattan">Manhattan</option><option value="cosine">Cosine</option></select></div>
+          <div class="pg-field"><label for="pg-k">Top K</label><select id="pg-k"><option>1</option><option>3</option><option selected>5</option><option>10</option></select></div>
+          <div class="pg-field"><label for="pg-kind">Metadata: kind</label><select id="pg-kind"><option value="all">All kinds</option><option value="docs">docs</option><option value="memory">memory</option><option value="ops">ops</option></select></div>
+          <div class="pg-field"><label for="pg-price">Metadata: price</label><select id="pg-price"><option value="all">Any price</option><option value="3">&le; 3</option><option value="5">&le; 5</option><option value="0">&le; 0 (no matches)</option></select></div>
+        </div>
+      </form>
+      <p class="pg-error" id="pg-error" role="alert" hidden></p>
+      <div class="pg-main">
+        <div>
+          <svg id="pg-map" class="pg-map" viewBox="0 0 480 420" role="group" tabindex="0" aria-label="Query vector map" aria-describedby="pg-map-help"></svg>
+          <ul class="pg-legend" aria-label="Map legend"><li><span class="pg-dot pg-docs"></span>docs</li><li><span class="pg-dot pg-memory"></span>memory</li><li><span class="pg-dot pg-ops"></span>ops</li><li><span class="pg-dot pg-diamond"></span>query</li></ul>
+          <p class="pg-hint" id="pg-map-help">Click the map to move the query, or use arrow keys while the map is focused. Outlined points are top-k hits; faded points fail the filter. X and Y inputs work too.</p>
+        </div>
+        <div>
+          <div class="pg-result-head"><h3>Nearest neighbors</h3><span class="pg-count" id="pg-count" role="status" aria-live="polite" aria-atomic="true"></span></div>
+          <table class="pg-table" id="pg-table"><caption id="pg-metric-note"></caption><thead><tr><th scope="col">Point</th><th scope="col">Kind / price</th><th scope="col">Distance</th></tr></thead><tbody id="pg-results"></tbody></table>
+          <p class="pg-empty" id="pg-empty" hidden>No points match. Try another kind or price limit.</p>
+          <p class="pg-hint">Distances use Glider&rsquo;s f32 vector storage and f64 scoring rules, ordered by distance then ID.</p>
+        </div>
+      </div>
+      <div class="card sheet pg-code" data-copy>
+        <div class="card-head"><span class="card-title">Run this query in Glider</span></div>
+        <pre><code id="pg-query-code"></code></pre>
+      </div>
+      <details class="pg-reproduce">
+        <summary>Load this dataset into a real Glider server</summary>
+        <p>Start a server in multi-collection mode in one terminal (Docker required, port 8080 must be free):</p>
+        <div class="card sheet pg-code" data-copy><div class="card-head"><span class="card-title">Start server</span></div><pre><code>docker run --rm -p 8080:8080 \
+  -v glider-playground-data:/var/lib/glider \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data \
+  ghcr.io/omerfeyzioglu/glider:latest</code></pre></div>
+        <p>In another terminal, create the collection and write the sample points. Then run the query above. Each metric uses its own collection because a collection&rsquo;s metric is fixed at creation.</p>
+        <div class="card sheet pg-code" data-copy><div class="card-head"><span class="card-title">Create collection &amp; load points</span></div><pre><code id="pg-setup-code"></code></pre></div>
+        <p>Browse the collection in the server&rsquo;s <a href="http://localhost:8080/console">built-in console</a>, or explore the <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">full HTTP API</a>.</p>
+      </details>
+    </div>
+    <p class="pg-note">This is an exact-search illustration using synthetic vectors, not text embeddings. It runs locally in your browser, without a Glider server or S3 connection. To evaluate ANN recall, latency or durability, use the <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md">reproducible benchmarks</a> or run your own workload.</p>
+  </div>
+</section>
 
 <section id="how" aria-labelledby="how-title">
   <div class="wrap">
@@ -321,7 +385,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
       <article class="feat sheet dog">
         <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><path d="M23 7a16 16 0 1 1-15 10" fill="none" stroke="#0E1B2C" stroke-width="4"/><path d="M3 9l6 9 9-6" fill="#F07A1A" stroke="#0E1B2C" stroke-width="2.5" stroke-linejoin="round"/></svg>
         <h3>Retry-safe writes</h3>
-        <p>Every write carries a request ID, so an agent&rsquo;s retried call never applies twice.</p>
+        <p>Reuse a write&rsquo;s request ID within the retry window to get its original outcome without applying it twice.</p>
       </article>
       <article class="feat sheet dog">
         <svg class="ic" viewBox="0 0 46 46" aria-hidden="true"><path d="M6 12h34v8H6zM6 26h34v8H6z" fill="#C9D2DC" stroke="#0E1B2C" stroke-width="2.5"/><path d="M28 6 18 24h9l-6 16 14-21h-9z" fill="#F07A1A" stroke="#0E1B2C" stroke-width="2.5" stroke-linejoin="round"/></svg>
@@ -375,7 +439,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
     <div class="head">
       <p class="eyebrow">Agent memory &middot; MCP</p>
       <h2 id="agents-title">Durable memory for your agents.</h2>
-      <p><code>glider-mcp</code> gives any MCP client three tools. Memories survive restarts, and a retried call never stores twice.</p>
+      <p><code>glider-mcp</code> gives MCP clients three tools. Memories survive restarts, and request IDs make writes safe to retry within the retained window.</p>
       <ul class="chips" aria-label="MCP tools">
         <li>remember</li><li>recall</li><li>forget</li>
       </ul>
@@ -404,7 +468,8 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
     <div class="head">
       <p class="eyebrow">Quickstart</p>
       <h2 id="qs-title">Three commands to your first query.</h2>
-      <p>Only Docker and curl. This keeps data in the container; <a href="https://github.com/omerfeyzioglu/glider#configuration">point it at S3</a> to keep it for good.</p>
+      <p>Only Docker and curl. This demo uses a local Docker volume that survives container removal. For object storage, <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/INSTALL.md#aws">run it on S3</a>.</p>
+      <p class="fine">Once it is running, open <a href="http://localhost:8080/console">localhost:8080/console</a> to browse points and query your server.</p>
     </div>
     <div class="card sheet stack" data-tabs>
       <div class="card-head">
@@ -415,6 +480,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
       </div>
       <div role="tabpanel" id="p-qc" aria-labelledby="t-qc" tabindex="0"><pre><code><span class="c"># 1. start a server</span>
 <span class="k">docker</span> run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
+  -v glider-quickstart-data:/var/lib/glider \
   -e GLIDER_DATA_DIR=/var/lib/glider/data \
   ghcr.io/omerfeyzioglu/glider:latest
 
@@ -542,5 +608,6 @@ client.query([1, 1, 0.9], k=10, filter={<span class="s">"color"</span>: <span cl
   });
 })();
 </script>
+<script type="module" src="playground.mjs"></script>
 </body>
 </html>

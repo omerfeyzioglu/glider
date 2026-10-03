@@ -47,6 +47,11 @@ jobs:
       - name: Check documentation links
         run: python3 tools/check_links.py
 
+      - name: Test site playground
+        run: |
+          node --check site/playground.mjs
+          node --test site/playground.test.mjs
+
       - name: Check S3 and segmented features
         run: |
           cargo clippy --all-targets --all-features --locked -- -D warnings
@@ -158,6 +163,11 @@ jobs:
         env:
           GLIDER_SERVER_BIN: target/release/glider-server
         run: python3 -m unittest discover -s clients/python/tests
+
+      - name: Check playground against the exact engine
+        env:
+          GLIDER_SERVER_BIN: target/release/glider-server
+        run: python3 -m unittest discover -s tests -p 'test_site_playground.py'
 
   docker:
     runs-on: ubuntu-latest
