@@ -167,14 +167,14 @@ function renderBlocks() {
     blockCards.set(block.id, card); return card;
   }));
 }
-// One transparent, DPR-scaled overlay owns the tracks, fill and summary label.
+// One transparent, DPR-scaled overlay owns the tracks and fill.
 // Geometry is measured only when layout or the query marker changes, never
 // per animation frame. Inventory/model updates do not wait for this illustration.
 const grid = el('grid'), tracks = el('tracks'), rail = tracks.getContext('2d');
 let geometry = {}, trackWidth = 1, trackHeight = 1, transfer = null;
 const flashes = new Map();
-const TRANSFER_SPEED = .6; // CSS pixels per millisecond, including bends.
-const TRANSFER_FADE_MS = 400;
+const TRANSFER_SPEED = 2; // CSS pixels per millisecond, including bends.
+const TRANSFER_FADE_MS = 200;
 const tierCounters = {ssd: ['ssd-size', 'ssd-count'], ram: ['ram-size'], s3: ['s3-size']};
 function snapshotCounters() {
   return Object.fromEntries(Object.values(tierCounters).flat().map(id => [id, el(id).textContent]));
@@ -224,22 +224,36 @@ function measureTracks() {
       top: r.top - origin.top, bottom: r.top - origin.top + r.height, width: r.width};
   };
   const s3 = box(el('s3')), ssd = box(el('ssd')), ram = box(el('ram')), map = box(canvas);
-  const stacked = s3.top >= map.bottom;
-  const right = Math.min(trackWidth - 7, s3.right + 10);
-  const port = r => ({x: r.right, y: r.top + 30});
-  const a = port(s3), b = port(ssd), c = port(ram);
+  const mapPanel = box(document.querySelectorAll('.sim-map-panel')[0]);
+  const stacked = s3.top >= mapPanel.bottom;
+  const top = r => ({x: (r.left + r.right) / 2, y: r.top});
+  const bottom = r => ({x: (r.left + r.right) / 2, y: r.bottom});
+  const verticalGap = (a, b) => a.x === b.x ? [a, b]
+    : [a, {x: a.x, y: (a.y + b.y) / 2}, {x: b.x, y: (a.y + b.y) / 2}, b];
+  const s3SSD = verticalGap(bottom(s3), top(ssd));
+  const ssdRAM = verticalGap(bottom(ssd), top(ram));
   const point = transfer?.point ?? queryPoint ?? presets[1];
   const q = {x: map.left + point.x * map.width, y: map.top + point.y * (map.bottom - map.top)};
-  const left = s3.left - 10, bottom = ram.bottom + 10;
+  const ramLeft = {x: ram.left, y: (ram.top + ram.bottom) / 2};
+  const mapEdge = {x: mapPanel.right, y: ramLeft.y};
+  const ramMap = [ramLeft, mapEdge];
+  // Only extend to the marker when the entire elbow fits inside the map.
+  if (mapEdge.y >= map.top && mapEdge.y <= map.bottom &&
+      q.x >= map.left && q.x <= map.right && q.y >= map.top && q.y <= map.bottom) {
+    ramMap.push({x: q.x, y: mapEdge.y}, q);
+  }
+  const s3Map = verticalGap(top(s3), bottom(mapPanel));
+  // Paths are separate strokes across gaps; crossing a tier never paints over
+  // its contents. In the stacked layout RAM reaches the map via adjacent gaps.
   geometry = {
-    's3-ssd': [a, {x: right, y: a.y}, {x: right, y: b.y}, b],
-    'ssd-ram': [b, {x: right, y: b.y}, {x: right, y: c.y}, c],
+    's3-ssd': [s3SSD],
+    'ssd-ram': [ssdRAM],
     'ram-map': stacked
-      ? [c, {x: right, y: c.y}, {x: right, y: q.y}, q]
-      : [c, {x: right, y: c.y}, {x: right, y: bottom}, {x: left, y: bottom}, {x: left, y: q.y}, q],
-    // A log PUT bypasses the disposable SSD. It uses the same outer rail,
-    // passing the SSD port without an arrival or cache admission there.
-    'ram-s3': [c, {x: right, y: c.y}, {x: right, y: a.y}, a],
+      ? [[...ssdRAM].reverse(), [...s3SSD].reverse(), s3Map]
+      : [ramMap],
+    'map-gap': stacked ? [s3Map] : [ramMap],
+    // A log PUT follows the read connectors backwards, without SSD admission.
+    'ram-s3': [[...ssdRAM].reverse(), [...s3SSD].reverse()],
   };
   const cards = el('objects').children;
   if (cards.length >= 2) geometry.seal = {logs: box(cards[0]), packs: box(cards[1])};
@@ -249,10 +263,10 @@ function measureTracks() {
 function routeFor(legs) {
   const segments = [], stops = []; let length = 0;
   for (const leg of legs) {
-    const points = leg.reverse ? [...geometry[leg.track]].reverse() : geometry[leg.track];
-    for (let i = 1; i < points.length; i++) {
+    const paths = leg.reverse ? [...geometry[leg.track]].reverse().map(points => [...points].reverse()) : geometry[leg.track];
+    for (const points of paths) for (let i = 1; i < points.length; i++) {
       const a = points[i - 1], b = points[i], distance = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
-      if (distance) { segments.push({a, b, start: length, length: distance, track: leg.track, label: leg.label}); length += distance; }
+      if (distance) { segments.push({a, b, start: length, length: distance}); length += distance; }
     }
     stops.push({tier: leg.to, distance: length});
   }
@@ -261,6 +275,11 @@ function routeFor(legs) {
 function buildRoutes() {
   transfer.route = routeFor(transfer.legs);
   transfer.duration = transfer.sealing ? transfer.duration : transfer.route.length / TRANSFER_SPEED;
+  if (transfer.done && transfer.fadeStarted === null) {
+    clearTimeout(transfer.deadline);
+    transfer.deadline = setTimeout(() => stopTransfers(true, !transfer.sealing),
+      Math.max(0, transfer.started + transfer.duration - performance.now()));
+  }
 }
 function trackLine(points) {
   rail.beginPath(); rail.moveTo(points[0].x, points[0].y);
@@ -271,14 +290,6 @@ function trackLine(points) {
   rail.globalAlpha = .4;
   rail.strokeStyle = '#F7F4EE'; rail.lineWidth = 1;
   rail.setLineDash([3, 5]); rail.stroke(); rail.setLineDash([]); rail.globalAlpha = 1;
-}
-function routePoint(distance) {
-  const segments = transfer.route.segments;
-  const segment = segments.find(s => distance < s.start + s.length) ?? segments.at(-1);
-  if (!segment) return null;
-  const fraction = Math.min(1, Math.max(0, (distance - segment.start) / segment.length));
-  return {x: segment.a.x + (segment.b.x - segment.a.x) * fraction,
-    y: segment.a.y + (segment.b.y - segment.a.y) * fraction};
 }
 function paintFill(distance, opacity) {
   rail.beginPath();
@@ -332,8 +343,8 @@ function paintSeal(t) {
 }
 function paintTransfers(now) {
   rail.clearRect(0, 0, trackWidth, trackHeight);
-  // The direct log rail overlaps the read rail: draw each shared track once.
-  for (const key of ['s3-ssd', 'ssd-ram', 'ram-map']) if (geometry[key]) trackLine(geometry[key]);
+  // Draw shared gap connectors once, including in the stacked layout.
+  for (const key of ['s3-ssd', 'ssd-ram', 'map-gap']) for (const points of geometry[key] ?? []) trackLine(points);
   if (!transfer) return;
   const elapsed = now - transfer.started;
   if (transfer.sealing) { if (!motion.matches) paintSeal(Math.min(1, elapsed / transfer.duration)); return; }
@@ -343,10 +354,6 @@ function paintTransfers(now) {
   if (motion.matches) return;
   const opacity = transfer.fadeStarted === null ? 1 : Math.max(0, 1 - (now - transfer.fadeStarted) / TRANSFER_FADE_MS);
   paintFill(distance, opacity);
-  if (distance < transfer.route.length) {
-    const point = routePoint(Math.min(transfer.route.length, distance + 12));
-    if (point) paperTag(point, transfer.label);
-  }
 }
 function stopTransfers(settle = false, fade = false) {
   if (!transfer) return;
@@ -354,9 +361,11 @@ function stopTransfers(settle = false, fade = false) {
     for (const stop of transfer.route.stops) transferArrival(stop.tier);
     if (fade && !motion.matches) {
       if (transfer.fadeStarted === null) {
-        transfer.fadeStarted = performance.now();
+        transfer.fadeStarted = Math.min(performance.now(), transfer.started + transfer.duration);
         clearTimeout(transfer.deadline);
-        if (!transfer.queryFlow) transfer.deadline = setTimeout(() => stopTransfers(), TRANSFER_FADE_MS);
+        const remaining = TRANSFER_FADE_MS - (performance.now() - transfer.fadeStarted);
+        if (remaining <= 0) { stopTransfers(); return; }
+        transfer.deadline = setTimeout(() => stopTransfers(), remaining);
       }
       paintTransfers(performance.now());
       return;
@@ -368,7 +377,7 @@ function stopTransfers(settle = false, fade = false) {
 }
 function startTransfers(flow, {duration = 900, point = queryPoint ?? presets[1], sealing = false, counters = null, queryFlow = false} = {}) {
   stopTransfers(); clearArrivals();
-  transfer = {started: performance.now(), legs: flow?.legs ?? [], label: flow?.label,
+  transfer = {started: performance.now(), legs: flow?.legs ?? [],
     colour: flow?.colour ?? '#F07A1A', arrived: new Set(), fadeStarted: null,
     counters, queryFlow, finalCounters: snapshotCounters(), point: {...point}, duration, sealing, frame: 0, deadline: 0};
   measureTracks();
@@ -384,13 +393,13 @@ function startTransfers(flow, {duration = 900, point = queryPoint ?? presets[1],
       paintTransfers(now);
       if (transfer.fadeStarted !== null) {
         if (now - transfer.fadeStarted >= TRANSFER_FADE_MS) { stopTransfers(); return; }
-      } else if (now - transfer.started >= transfer.duration && (!transfer.queryFlow || !queryAnimation)) {
+      } else if (now - transfer.started >= transfer.duration) {
         stopTransfers(true, !transfer.sealing);
         if (!transfer) return;
       }
       transfer.frame = requestAnimationFrame(update);
     };
-    if (!queryFlow) transfer.deadline = setTimeout(() => stopTransfers(true, !sealing), transfer.duration);
+    transfer.deadline = setTimeout(() => stopTransfers(true, !sealing), transfer.duration);
     update();
   });
 }
@@ -433,9 +442,7 @@ function runQuery(point) {
   const local = plan.reads.filter(read => read.source !== 's3');
   // One aggregate flow starts at the deepest source needed by this plan.
   const source = remote.length ? 's3' : plan.sources.ssd ? 'ssd' : 'ram';
-  const label = source === 's3' ? `${plan.reads.length} blocks · ${+(plan.bytes / 1024).toFixed(1)} KiB`
-    : `${plan.reads.length} blocks from ${source.toUpperCase()}`;
-  void startTransfers({label, legs: [
+  void startTransfers({legs: [
     ...(source === 's3' ? [{track: 's3-ssd', to: 'ssd'}] : []),
     ...(source !== 'ram' ? [{track: 'ssd-ram', to: 'ram'}] : []),
     {track: 'ram-map', to: 'map'},
@@ -536,7 +543,7 @@ setInterval(() => {
     writeDots.push(...batch.rows); writeDots = writeDots.slice(-6400);
     say('100 new writes are durable in S3 and visible in RAM.');
     renderInventory(); invalidate();
-    if (!transfer) void startTransfers({label: 'batch of 100 · log object', colour: '#16304F',
+    if (!transfer) void startTransfers({colour: '#16304F',
       legs: [{track: 'ram-map', reverse: true, to: 'ram'}, {track: 'ram-s3', to: 's3'}],
     }, {point: queryPoint ?? presets[1], counters});
     if (batch.shouldSeal) void sealTail();
