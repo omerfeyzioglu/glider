@@ -9,11 +9,10 @@ use super::{
 };
 use crate::{
     admission::{Engine, EngineMetrics, QueryResult, ScanResult, Snapshot},
-    matches_filter,
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     store::ObjectStore,
     streaming::OwnedDocument,
-    Config, Error, Neighbor, Result,
+    Config, Error, Filter, Neighbor, Result,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -30,11 +29,27 @@ fn scan_view<S: ObjectStore>(
     limit: usize,
     include_metadata: bool,
 ) -> Result<ScanResult> {
+    scan_view_filter(
+        view,
+        &Filter::equality(filter),
+        after,
+        limit,
+        include_metadata,
+    )
+}
+
+fn scan_view_filter<S: ObjectStore>(
+    view: &View<S>,
+    filter: &Filter,
+    after: Option<u64>,
+    limit: usize,
+    include_metadata: bool,
+) -> Result<ScanResult> {
     let mut points = BTreeMap::new();
     let mut matched = 0_u64;
     let mut eligible = 0_u64;
     view.scan_live(|id, _, metadata| {
-        if matches_filter(metadata, filter) {
+        if filter.matches(metadata) {
             matched += 1;
             if after.is_none_or(|after| id > after) {
                 eligible += 1;
@@ -710,6 +725,46 @@ impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
             remote_bytes: reads.bytes,
         })
     }
+    fn query_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> Result<QueryResult> {
+        let (hits, reads) = self.view.search_selective_within_filter(
+            query,
+            k,
+            self.read_budget,
+            filter,
+            options,
+        )?;
+        Ok(QueryResult {
+            sequence: self.view.sequence(),
+            neighbors: hits.iter().map(QueryHit::neighbor).collect(),
+            hits,
+            remote_reads: reads.requests,
+            remote_bytes: reads.bytes,
+        })
+    }
+    fn query_exact_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> Result<QueryResult> {
+        let (hits, reads) = self
+            .view
+            .search_exact_with_reads_filter(query, k, filter, options)?;
+        Ok(QueryResult {
+            sequence: self.view.sequence(),
+            neighbors: hits.iter().map(QueryHit::neighbor).collect(),
+            hits,
+            remote_reads: reads.requests,
+            remote_bytes: reads.bytes,
+        })
+    }
     fn scan(
         &self,
         filter: &[(&str, &str)],
@@ -718,6 +773,15 @@ impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
         include_metadata: bool,
     ) -> Result<ScanResult> {
         scan_view(&self.view, filter, after, limit, include_metadata)
+    }
+    fn scan_filter(
+        &self,
+        filter: &Filter,
+        after: Option<u64>,
+        limit: usize,
+        include_metadata: bool,
+    ) -> Result<ScanResult> {
+        scan_view_filter(&self.view, filter, after, limit, include_metadata)
     }
 }
 
@@ -777,6 +841,21 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
         self.db
             .search_selective_within_options(query, k, self.options.read_budget, filter, options)
     }
+    fn query_with_options_filter(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
+        self.db.search_selective_within_options_filter(
+            query,
+            k,
+            self.options.read_budget,
+            filter,
+            options,
+        )
+    }
     fn query_exact_with_options(
         &mut self,
         query: &[f32],
@@ -786,6 +865,16 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
     ) -> Result<Vec<QueryHit>> {
         self.db.search_exact_with_options(query, k, filter, options)
     }
+    fn query_exact_with_options_filter(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
+        self.db
+            .search_exact_with_options_filter(query, k, filter, options)
+    }
     fn scan(
         &self,
         filter: &[(&str, &str)],
@@ -794,6 +883,15 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
         include_metadata: bool,
     ) -> Result<ScanResult> {
         scan_view(&self.db.view(), filter, after, limit, include_metadata)
+    }
+    fn scan_filter(
+        &self,
+        filter: &Filter,
+        after: Option<u64>,
+        limit: usize,
+        include_metadata: bool,
+    ) -> Result<ScanResult> {
+        scan_view_filter(&self.db.view(), filter, after, limit, include_metadata)
     }
     /// Admission runs queries on these views, beside the committer.
     fn snapshot(&self) -> Option<Arc<dyn Snapshot>> {

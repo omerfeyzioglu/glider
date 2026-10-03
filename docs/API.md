@@ -8,7 +8,7 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 | Method and path | Auth | Purpose |
 |---|---|---|
 | [`POST /v1/write`](#post-v1write) | bearer | Atomic batch of upserts and deletes |
-| [`POST /v1/query`](#post-v1query) | bearer | k-nearest-neighbor query with optional equality filter |
+| [`POST /v1/query`](#post-v1query) | bearer | k-nearest-neighbor query with optional metadata filter |
 | [`POST /v1/points/get`](#post-v1pointsget) | bearer | Get up to 1000 points in one consistent read |
 | [`POST /v1/scan`](#post-v1scan) | bearer | Count and page through live points matching a filter |
 | [`GET /v1/points/{id}`](#get-v1pointsid) | bearer | Current vector and metadata of one point |
@@ -112,13 +112,13 @@ Response `200`:
 
 ## `POST /v1/query`
 
-Return the `k` nearest current points to `vector`.
+Return the `k` nearest current points to `vector`. See [Filters](#filters).
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `vector` | array of numbers | required | Same dimension and validity rules as writes |
 | `k` | integer | `10` | 1 to 1000 |
-| `filter` | object of strings | `{}` | Equality conjunction: every key must be present with exactly that value |
+| `filter` | object | `{}` | Metadata predicate; see [Filters](#filters) |
 | `include_metadata` | bool | `false` | Add each hit's `metadata` |
 | `include_vector` | bool | `false` | Add each hit's stored `vector` |
 | `exact` | bool | `false` | Exhaustive exact search of the acknowledged view |
@@ -139,12 +139,12 @@ With `"exact":false` (the default):
   budget (12 candidate blocks, 8 remote range requests and 1 MiB per query,
   plus up to `GLIDER_LOCAL_BLOCKS` cached blocks), then reranked exactly.
   Unsealed recent writes are always scanned exactly.
-- **Exactly the declared `GLIDER_RESIDENT_FILTER` pair:** exact, from
-  full-precision vectors held in memory.
+- **Only the declared `GLIDER_RESIDENT_FILTER` equality:** exact, from
+  full-precision vectors held in memory. Repeating it is equivalent.
 - **Any other filter:** approximate post-filtering over the same routed
-  blocks; keys listed in `GLIDER_ROUTED_KEYS` first restrict which rows
-  are routed. May return fewer than `k` results, or none, even when matches
-  exist.
+  blocks; required equality leaves on `GLIDER_ROUTED_KEYS` first restrict
+  which rows are routed. May return fewer than `k` results, or none, even
+  when matches exist.
 
 ```sh
 curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
@@ -205,7 +205,7 @@ Response `200`:
 
 ## `POST /v1/scan`
 
-Exhaustively scan live points with an equality conjunction. `filter` defaults
+Exhaustively scan live points with a [filter](#filters). `filter` defaults
 to `{}`; `after` excludes IDs at or below it. `limit` defaults to 1000 and
 must be 1 to 10000. `include_metadata` defaults to `false`. Results are in
 ascending ID order. `matched` counts all matches before `after` and `limit`;
@@ -228,6 +228,42 @@ Response `200`:
 To delete by filter, scan pages, collect their IDs, then submit ordinary
 `/v1/write` delete batches of at most 100 operations. Concurrent writes can
 change which IDs match while paging.
+
+## Filters
+
+Metadata remains a map of strings to strings. A filter is a JSON object;
+several members in one object are ANDed. `{}` matches every point. A bare
+string value means equality, as before. A key can instead contain operators:
+
+```json
+{"color":"red","price":{"$gt":1.5,"$lte":10},"tag":{"$in":["a","b"]}}
+```
+
+| Operator | Argument | Meaning |
+|---|---|---|
+| `$eq`, `$ne` | string | Equal or unequal |
+| `$in`, `$nin` | array of strings | Member or not a member |
+| `$exists` | boolean | Key present or absent |
+| `$gt`, `$gte`, `$lt`, `$lte` | JSON number | Numeric comparison |
+
+Several operators for one key are ANDed. Numeric operators parse the stored
+string as a finite `f64`; missing, invalid and nonfinite stored values never
+match a numeric comparison. `$ne` and `$nin` **do** match a missing key.
+`$in` and `$nin` accept empty arrays. For example, `$in:[]` matches nothing
+and `$nin:[]` matches every point.
+
+`{"$and":[filter,...]}`, `{"$or":[filter,...]}` and `{"$not":filter}`
+work at the top level or inside other logical filters. Empty AND matches all;
+empty OR matches none. Keys beginning with `$` are reserved. Unknown operators
+and wrong argument types return HTTP 400. Maximum nesting depth is 8,
+maximum leaf conditions is 64, and each `$in` or `$nin` array has at most
+1024 values; exceeding a limit returns HTTP 400.
+
+`exact:true` queries and `/v1/scan` evaluate the full filter exhaustively.
+Default queries are approximate except when the filter consists only of the
+declared resident equality. Approximate routing uses only equality conditions
+that every match must satisfy; the full filter is checked after reading
+candidates. A bounded approximate query may omit matching points.
 
 ## `GET /v1/requests/{boundary}/{nonce}`
 
