@@ -14,7 +14,7 @@ use std::{
     time::Instant,
 };
 
-const ENDPOINTS: [&str; 8] = [
+const ENDPOINTS: [&str; 10] = [
     "/healthz",
     "/metrics",
     "/v1/status",
@@ -22,6 +22,8 @@ const ENDPOINTS: [&str; 8] = [
     "/v1/query",
     "/v1/points/{id}",
     "/v1/requests/{boundary}/{nonce}",
+    "/v1/points/get",
+    "/v1/scan",
     "unmatched",
 ];
 const BUCKETS: [f64; 11] = [
@@ -63,9 +65,11 @@ fn endpoint(path: &str) -> usize {
         "/v1/status" => 2,
         "/v1/write" => 3,
         "/v1/query" => 4,
+        "/v1/points/get" => 7,
+        "/v1/scan" => 8,
         path if path.starts_with("/v1/points/") => 5,
         path if path.starts_with("/v1/requests/") => 6,
-        _ => 7,
+        _ => 9,
     }
 }
 

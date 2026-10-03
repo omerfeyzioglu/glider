@@ -9,6 +9,8 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 |---|---|---|
 | [`POST /v1/write`](#post-v1write) | bearer | Atomic batch of upserts and deletes |
 | [`POST /v1/query`](#post-v1query) | bearer | k-nearest-neighbor query with optional equality filter |
+| [`POST /v1/points/get`](#post-v1pointsget) | bearer | Get up to 1000 points in one consistent read |
+| [`POST /v1/scan`](#post-v1scan) | bearer | Count and page through live points matching a filter |
 | [`GET /v1/points/{id}`](#get-v1pointsid) | bearer | Current vector and metadata of one point |
 | [`GET /v1/requests/{boundary}/{nonce}`](#get-v1requestsboundarynonce) | bearer | Resolve the outcome of an uncertain write |
 | [`GET /v1/status`](#get-v1status) | bearer | Sequence, queue, cache and clustering state |
@@ -119,8 +121,18 @@ Return the `k` nearest current points to `vector`.
 | `filter` | object of strings | `{}` | Equality conjunction: every key must be present with exactly that value |
 | `include_metadata` | bool | `false` | Add each hit's `metadata` |
 | `include_vector` | bool | `false` | Add each hit's stored `vector` |
+| `exact` | bool | `false` | Exhaustive exact search of the acknowledged view |
 
 How the query is answered depends on the filter:
+
+With `"exact":true`, all live points in the published root and unsealed tail
+are scored, and a filtered query returns `min(k, matches)` hits. It reads every
+block of the collection: local cache hits are free, but uncached blocks cause
+remote GETs. Use it for small collections, filtered queries that must be
+complete, or evaluation. The query uses the same admission and reader
+concurrency limits as approximate queries.
+
+With `"exact":false` (the default):
 
 - **No filter:** approximate. Blocks are ranked with persisted sketches (or
   clustered-view centroids) and the best ones are read within a fixed
@@ -137,6 +149,9 @@ How the query is answered depends on the filter:
 ```sh
 curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
   -d '{"vector":[1,1,0.9],"k":2,"include_metadata":true,"include_vector":true}'
+
+curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
+  -d '{"vector":[1,1,0.9],"k":2,"filter":{"color":"red"},"exact":true}'
 ```
 
 Response `200`:
@@ -169,6 +184,50 @@ Response `200`:
 
 A deleted or never-written ID returns `404` with
 `{"error":"no point 1"}`. Cosine collections return the stored unit vector.
+
+## `POST /v1/points/get`
+
+Read 1 to 1000 IDs from one acknowledged view. Duplicate IDs produce duplicate
+points; found points retain request order, and missing IDs appear in request
+order in `missing`. Both field flags default to `true`; omitted fields are
+absent from each point. Cosine vectors are stored unit vectors.
+
+```sh
+curl -XPOST localhost:8080/v1/points/get -H 'content-type: application/json' \
+  -d '{"ids":[2,99,1,2],"include_vector":false}'
+```
+
+Response `200`:
+
+```json
+{"points":[{"id":2,"metadata":{}},{"id":1,"metadata":{"color":"red"}},{"id":2,"metadata":{}}],"missing":[99],"sequence":2}
+```
+
+## `POST /v1/scan`
+
+Exhaustively scan live points with an equality conjunction. `filter` defaults
+to `{}`; `after` excludes IDs at or below it. `limit` defaults to 1000 and
+must be 1 to 10000. `include_metadata` defaults to `false`. Results are in
+ascending ID order. `matched` counts all matches before `after` and `limit`;
+`next` is the last returned ID when more matches remain, otherwise `null`.
+The scan reads every block, including uncached remote blocks. It retains only
+bounded IDs and requested metadata, never vectors. Pages read separate
+acknowledged views; writes between pages can change the result set.
+
+```sh
+curl -XPOST localhost:8080/v1/scan -H 'content-type: application/json' \
+  -d '{"filter":{"color":"red"},"after":1,"limit":2,"include_metadata":true}'
+```
+
+Response `200`:
+
+```json
+{"points":[{"id":3,"metadata":{"color":"red"}}],"next":null,"matched":2,"sequence":2}
+```
+
+To delete by filter, scan pages, collect their IDs, then submit ordinary
+`/v1/write` delete batches of at most 100 operations. Concurrent writes can
+change which IDs match while paging.
 
 ## `GET /v1/requests/{boundary}/{nonce}`
 
@@ -229,7 +288,7 @@ no token required. Restrict access to it at the network level if needed.
 Counters reset when the process restarts.
 
 HTTP metrics, labelled by `endpoint` (`/healthz`, `/metrics`, `/v1/status`,
-`/v1/write`, `/v1/query`, `/v1/points/{id}`,
+`/v1/write`, `/v1/query`, `/v1/points/{id}`, `/v1/points/get`, `/v1/scan`,
 `/v1/requests/{boundary}/{nonce}`, `unmatched`):
 
 - `glider_http_requests_total{endpoint, status_class="1xx".."5xx"}` (counter)
@@ -311,6 +370,6 @@ for attempt in range(5):
   serves every acknowledged write. A paused former owner may answer reads
   from its old state until it notices it was deposed, but cannot commit;
   remove it from client routing ([RECOVERY.md](RECOVERY.md)).
-- Unfiltered and non-resident filtered queries are approximate; their
-  measured recall is in [BENCHMARKS.md](../BENCHMARKS.md). Exact search is
-  available through the library (`search_exact`) as the oracle.
+- Queries with `exact:false` are approximate except for the declared resident
+  filter; their measured recall is in [BENCHMARKS.md](../BENCHMARKS.md).
+  Queries with `exact:true` use the library's exhaustive oracle.

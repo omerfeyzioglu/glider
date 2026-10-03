@@ -14,6 +14,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Exhaustive `exact` queries, batch point reads, and filtered scan/count/paging
+  through the HTTP API.
 - Multi-platform Docker image (`linux/amd64`, `linux/arm64`) published to
   GitHub Container Registry for each version tag.
 - `cargo audit` in CI, Dependabot, issue and pull request templates, and a
