@@ -6,317 +6,961 @@
 <title>Glider: a vector database with S3 as the source of truth</title>
 <meta name="description" content="Glider is an open-source, single-node vector database written in Rust. Object storage is the durable state; crash-safe takeover, clustered ANN search and metadata filters over HTTP/JSON.">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F4F7F5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0F1714" media="(prefers-color-scheme: dark)">
 <meta property="og:title" content="Glider: a vector database with S3 as the source of truth">
 <meta property="og:description" content="Single-node, crash-safe vector database in Rust. Durable state lives in S3; local RAM and SSD only accelerate reads.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Sora:wght@300;400;500;600&display=swap">
 <style>
 :root{
-  --bg:#ffffff; --bg-alt:#f4f6f9; --text:#14181f; --muted:#4a5565; --border:#d5dbe3;
-  --accent:#0b4fd6; --accent-text:#ffffff; --code-bg:#0f1720; --code-text:#e6edf3;
-  --code-border:#243142; --warn-bg:#fff6e5; --warn-border:#e0b25c; --tag-bg:#e3ecff; --tag-text:#0a3aa0;
-  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
-  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --bg:#F4F7F5;
+  --ink:#15201B; --ink-2:#45534C; --ink-3:#5E6D65;
+  --sky:#7DB8DD; --sky-ink:#1D6390; --sky-wash:rgba(125,184,221,.16);
+  --clay:#E8A487; --clay-ink:#A44F2C; --clay-wash:rgba(232,164,135,.18);
+  --sage:#9CC2AC; --sage-ink:#3D7656;
+  --glass:rgba(255,255,255,.58); --glass-strong:rgba(255,255,255,.8);
+  --rim:rgba(255,255,255,.75); --hair:rgba(21,32,27,.07);
+  --shadow:0 4px 30px rgba(0,0,0,.02), 0 1px 2px rgba(21,32,27,.03);
+  --code:rgba(255,255,255,.72);
+  --btn:#15201B; --btn-text:#F4F7F5;
+  --flow-a:rgba(29,99,144,.34); --flow-b:rgba(164,79,44,.28); --flow-pulse:rgba(29,99,144,.55);
+  --sans:"Sora",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --r-lg:26px; --r-md:18px; --r-sm:12px;
+  --gutter:clamp(16px,4vw,40px);
 }
 @media (prefers-color-scheme: dark){
   :root{
-    --bg:#0d1117; --bg-alt:#151b23; --text:#e6edf3; --muted:#a4b0be; --border:#2a3441;
-    --accent:#7cb0ff; --accent-text:#0d1117; --code-bg:#010409; --code-text:#e6edf3;
-    --code-border:#2a3441; --warn-bg:#241d0e; --warn-border:#7a5f1f; --tag-bg:#1c2b4a; --tag-text:#a9c8ff;
+    --bg:#0F1714;
+    --ink:#E7EEEA; --ink-2:#B3C1B9; --ink-3:#8D9C94;
+    --sky:#7FC0E8; --sky-ink:#8CCBF0; --sky-wash:rgba(127,192,232,.12);
+    --clay:#E9A98C; --clay-ink:#F0B59A; --clay-wash:rgba(233,169,140,.12);
+    --sage:#7FB396; --sage-ink:#9BD1B0;
+    --glass:rgba(255,255,255,.035); --glass-strong:rgba(255,255,255,.06);
+    --rim:rgba(255,255,255,.06); --hair:rgba(231,238,234,.08);
+    --shadow:0 4px 30px rgba(0,0,0,.22);
+    --code:rgba(0,0,0,.22);
+    --btn:#E7EEEA; --btn-text:#0F1714;
+    --flow-a:rgba(140,203,240,.26); --flow-b:rgba(240,181,154,.2); --flow-pulse:rgba(140,203,240,.6);
   }
 }
-*{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--sans);-webkit-text-size-adjust:100%}
-a{color:var(--accent)}
-a:focus-visible,button:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:4px}
-.wrap{max-width:62rem;margin:0 auto;padding:0 16px}
-.skip{position:absolute;left:-999px;top:0;background:var(--accent);color:var(--accent-text);padding:8px 12px;z-index:10}
-.skip:focus{left:8px;top:8px}
-header.site{border-bottom:1px solid var(--border)}
-header.site .wrap{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;padding-top:12px;padding-bottom:12px}
-.brand{font-weight:700;font-size:1.15rem;color:var(--text);text-decoration:none;display:flex;align-items:center;gap:8px}
-.brand img{width:24px;height:24px}
-nav ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:4px 16px}
-nav a{color:var(--muted);text-decoration:none;font-size:.95rem}
-nav a:hover{color:var(--accent);text-decoration:underline}
-section{padding:48px 0;border-top:1px solid var(--border)}
-section.hero{border-top:0;padding:56px 0 48px}
-h1{font-size:clamp(1.9rem,5.5vw,3rem);line-height:1.15;margin:0 0 16px;letter-spacing:-.02em}
-h2{font-size:clamp(1.4rem,3.5vw,1.8rem);line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
-h3{font-size:1.05rem;margin:0 0 6px}
-p{margin:0 0 14px}
-.lead{font-size:clamp(1.05rem,2.4vw,1.25rem);color:var(--muted);max-width:44rem}
-.muted{color:var(--muted)}
-.pills{list-style:none;padding:0;margin:20px 0 24px;display:flex;flex-wrap:wrap;gap:8px}
-.pills li{border:1px solid var(--border);border-radius:999px;padding:3px 12px;font-size:.9rem;background:var(--bg-alt)}
-.btns{display:flex;flex-wrap:wrap;gap:12px}
-.btn{display:inline-block;padding:10px 18px;border-radius:8px;font-weight:600;text-decoration:none;border:2px solid var(--accent);min-height:44px;line-height:1.4}
-.btn.primary{background:var(--accent);color:var(--accent-text)}
-.btn.secondary{color:var(--accent);background:transparent}
-.btn:hover{filter:brightness(1.1)}
-.tag{display:inline-block;background:var(--tag-bg);color:var(--tag-text);font-size:.75rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 8px;border-radius:4px;vertical-align:middle;margin-left:6px}
-.codeblock{position:relative;margin:0 0 16px}
-.codeblock pre{margin:0;background:var(--code-bg);color:var(--code-text);border:1px solid var(--code-border);border-radius:8px;padding:14px 16px;overflow-x:auto;font:.875rem/1.55 var(--mono);tab-size:2}
-.codeblock.has-copy pre{padding-right:76px}
-.copy{position:absolute;top:8px;right:8px;background:transparent;color:var(--code-text);border:1px solid var(--code-border);border-radius:6px;padding:4px 10px;font:.8rem var(--sans);cursor:pointer;min-height:28px}
-.copy:hover{background:#243142}
-code.inline,p code,li code,td code{font:.88em var(--mono);background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,17rem),1fr));gap:16px;margin-top:20px}
-.card{border:1px solid var(--border);border-radius:10px;padding:16px 18px;background:var(--bg-alt)}
-.card p{margin:0;color:var(--muted);font-size:.95rem}
-.tablewrap{overflow-x:auto;margin:16px 0}
-table{border-collapse:collapse;width:100%;min-width:34rem;font-size:.95rem}
-caption{text-align:left;color:var(--muted);padding-bottom:8px;font-size:.9rem}
-th,td{border-bottom:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
-th{background:var(--bg-alt);font-weight:600}
-td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-figure{margin:20px 0}
-.diagram{background:#ffffff;border:1px solid var(--border);border-radius:10px;padding:8px}
-.diagram img{display:block;width:100%;height:auto}
-figcaption{color:var(--muted);font-size:.9rem;margin-top:8px}
-ul.plain{padding-left:1.2rem;margin:0 0 14px}
-ul.plain li{margin-bottom:8px}
-.limits{border:1px solid var(--warn-border);background:var(--warn-bg);border-radius:10px;padding:8px 20px 8px 20px}
-.limits ul{margin:12px 0;padding-left:1.1rem}
-.limits li{margin-bottom:8px}
-.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr));gap:24px}
-footer{border-top:1px solid var(--border);padding:32px 0 48px;color:var(--muted);font-size:.95rem}
-footer ul{list-style:none;padding:0;margin:0 0 16px;display:flex;flex-wrap:wrap;gap:6px 18px}
-@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:88px}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 16.5px/1.7 var(--sans);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;-webkit-text-size-adjust:100%;overflow-x:hidden}
+img,svg{max-width:100%}
+a{color:var(--sky-ink);text-decoration-thickness:1px;text-underline-offset:3px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--sky-ink);outline-offset:3px;border-radius:6px}
+p{margin:0 0 1em}
+code,kbd{font-family:var(--mono);font-size:.86em}
+:not(pre)>code{background:var(--glass-strong);border-radius:6px;padding:.12em .4em;box-shadow:inset 0 0 0 1px var(--hair);overflow-wrap:anywhere}
+.wrap{max-width:1200px;margin:0 auto;padding:0 var(--gutter)}
+.skip{position:absolute;left:-999px;top:8px;z-index:50;background:var(--btn);color:var(--btn-text);padding:10px 14px;border-radius:10px}
+.skip:focus{left:8px}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+
+/* ambient light, kept very soft */
+.atmos{position:fixed;inset:0;z-index:-1;pointer-events:none;background:
+  radial-gradient(60vw 50vh at 85% 0%,var(--sky-wash),transparent 70%),
+  radial-gradient(50vw 50vh at 0% 35%,var(--clay-wash),transparent 70%)}
+
+/* glass */
+.glass{position:relative;background:var(--glass);-webkit-backdrop-filter:blur(8px) saturate(120%);backdrop-filter:blur(8px) saturate(120%);border-radius:var(--r-lg);box-shadow:var(--shadow),inset 0 0 0 1px var(--rim)}
+
+/* header */
+.top{position:sticky;top:0;z-index:20;padding:14px 0}
+.top .bar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 8px 8px 18px;border-radius:999px}
+.brand{display:flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none;font-weight:600;font-size:1.05rem;letter-spacing:-.02em}
+.brand svg{width:26px;height:26px;flex:none}
+.nav{display:flex;align-items:center;gap:4px}
+.nav ul{display:flex;gap:2px;list-style:none;margin:0;padding:0}
+.nav a{color:var(--ink-2);text-decoration:none;font-size:.9rem;padding:8px 12px;border-radius:999px;transition:color .2s,background .2s}
+.nav a:hover{color:var(--ink);background:var(--glass-strong)}
+.btn{display:inline-flex;align-items:center;gap:10px;min-height:46px;padding:0 22px;border-radius:999px;font:500 .95rem/1 var(--sans);letter-spacing:-.005em;text-decoration:none;transition:transform .25s ease,box-shadow .25s ease,background .25s}
+.btn svg{width:17px;height:17px;flex:none}
+.btn.primary{background:var(--btn);color:var(--btn-text);box-shadow:0 6px 24px rgba(21,32,27,.12)}
+.btn.primary:hover{transform:translateY(-1px);box-shadow:0 10px 30px rgba(21,32,27,.16)}
+.btn.ghost{color:var(--ink);background:var(--glass-strong);box-shadow:var(--shadow),inset 0 0 0 1px var(--hair)}
+.btn.ghost:hover{transform:translateY(-1px)}
+.btn.sm{min-height:38px;padding:0 16px;font-size:.88rem}
+.nav .btn{margin-left:8px}
+@media (max-width:860px){.nav ul{display:none}}
+@media (max-width:420px){.btn{padding:0 18px}.cta{gap:10px}}
+
+/* type */
+.kicker{display:inline-flex;align-items:center;gap:10px;font:500 .74rem/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin:0 0 22px}
+.kicker::before{content:"";width:22px;height:1px;background:currentColor;opacity:.7}
+h1,h2,h3{font-family:var(--sans);color:var(--ink);margin:0}
+h1{font-weight:500;font-size:clamp(2.45rem,5.4vw,4.55rem);line-height:1.02;letter-spacing:-.045em}
+h2{font-weight:500;font-size:clamp(1.85rem,3.5vw,2.9rem);line-height:1.08;letter-spacing:-.035em;margin-bottom:20px}
+h3{font-weight:500;font-size:1.18rem;line-height:1.3;letter-spacing:-.02em;margin-bottom:10px}
+.soft{color:var(--ink-3)}
+.lead{font-size:clamp(1.05rem,1.6vw,1.2rem);line-height:1.65;color:var(--ink-2);font-weight:300;max-width:34rem}
+.sub{color:var(--ink-2);max-width:40rem}
+.tag{display:inline-flex;align-items:center;font:500 .68rem/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--clay-ink);background:var(--clay-wash);padding:6px 9px;border-radius:999px;vertical-align:middle;white-space:nowrap}
+.tag.sky{color:var(--sky-ink);background:var(--sky-wash)}
+
+section{padding:clamp(80px,11vw,150px) 0 0}
+
+/* hero */
+.hero{position:relative;padding:clamp(40px,7vw,96px) 0 0;isolation:isolate}
+.flow{position:absolute;left:0;right:0;top:-90px;height:calc(100% + 140px);z-index:-1;pointer-events:none;overflow:hidden;
+  -webkit-mask-image:linear-gradient(to bottom,transparent,#000 14%,#000 80%,transparent);mask-image:linear-gradient(to bottom,transparent,#000 14%,#000 80%,transparent)}
+.flow svg{display:block;width:100%;height:100%;max-width:none;
+  -webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,.3),rgba(0,0,0,.3) 40%,#000 62%);mask-image:linear-gradient(90deg,rgba(0,0,0,.3),rgba(0,0,0,.3) 40%,#000 62%)}
+@media (max-width:960px){.flow svg{-webkit-mask-image:linear-gradient(rgba(0,0,0,.45),rgba(0,0,0,.45));mask-image:linear-gradient(rgba(0,0,0,.45),rgba(0,0,0,.45))}}
+.flow .lines path{fill:none;stroke:var(--flow-a);stroke-width:.8}
+.flow .lines path:nth-child(3n){stroke:var(--flow-b)}
+.flow .pulse use{fill:none;stroke:var(--flow-pulse);stroke-width:1.2;stroke-linecap:round;stroke-dasharray:26 974;animation:stream 16s linear infinite}
+.flow .pulse use:nth-child(2){animation-duration:21s;animation-delay:-6s;stroke:var(--clay)}
+.flow .pulse use:nth-child(3){animation-duration:18s;animation-delay:-11s}
+.flow .pulse use:nth-child(4){animation-duration:24s;animation-delay:-3s;stroke:var(--clay)}
+.flow .pulse use:nth-child(5){animation-duration:19s;animation-delay:-14s}
+@keyframes stream{from{stroke-dashoffset:1000}to{stroke-dashoffset:0}}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:clamp(32px,5vw,72px);align-items:center}
+.hero h1 em{font-style:normal;color:var(--sky-ink)}
+.hero .lead{margin:28px 0 36px}
+.cta{display:flex;flex-wrap:wrap;gap:12px}
+.facts{display:flex;flex-wrap:wrap;gap:8px 18px;margin:40px 0 0;padding:0;list-style:none;font:400 .76rem/1.4 var(--mono);color:var(--ink-3)}
+.facts li{display:flex;align-items:center;gap:8px}
+.facts li::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--sage)}
+@media (max-width:960px){.hero-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* code */
+.term{border-radius:var(--r-lg);overflow:hidden}
+.term-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px 0 18px}
+.dots{display:flex;gap:7px}
+.dots i{width:10px;height:10px;border-radius:50%;background:var(--hair);box-shadow:inset 0 0 0 1px var(--hair)}
+.tabs{display:flex;gap:2px;padding:4px;border-radius:999px;background:var(--glass-strong);box-shadow:inset 0 0 0 1px var(--hair)}
+.tabs button{appearance:none;border:0;background:transparent;color:var(--ink-3);font:500 .76rem/1 var(--mono);letter-spacing:.02em;padding:8px 12px;border-radius:999px;cursor:pointer;transition:color .2s,background .2s}
+.tabs button[aria-selected="true"]{background:var(--btn);color:var(--btn-text)}
+.tabs button:hover:not([aria-selected="true"]){color:var(--ink)}
+.code{position:relative}
+.code pre{margin:0;padding:22px 24px 24px;overflow-x:auto;font:400 .8rem/1.75 var(--mono);color:var(--ink);tab-size:2;-webkit-overflow-scrolling:touch}
+.code pre code{font:inherit;background:none;box-shadow:none;padding:0}
+.block{background:var(--code);border-radius:var(--r-md);box-shadow:var(--shadow),inset 0 0 0 1px var(--rim)}
+.block pre{padding-top:10px}
+.cbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 12px 0 24px;font:500 .66rem/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+.block + .block{margin-top:14px}
+.term .code pre{min-height:346px}
+.copy{appearance:none;border:0;cursor:pointer;font:500 .7rem/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);background:var(--glass-strong);padding:8px 10px;border-radius:999px;box-shadow:inset 0 0 0 1px var(--hair);transition:color .2s}
+.copy:hover{color:var(--ink)}
+/* syntax: prompt, command, flag, string, number, key, comment, output */
+.p{color:var(--ink-3);user-select:none}
+.k{color:var(--sky-ink);font-weight:500}
+.f{color:var(--sage-ink)}
+.s{color:var(--clay-ink)}
+.n{color:var(--sage-ink)}
+.y{color:var(--sky-ink)}
+.c{color:var(--ink-3);font-style:italic}
+.out{color:var(--ink-3)}
+.term .meta{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 14px 14px 24px;font:400 .72rem/1.4 var(--mono);color:var(--ink-3)}
+
+/* metrics */
+.metrics{margin-top:clamp(64px,8vw,110px);padding:clamp(24px,3vw,36px) clamp(20px,3vw,40px)}
+.metrics dl{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:0}
+.metric{padding:6px clamp(12px,2vw,28px);position:relative}
+.metric+.metric::before{content:"";position:absolute;left:0;top:10%;bottom:10%;width:1px;background:linear-gradient(transparent,var(--hair),transparent)}
+.metric:first-child{padding-left:0}
+.metric dt{font:500 .7rem/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.metric dd{margin:12px 0 0;font:400 clamp(2rem,3.6vw,2.9rem)/1 var(--mono);letter-spacing:-.05em;color:var(--ink)}
+.metric dd small{font-size:.4em;letter-spacing:0;color:var(--ink-3);margin-left:6px}
+.metric .goal{display:block;margin-top:12px;font:400 .74rem/1.4 var(--mono);color:var(--ink-3)}
+.metrics .ctx{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px 24px;margin-top:28px;padding-top:22px;font:400 .76rem/1.6 var(--mono);color:var(--ink-3);background:linear-gradient(90deg,transparent,var(--hair),transparent) top/100% 1px no-repeat}
+@media (max-width:860px){
+  .metrics dl{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:30px}
+  .metric:nth-child(3){padding-left:0}
+  .metric:nth-child(3)::before{display:none}
+}
+
+/* section heads */
+.head{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px 64px;align-items:end;margin-bottom:clamp(40px,5vw,64px)}
+.head h2{margin:0}
+.head p{margin:0;color:var(--ink-2);max-width:32rem}
+@media (max-width:860px){.head{grid-template-columns:minmax(0,1fr)}}
+
+/* bento */
+.bento{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:16px}
+.cell{padding:clamp(24px,2.6vw,36px);display:flex;flex-direction:column;min-width:0}
+.cell p{color:var(--ink-2);font-size:.95rem;margin:0}
+.cell p+p{margin-top:.8em}
+.cell .viz{margin-bottom:28px}
+.s4{grid-column:span 4}.s3{grid-column:span 3}.s2{grid-column:span 2}
+@media (max-width:1000px){.s4,.s3{grid-column:span 6}.s2{grid-column:span 3}.cell.s2:last-child{grid-column:span 6}}
+@media (max-width:640px){.bento{grid-template-columns:minmax(0,1fr)}.s4,.s3,.s2,.cell.s2:last-child{grid-column:auto}}
+.chain{display:flex;align-items:center;flex-wrap:wrap;gap:10px 0;font:400 .76rem/1 var(--mono);color:var(--ink-2)}
+.chain span{padding:9px 12px;border-radius:999px;background:var(--glass-strong);box-shadow:inset 0 0 0 1px var(--hair);white-space:nowrap}
+.chain span.on{background:var(--sky-wash);color:var(--sky-ink);box-shadow:none}
+.chain i{width:26px;height:1px;background:var(--ink-3);opacity:.5;position:relative}
+.chain i::after{content:"";position:absolute;right:0;top:-3px;border:3.5px solid transparent;border-left:5px solid var(--ink-3);border-right:0}
+.steps{list-style:none;margin:0 0 26px;padding:0;display:grid;gap:12px;counter-reset:s}
+.steps li{display:flex;gap:14px;align-items:baseline;font-size:.92rem;color:var(--ink-2)}
+.steps li::before{counter-increment:s;content:"0" counter(s);font:500 .72rem/1 var(--mono);color:var(--clay-ink)}
+.snip{margin:0 0 24px;padding:18px 20px;border-radius:var(--r-sm);background:var(--code);box-shadow:inset 0 0 0 1px var(--rim);font:400 .76rem/1.7 var(--mono);overflow-x:auto;white-space:pre}
+.ops{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 22px;padding:0;list-style:none}
+.ops li{font:400 .72rem/1 var(--mono);color:var(--sky-ink);background:var(--sky-wash);padding:7px 9px;border-radius:8px}
+.cell .big{font:400 clamp(2.1rem,3.4vw,2.8rem)/1 var(--mono);letter-spacing:-.05em;color:var(--ink);margin:0 0 6px}
+.cell .big small{font-size:.38em;letter-spacing:0;color:var(--ink-3);margin-left:6px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:26px}
+.pair div{padding:14px 16px;border-radius:var(--r-sm);background:var(--glass-strong);box-shadow:inset 0 0 0 1px var(--hair)}
+.pair b{display:block;font:400 1.35rem/1.1 var(--mono);letter-spacing:-.04em;font-weight:400}
+.pair span{font:400 .7rem/1.4 var(--mono);color:var(--ink-3);text-transform:uppercase;letter-spacing:.1em}
+.cell .foot{margin-top:auto;padding-top:22px}
+.cell h3{margin-top:auto}
+.cell h3 .tag{margin-left:8px}
+
+/* architecture */
+.arch{padding:clamp(18px,3vw,40px)}
+.arch svg{display:block;width:100%;height:auto}
+.arch .tall{display:none;max-width:460px;margin:0 auto}
+@media (max-width:860px){.arch .wide{display:none}.arch .tall{display:block}}
+.d-panel{fill:var(--glass-strong)}
+.d-node{fill:var(--bg)}
+.d-obj{fill:var(--glass-strong);stroke:var(--hair);stroke-width:1}
+.d-t{fill:var(--ink);font:500 14px var(--sans);letter-spacing:-.01em}
+.d-s{fill:var(--ink-3);font:400 11px var(--mono)}
+.d-lab{fill:var(--ink-3);font:500 10.5px var(--mono);letter-spacing:.14em}
+.d-edge{fill:var(--ink-2);font:400 10.5px var(--mono)}
+.d-line{fill:none;stroke:var(--ink-3);stroke-width:1;opacity:.7}
+.d-w{stroke:var(--sky-ink);opacity:.9}
+.d-r{stroke:var(--sage-ink);opacity:.9}
+.d-x{stroke:var(--clay-ink);opacity:.9}
+.d-dash{fill:none;stroke-width:1.6;stroke-linecap:round;stroke-dasharray:6 120;animation:dash 4.5s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-126}}
+.d-tile{fill:var(--glass-strong);stroke:var(--hair)}
+.d-tile.new{fill:var(--sky);stroke:none;opacity:.75}
+.d-dot-w{fill:var(--sky-ink)}.d-dot-r{fill:var(--sage-ink)}.d-dot-x{fill:var(--clay-ink)}
+.notes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px;margin:44px 0 0;padding:0;list-style:none}
+.notes li{font-size:.9rem;color:var(--ink-2)}
+.notes b{display:block;font:500 .7rem/1.4 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);margin-bottom:10px}
+@media (max-width:1000px){.notes{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.notes{grid-template-columns:minmax(0,1fr)}}
+.more{margin-top:36px;display:flex;flex-wrap:wrap;gap:10px 26px;font-size:.92rem}
+.more a{text-decoration:none}
+.more a::after{content:" \2192"}
+.more a:hover{text-decoration:underline}
+
+/* split sections */
+.split{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:clamp(36px,6vw,88px);align-items:start}
+@media (min-width:961px){.qs{row-gap:40px;grid-template-rows:auto 1fr;grid-template-areas:"a b" "c b"}.qa{grid-area:a}.qb{grid-area:b}.qc{grid-area:c}}
+@media (max-width:960px){.split{grid-template-columns:minmax(0,1fr)}}
+.tools{list-style:none;margin:30px 0 0;padding:0;display:grid;gap:10px}
+.tools li{display:grid;grid-template-columns:8.5rem minmax(0,1fr);gap:16px;align-items:baseline;padding:14px 18px;border-radius:var(--r-sm);background:var(--glass);box-shadow:var(--shadow),inset 0 0 0 1px var(--rim);font-size:.92rem;color:var(--ink-2)}
+.tools code{background:none!important;box-shadow:none!important;padding:0!important;color:var(--ink);font-weight:500}
+@media (max-width:480px){.tools li{grid-template-columns:minmax(0,1fr);gap:4px}}
+.note{font-size:.88rem;color:var(--ink-3);margin-top:22px}
+.stepl{display:flex;align-items:baseline;gap:12px;font:500 .74rem/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);margin:34px 0 12px}
+.stepl:first-child{margin-top:0}
+.stepl b{color:var(--clay-ink);font-weight:500}
+.new{margin-top:0;padding:clamp(22px,3vw,32px)}
+.new ul{margin:16px 0 22px;padding:0;list-style:none;display:grid;gap:10px}
+.new li{font-size:.92rem;color:var(--ink-2);padding-left:20px;position:relative}
+.new li::before{content:"";position:absolute;left:0;top:.7em;width:8px;height:1px;background:var(--clay-ink)}
+
+/* benchmarks */
+.table{padding:clamp(8px,1.5vw,16px) clamp(16px,2.5vw,32px)}
+.tscroll{overflow-x:auto;position:relative}
+table{width:100%;border-collapse:collapse;min-width:560px;font-size:.92rem}
+caption{text-align:left;padding:18px 0 8px;font:400 .76rem/1.5 var(--mono);color:var(--ink-3)}
+th,td{padding:16px 12px;text-align:left;vertical-align:middle}
+thead th{font:500 .68rem/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
+tbody tr+tr th,tbody tr+tr td{background:linear-gradient(90deg,var(--hair),var(--hair)) top/100% 1px no-repeat}
+tbody th{font-weight:400;color:var(--ink-2)}
+td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+td.num{color:var(--ink);font-size:.95rem}
+td.goal{color:var(--ink-3);font-size:.85rem}
+th:first-child,td:first-child{padding-left:0}
+th:last-child,td:last-child{padding-right:0}
+.st{display:inline-flex;align-items:center;gap:8px;font:400 .74rem/1 var(--mono);color:var(--sage-ink);white-space:nowrap}
+.st::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.st.miss{color:var(--clay-ink)}
+.after{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px 64px;margin-top:32px;font-size:.92rem;color:var(--ink-2)}
+@media (max-width:860px){.after{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:640px){
+  table{min-width:0}
+  thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  tbody tr{display:block;padding:16px 0}
+  tbody tr+tr{background:linear-gradient(90deg,var(--hair),var(--hair)) top/100% 1px no-repeat}
+  tbody tr+tr th,tbody tr+tr td{background:none}
+  tbody th{display:block;padding:0 0 6px}
+  tbody td{display:inline-block;padding:0 14px 0 0!important;text-align:left!important}
+  td.goal::before{content:"target "}
+}
+
+/* limits */
+.limits{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:0;padding:0;list-style:none}
+.limits li{padding:26px 28px;font-size:.92rem;color:var(--ink-2)}
+.limits b{display:block;color:var(--ink);font-weight:500;font-size:1rem;letter-spacing:-.01em;margin-bottom:8px}
+@media (max-width:1000px){.limits{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:640px){.limits{grid-template-columns:minmax(0,1fr)}}
+
+/* closing + footer */
+.closing{text-align:center;padding:clamp(48px,7vw,88px) var(--gutter)}
+.closing h2{max-width:20ch;margin:0 auto 18px}
+.closing p{color:var(--ink-2);margin:0 auto 34px;max-width:34rem}
+.closing .cta{justify-content:center}
+footer{padding:clamp(80px,10vw,130px) 0 48px}
+.fgrid{display:grid;grid-template-columns:minmax(0,1.4fr) repeat(2,minmax(0,1fr));gap:40px}
+footer h3{font:500 .7rem/1.3 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:16px}
+footer ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+footer ul a{color:var(--ink-2);text-decoration:none;font-size:.92rem}
+footer ul a:hover{color:var(--ink);text-decoration:underline}
+footer .lic{font-size:.88rem;color:var(--ink-3);max-width:26rem;margin-top:16px}
+.mark{margin-top:clamp(56px,8vw,96px);font:500 clamp(4.5rem,17vw,15rem)/.8 var(--sans);letter-spacing:-.07em;color:var(--ink);opacity:.06;user-select:none;white-space:nowrap;overflow:hidden}
+@media (max-width:760px){.fgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.fgrid>:first-child{grid-column:1/-1}}
+
+@media (prefers-reduced-motion: reduce){
+  html{scroll-behavior:auto}
+  .flow .pulse,.d-dash{display:none}
+  .btn,.btn:hover{transition:none;transform:none}
+}
 </style>
 </head>
 <body>
+<div class="atmos" aria-hidden="true"></div>
 <a class="skip" href="#main">Skip to content</a>
 
-<header class="site">
+<header class="top">
   <div class="wrap">
-    <a class="brand" href="#top"><img src="favicon.svg" alt="" width="24" height="24">Glider</a>
-    <nav aria-label="Primary">
-      <ul>
-        <li><a href="#quickstart">Quickstart</a></li>
-        <li><a href="#why">Why Glider</a></li>
-        <li><a href="#agents">Agent memory</a></li>
-        <li><a href="#performance">Performance</a></li>
-        <li><a href="#architecture">Architecture</a></li>
-        <li><a href="#limits">Limits</a></li>
-        <li><a href="https://github.com/omerfeyzioglu/glider">GitHub</a></li>
-      </ul>
-    </nav>
+    <div class="bar glass">
+      <a class="brand" href="#top" aria-label="Glider, back to top">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="currentColor"/><path d="M5 21 27 8l-6 17-5-6-4 4 1-6z" fill="var(--bg)"/></svg>
+        glider
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <ul>
+          <li><a href="#why">Why Glider</a></li>
+          <li><a href="#architecture">Architecture</a></li>
+          <li><a href="#agents">Agent memory</a></li>
+          <li><a href="#quickstart">Quickstart</a></li>
+          <li><a href="#benchmarks">Benchmarks</a></li>
+        </ul>
+        <a class="btn primary sm" href="https://github.com/omerfeyzioglu/glider">GitHub</a>
+      </nav>
+    </div>
   </div>
 </header>
 
 <main id="main">
-<section class="hero" id="top">
+
+<!-- hero -->
+<div class="hero" id="top">
+  <div class="flow" aria-hidden="true"><svg viewBox="0 0 1440 820" preserveAspectRatio="xMidYMid slice" focusable="false">
+    <g class="lines">
+      <path id="fl0" d="M-40 -26.3C-31 -26 -4 -27 14 -27C32 -28 50 -28 69 -29C87 -29 105 -30 123 -30C141 -31 159 -32 177 -33C195 -33 213 -34 231 -35C250 -36 268 -37 286 -38C304 -39 322 -40 340 -42C358 -43 376 -44 394 -46C412 -47 430 -49 449 -50C467 -52 485 -54 503 -55C521 -57 539 -59 557 -61C575 -63 593 -64 611 -66C630 -68 648 -70 666 -72C684 -74 702 -76 720 -78C738 -80 756 -81 774 -83C792 -85 810 -87 829 -88C847 -90 865 -91 883 -93C901 -94 919 -95 937 -96C955 -97 973 -98 991 -99C1010 -100 1028 -100 1046 -101C1064 -101 1082 -101 1100 -101C1118 -101 1136 -101 1154 -101C1172 -100 1190 -100 1209 -99C1227 -99 1245 -98 1263 -97C1281 -96 1299 -94 1317 -93C1335 -92 1353 -90 1371 -89C1390 -87 1408 -86 1426 -84C1444 -82 1471 -79 1480 -78"/>
+      <path id="fl1" d="M-40 73.5C-31 73 -4 73 14 72C32 72 50 71 69 70C87 70 105 69 123 68C141 67 159 66 177 65C195 64 213 63 231 61C250 60 268 59 286 57C304 55 322 54 340 52C358 50 376 48 394 46C412 44 430 42 449 40C467 37 485 35 503 33C521 30 539 27 557 25C575 22 593 20 611 17C630 14 648 12 666 9C684 6 702 4 720 1C738 -1 756 -4 774 -6C792 -8 810 -11 829 -13C847 -15 865 -17 883 -18C901 -20 919 -21 937 -22C955 -24 973 -25 991 -25C1010 -26 1028 -27 1046 -27C1064 -27 1082 -27 1100 -26C1118 -26 1136 -26 1154 -25C1172 -24 1190 -23 1209 -21C1227 -20 1245 -19 1263 -17C1281 -15 1299 -13 1317 -11C1335 -9 1353 -7 1371 -4C1390 -2 1408 1 1426 3C1444 6 1471 10 1480 11"/>
+      <path id="fl2" d="M-40 161.1C-31 161 -4 160 14 159C32 159 50 158 69 157C87 156 105 155 123 154C141 153 159 151 177 150C195 149 213 147 231 146C250 144 268 142 286 140C304 138 322 136 340 134C358 132 376 130 394 127C412 125 430 122 449 119C467 116 485 114 503 110C521 107 539 104 557 101C575 98 593 94 611 91C630 88 648 84 666 81C684 77 702 74 720 71C738 67 756 64 774 61C792 58 810 55 829 53C847 50 865 48 883 46C901 44 919 42 937 41C955 40 973 38 991 38C1010 37 1028 37 1046 37C1064 37 1082 37 1100 38C1118 38 1136 39 1154 41C1172 42 1190 44 1209 46C1227 48 1245 50 1263 52C1281 55 1299 58 1317 61C1335 64 1353 67 1371 70C1390 73 1408 77 1426 80C1444 83 1471 89 1480 90"/>
+      <path id="fl3" d="M-40 235.0C-31 235 -4 233 14 233C32 232 50 231 69 230C87 229 105 228 123 226C141 225 159 224 177 222C195 221 213 219 231 218C250 216 268 214 286 212C304 211 322 209 340 206C358 204 376 202 394 199C412 197 430 194 449 191C467 188 485 185 503 182C521 178 539 175 557 171C575 167 593 163 611 159C630 155 648 150 666 146C684 142 702 137 720 133C738 129 756 125 774 121C792 117 810 114 829 110C847 107 865 104 883 101C901 99 919 97 937 95C955 93 973 92 991 91C1010 90 1028 90 1046 90C1064 90 1082 90 1100 91C1118 92 1136 93 1154 95C1172 97 1190 99 1209 101C1227 104 1245 107 1263 110C1281 114 1299 117 1317 121C1335 125 1353 129 1371 133C1390 138 1408 142 1426 146C1444 151 1471 157 1480 159"/>
+      <path id="fl4" d="M-40 294.5C-31 294 -4 293 14 292C32 291 50 290 69 289C87 288 105 287 123 286C141 285 159 284 177 283C195 281 213 280 231 279C250 277 268 276 286 274C304 273 322 271 340 269C358 268 376 266 394 264C412 261 430 259 449 256C467 254 485 251 503 248C521 244 539 241 557 237C575 233 593 228 611 223C630 219 648 213 666 208C684 203 702 197 720 191C738 186 756 180 774 175C792 170 810 165 829 160C847 156 865 152 883 148C901 145 919 142 937 139C955 137 973 135 991 134C1010 133 1028 132 1046 132C1064 131 1082 132 1100 133C1118 134 1136 135 1154 137C1172 139 1190 142 1209 145C1227 148 1245 152 1263 156C1281 160 1299 165 1317 169C1335 174 1353 180 1371 185C1390 191 1408 197 1426 202C1444 208 1471 217 1480 219"/>
+      <path id="fl5" d="M-40 348.1C-31 348 -4 347 14 346C32 345 50 345 69 344C87 343 105 343 123 342C141 341 159 341 177 340C195 339 213 338 231 338C250 337 268 336 286 335C304 334 322 333 340 332C358 331 376 330 394 329C412 327 430 326 449 324C467 322 485 321 503 318C521 315 539 313 557 309C575 305 593 301 611 295C630 290 648 284 666 277C684 270 702 261 720 253C738 245 756 237 774 229C792 222 810 214 829 208C847 201 865 196 883 191C901 186 919 182 937 178C955 175 973 172 991 170C1010 168 1028 167 1046 166C1064 166 1082 166 1100 167C1118 168 1136 169 1154 172C1172 174 1190 177 1209 181C1227 184 1245 189 1263 194C1281 199 1299 206 1317 212C1335 219 1353 227 1371 234C1390 242 1408 251 1426 259C1444 267 1471 278 1480 282"/>
+      <path id="fl6" d="M-40 390.0C-31 390 -4 389 14 389C32 389 50 388 69 388C87 388 105 388 123 387C141 387 159 387 177 387C195 387 213 387 231 386C250 386 268 386 286 386C304 386 322 386 340 385C358 385 376 385 394 385C412 384 430 384 449 383C467 383 485 382 503 381C521 380 539 378 557 376C575 374 593 372 611 367C630 363 648 358 666 350C684 341 702 329 720 317C738 305 756 291 774 279C792 267 810 256 829 247C847 238 865 230 883 223C901 216 919 211 937 206C955 201 973 198 991 195C1010 192 1028 190 1046 189C1064 189 1082 188 1100 189C1118 190 1136 192 1154 194C1172 197 1190 200 1209 205C1227 209 1245 215 1263 221C1281 228 1299 236 1317 246C1335 255 1353 266 1371 278C1390 290 1408 305 1426 316C1444 327 1471 342 1480 347"/>
+      <path id="fl7" d="M-40 459.3C-31 459 -4 460 14 460C32 460 50 460 69 461C87 461 105 461 123 462C141 462 159 463 177 463C195 464 213 465 231 465C250 466 268 467 286 467C304 468 322 469 340 470C358 471 376 472 394 473C412 474 430 475 449 477C467 478 485 480 503 481C521 483 539 485 557 488C575 491 593 494 611 499C630 504 648 510 666 519C684 528 702 540 720 552C738 565 756 580 774 592C792 604 810 615 829 624C847 634 865 642 883 648C901 655 919 660 937 665C955 669 973 673 991 675C1010 677 1028 679 1046 679C1064 679 1082 679 1100 678C1118 676 1136 674 1154 671C1172 667 1190 663 1209 658C1227 653 1245 646 1263 639C1281 631 1299 622 1317 612C1335 602 1353 590 1371 578C1390 565 1408 550 1426 538C1444 525 1471 510 1480 505"/>
+      <path id="fl8" d="M-40 506.2C-31 506 -4 507 14 508C32 509 50 509 69 510C87 511 105 511 123 512C141 513 159 514 177 515C195 516 213 517 231 518C250 519 268 520 286 521C304 523 322 524 340 525C358 527 376 528 394 530C412 532 430 533 449 536C467 538 485 540 503 543C521 546 539 549 557 553C575 558 593 562 611 568C630 574 648 580 666 588C684 595 702 604 720 612C738 620 756 629 774 636C792 644 810 652 829 658C847 665 865 670 883 675C901 680 919 684 937 688C955 691 973 693 991 695C1010 697 1028 698 1046 698C1064 698 1082 698 1100 697C1118 695 1136 694 1154 691C1172 688 1190 685 1209 681C1227 676 1245 672 1263 666C1281 660 1299 654 1317 647C1335 640 1353 631 1371 623C1390 615 1408 606 1426 598C1444 590 1471 578 1480 574"/>
+      <path id="fl9" d="M-40 567.5C-31 568 -4 569 14 570C32 571 50 572 69 573C87 574 105 575 123 576C141 577 159 578 177 579C195 580 213 582 231 583C250 584 268 585 286 587C304 588 322 590 340 591C358 593 376 595 394 597C412 599 430 601 449 604C467 606 485 609 503 612C521 615 539 618 557 622C575 626 593 631 611 635C630 640 648 645 666 650C684 656 702 661 720 667C738 672 756 678 774 683C792 688 810 693 829 698C847 702 865 706 883 710C901 713 919 716 937 719C955 721 973 723 991 724C1010 726 1028 726 1046 727C1064 727 1082 727 1100 726C1118 725 1136 724 1154 722C1172 720 1190 717 1209 714C1227 712 1245 708 1263 704C1281 700 1299 696 1317 691C1335 686 1353 681 1371 675C1390 670 1408 664 1426 659C1444 653 1471 645 1480 642"/>
+      <path id="fl10" d="M-40 633.8C-31 634 -4 636 14 637C32 638 50 638 69 639C87 640 105 641 123 642C141 643 159 645 177 646C195 647 213 648 231 649C250 650 268 652 286 653C304 654 322 656 340 658C358 659 376 661 394 663C412 665 430 667 449 669C467 671 485 674 503 677C521 679 539 682 557 686C575 689 593 692 611 696C630 699 648 703 666 707C684 711 702 715 720 719C738 723 756 727 774 730C792 734 810 737 829 741C847 744 865 747 883 749C901 752 919 754 937 756C955 758 973 760 991 761C1010 762 1028 763 1046 763C1064 764 1082 764 1100 763C1118 763 1136 762 1154 761C1172 760 1190 758 1209 756C1227 755 1245 752 1263 750C1281 747 1299 744 1317 741C1335 738 1353 734 1371 730C1390 727 1408 723 1426 719C1444 715 1471 709 1480 707"/>
+      <path id="fl11" d="M-40 710.3C-31 711 -4 712 14 713C32 713 50 714 69 715C87 716 105 717 123 718C141 719 159 719 177 720C195 721 213 722 231 723C250 724 268 726 286 727C304 728 322 729 340 731C358 732 376 734 394 735C412 737 430 739 449 741C467 743 485 745 503 747C521 749 539 752 557 754C575 757 593 759 611 762C630 765 648 768 666 771C684 773 702 776 720 779C738 782 756 785 774 787C792 790 810 793 829 795C847 798 865 800 883 802C901 804 919 806 937 808C955 809 973 811 991 812C1010 813 1028 814 1046 814C1064 815 1082 815 1100 815C1118 815 1136 815 1154 814C1172 814 1190 813 1209 812C1227 810 1245 809 1263 807C1281 806 1299 804 1317 802C1335 799 1353 797 1371 795C1390 792 1408 790 1426 787C1444 784 1471 780 1480 778"/>
+      <path id="fl12" d="M-40 795.2C-31 795 -4 796 14 797C32 798 50 798 69 799C87 799 105 800 123 801C141 801 159 802 177 803C195 804 213 805 231 805C250 806 268 807 286 808C304 809 322 811 340 812C358 813 376 814 394 816C412 817 430 819 449 820C467 822 485 824 503 826C521 828 539 829 557 831C575 833 593 836 611 838C630 840 648 842 666 844C684 847 702 849 720 851C738 853 756 855 774 858C792 860 810 862 829 864C847 866 865 867 883 869C901 871 919 872 937 874C955 875 973 876 991 877C1010 878 1028 879 1046 880C1064 880 1082 881 1100 881C1118 881 1136 881 1154 881C1172 881 1190 880 1209 879C1227 879 1245 878 1263 877C1281 876 1299 874 1317 873C1335 871 1353 870 1371 868C1390 866 1408 864 1426 862C1444 860 1471 857 1480 856"/>
+      <path id="fl13" d="M-40 888.2C-31 888 -4 889 14 889C32 890 50 890 69 891C87 891 105 892 123 892C141 893 159 894 177 894C195 895 213 896 231 896C250 897 268 898 286 899C304 900 322 901 340 902C358 904 376 905 394 906C412 907 430 909 449 910C467 912 485 913 503 915C521 916 539 918 557 920C575 922 593 923 611 925C630 927 648 929 666 931C684 932 702 934 720 936C738 938 756 940 774 941C792 943 810 945 829 946C847 948 865 949 883 951C901 952 919 953 937 954C955 955 973 956 991 957C1010 958 1028 959 1046 959C1064 960 1082 960 1100 960C1118 960 1136 960 1154 960C1172 960 1190 959 1209 959C1227 958 1245 958 1263 957C1281 956 1299 955 1317 954C1335 952 1353 951 1371 950C1390 948 1408 947 1426 945C1444 943 1471 940 1480 940"/>
+    </g>
+    <g class="pulse">
+      <use href="#fl4" pathLength="1000"/>
+      <use href="#fl6" pathLength="1000"/>
+      <use href="#fl8" pathLength="1000"/>
+      <use href="#fl10" pathLength="1000"/>
+      <use href="#fl12" pathLength="1000"/>
+    </g>
+  </svg></div>
   <div class="wrap">
-    <h1>A single-node vector database where S3 is the source of truth.</h1>
-    <p class="lead">Glider is an open-source vector database written in Rust. One server process serves one collection over HTTP/JSON; every acknowledged write is durable in object storage, and local RAM and SSD only accelerate reads.</p>
-    <ul class="pills" aria-label="Highlights">
-      <li>Crash-safe</li>
-      <li>Clustered ANN</li>
-      <li>Metadata filters</li>
-      <li>MIT OR Apache-2.0</li>
-    </ul>
-    <div class="btns">
-      <a class="btn primary" href="https://github.com/omerfeyzioglu/glider">View on GitHub</a>
-      <a class="btn secondary" href="#quickstart">Quickstart</a>
-    </div>
-  </div>
-</section>
-
-<section id="quickstart">
-  <div class="wrap">
-    <h2>Quickstart</h2>
-    <p>You need Docker and curl; no local Rust toolchain. The image is multi-platform (<code>linux/amd64</code>, <code>linux/arm64</code>). This starts a 3-dimensional collection backed by a local directory; its data is lost when the container stops. Point it at S3 with the <a href="https://github.com/omerfeyzioglu/glider#configuration">configuration variables</a> to keep it.</p>
-    <div class="codeblock"><pre><code>docker run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.1.0</code></pre></div>
-    <p>Write two points, then run a nearest-neighbor query:</p>
-    <div class="codeblock"><pre><code>curl -sS localhost:8080/v1/write -H 'content-type: application/json' \
-  -d '{"upsert":[{"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},{"id":2,"vector":[1,1,1]}]}'
-
-curl -sS localhost:8080/v1/query -H 'content-type: application/json' \
-  -d '{"vector":[1,1,0.9],"k":2,"include_metadata":true}'</code></pre></div>
-    <p>The write returns a <code>sequence</code> and <code>request_id</code>; the query returns two hits ordered by distance. Other ways to run it (Docker Compose with MinIO, from source, S3 settings) are in the <a href="https://github.com/omerfeyzioglu/glider#quickstart">README</a>.</p>
-
-    <h3>New in 1.1 <span class="tag">1.1.0</span></h3>
-    <ul class="plain">
-      <li><code>"exact": true</code> on <code>/v1/query</code>: a filtered query returns every match, up to <code>k</code>, instead of an approximate subset.</li>
-      <li><code>POST /v1/points/get</code>: read up to 1000 points by ID in one consistent read.</li>
-      <li><code>POST /v1/scan</code>: count and page through points that match a filter, which makes delete-by-filter possible.</li>
-    </ul>
-    <div class="codeblock"><pre><code>curl -sS localhost:8080/v1/query -H 'content-type: application/json' \
-  -d '{"vector":[1,1,0.9],"k":2,"filter":{"color":"red"},"exact":true}'</code></pre></div>
-    <p class="muted">Exact queries and scans read every block of the collection, so they suit small collections, completeness-critical filters and evaluation. See the <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">API reference</a> for limits.</p>
-  </div>
-</section>
-
-<section id="why">
-  <div class="wrap">
-    <h2>Why Glider</h2>
-    <div class="grid">
-      <div class="card">
-        <h3>Durable on S3</h3>
-        <p>Every acknowledged write is an immutable log object published with a conditional create. Nothing is overwritten in place, and a local disk never holds the only copy.</p>
+    <div class="hero-grid">
+      <div>
+        <p class="kicker">Open-source vector database &middot; Rust</p>
+        <h1>Vector search with <em>S3</em> as the source of truth.</h1>
+        <p class="lead">Glider is a single-node vector database. Every acknowledged write is durable in object storage; local RAM and SSD only make reads fast. When the server crashes, a restart takes over safely with no operator step.</p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/omerfeyzioglu/glider">
+            <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            View on GitHub
+          </a>
+          <a class="btn ghost" href="#quickstart">Quickstart <span aria-hidden="true">&rarr;</span></a>
+        </div>
+        <ul class="facts" aria-label="Highlights">
+          <li>Crash-safe</li>
+          <li>Clustered ANN</li>
+          <li>Metadata filters</li>
+          <li>MIT OR Apache-2.0</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Crash-safe takeover</h3>
-        <p>A restarted server waits out the old writer's lease, fences it at the object store and replays the log tail. A paused former owner can never commit again. No operator step after a crash.</p>
-      </div>
-      <div class="card">
-        <h3>Retry-safe writes</h3>
-        <p>Every write carries a request ID; resending it returns the original outcome instead of applying the write twice. That is what you want when an agent retries a tool call after a timeout. Outcomes are retained for 128 commits.</p>
-      </div>
-      <div class="card">
-        <h3>SSD cache</h3>
-        <p>A local block cache fills in the background so warm queries need no remote reads. Losing it does not lose acknowledged writes; it can affect latency and approximate recall until warm again.</p>
-      </div>
-      <div class="card">
-        <h3>Automatic clustering</h3>
-        <p>The server builds a global clustered view (centroids and cluster-contiguous postings) by itself at 250,000 rows and rebuilds it as the collection grows. Unfiltered queries read at most 8 remote ranges and 1 MiB.</p>
-      </div>
-      <div class="card">
-        <h3>Operations included</h3>
-        <p>Prometheus metrics, <code>/v1/status</code>, optional bearer-token auth, and <code>glider-admin</code> for status, backup, restore and clustering.</p>
-      </div>
-    </div>
-  </div>
-</section>
 
-<section id="agents">
-  <div class="wrap">
-    <h2>Agent memory (MCP) <span class="tag">New in 1.1</span></h2>
-    <p><code>glider-mcp</code> is an MCP server that gives AI agents durable memory backed by Glider, with three tools: <code>remember</code>, <code>recall</code> and <code>forget</code>. A memory is acknowledged only after it is durable in Glider's storage, and writes carry request IDs, so a retried tool call does not store it twice.</p>
-    <p>Start the server with the embedding model's dimension and the cosine metric (dimension and metric are fixed when a collection is created):</p>
-    <div class="codeblock"><pre><code>docker run -d --name glider-memory -p 8080:8080 \
-  -v glider-memory:/var/lib/glider \
-  -e GLIDER_DIMENSIONS=384 -e GLIDER_METRIC=cosine \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data \
-  ghcr.io/omerfeyzioglu/glider:1.1.0</code></pre></div>
-    <p>Install the client with the MCP extra, then register it. Text is embedded locally with fastembed (default <code>BAAI/bge-small-en-v1.5</code>, 384 dimensions), which needs Python 3.10 or newer.</p>
-    <div class="codeblock"><pre><code>pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</code></pre></div>
-    <div class="codeblock"><pre><code>claude mcp add glider -- glider-mcp</code></pre></div>
-    <p class="muted"><code>recall</code> uses exact search, so its cost grows with the number of memories in the collection.</p>
-  </div>
-</section>
+      <div class="term glass" id="try">
+        <div class="term-head">
+          <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="tabs" role="tablist" aria-label="Example">
+            <button type="button" role="tab" id="tab-http" aria-controls="panel-http" aria-selected="true">HTTP</button>
+            <button type="button" role="tab" id="tab-py" aria-controls="panel-py" aria-selected="false" tabindex="-1">Python</button>
+            <button type="button" role="tab" id="tab-mcp" aria-controls="panel-mcp" aria-selected="false" tabindex="-1">MCP</button>
+          </div>
+        </div>
+        <div class="code" role="tabpanel" id="panel-http" aria-labelledby="tab-http" tabindex="0">
+<pre><code><span class="p">$ </span><span class="k">docker</span> run --rm -p 8080:8080 <span class="f">-e</span> GLIDER_DIMENSIONS=<span class="n">3</span> \
+    <span class="f">-e</span> GLIDER_DATA_DIR=/var/lib/glider/data \
+    ghcr.io/omerfeyzioglu/glider:1.1.0
 
-<section id="performance">
-  <div class="wrap">
-    <h2>Performance</h2>
-    <p>Measured on AWS S3 Standard from a c7g.2xlarge (8 Graviton3 vCPU, 16 GiB) in eu-central-1, at 1,000,000 vectors of SIFT1M (128 dimensions, squared Euclidean, k=10, 200 queries). The workload loads in 100-row batches, then runs 300 s of four writers each overwriting 100 rows per second and four readers each querying every 100 ms, then restart, cache-loss and backup checks. One run; results vary between runs.</p>
-    <div class="tablewrap">
-      <table>
-        <caption>1M SIFT vectors, AWS S3 Standard, commit <code>9e2f602</code></caption>
-        <thead><tr><th scope="col">Measure</th><th scope="col" class="num">Result</th><th scope="col" class="num">Target</th></tr></thead>
-        <tbody>
-          <tr><th scope="row">Static recall@10 (mean / p5)</th><td class="num">0.998 / 1.0</td><td class="num">&ge;0.90 / &ge;0.80</td></tr>
-          <tr><th scope="row">Recall@10 after updates, cold (mean / p5)</th><td class="num">0.963 / 0.8</td><td class="num">&ge;0.90 / &ge;0.80</td></tr>
-          <tr><th scope="row">Warm unfiltered query p95</th><td class="num">30.9 ms</td><td class="num">&le;50 ms</td></tr>
-          <tr><th scope="row">Cold unfiltered query p95</th><td class="num">58.6 ms</td><td class="num">&le;200 ms</td></tr>
-          <tr><th scope="row">Filtered (resident 1%) query p95</th><td class="num">10.6 ms</td><td class="num">&le;50 ms</td></tr>
-          <tr><th scope="row">Write p95</th><td class="num">97.6 ms</td><td class="num">&le;150 ms</td></tr>
-          <tr><th scope="row">Open / reopen</th><td class="num">3.15 / 4.00 s</td><td class="num">&le;2 s</td></tr>
-          <tr><th scope="row">Peak engine RSS</th><td class="num">257.9 MiB</td><td class="num">&le;192 MiB</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p>The run lost no acknowledged writes and returned equal results after cache loss and after a backup restore. Open time and peak memory miss their targets; see <a href="#limits">Honest limits</a>. Datasets, seeds, configuration and raw results: <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#root-manifests-and-fast-open-on-s3">benchmarks/M39.md</a>, <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md">BENCHMARKS.md</a> and the <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/SUMMARY.md">benchmark summary</a>.</p>
-  </div>
-</section>
+<span class="p">$ </span><span class="k">curl</span> -sS localhost:8080/v1/write \
+    <span class="f">-H</span> <span class="s">'content-type: application/json'</span> <span class="f">-d</span> <span class="s">'{"upsert":[
+      {"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},
+      {"id":2,"vector":[1,1,1]}]}'</span>
+<span class="out">{"request_id":{"boundary":1,"nonce":"ecd72136…"},"sequence":2}</span>
 
-<section id="architecture">
-  <div class="wrap">
-    <h2>Architecture</h2>
-    <figure>
-      <div class="diagram"><img src="runtime.svg" width="1540" height="790" alt="Glider runtime architecture: writes pass bounded admission and a single committer that conditionally creates a mutation-log object in the object store; reads use a published snapshot to route to blocks and read ranges or cached blocks; maintenance publishes immutable packs, indexes, manifests and a root generation." loading="lazy"></div>
-      <figcaption>Runtime request paths and the objects stored in the bucket.</figcaption>
-    </figure>
-    <ul class="plain">
-      <li>A write batch becomes one immutable log object, created conditionally, before it is acknowledged.</li>
-      <li>Idle maintenance seals the log tail into immutable packs of vector-local blocks with compact five-bit sketches, and publishes each new state as a root generation that references per-run manifests.</li>
-      <li>The clustered view assigns rows to centroids so a query reads only the nearest clusters' blocks; new seals keep it clustered and small extents are merged in the background.</li>
-      <li>Takeover uses a renewed lease to pace restarts and permanent fence objects so that a deposed writer's next publication fails at the store.</li>
-    </ul>
-    <p>See the <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">architecture guide</a> for the AWS deployment pattern and <a href="https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md">DESIGN.md</a> for formats, invariants and recovery semantics.</p>
-  </div>
-</section>
+<span class="p">$ </span><span class="k">curl</span> -sS localhost:8080/v1/query \
+    <span class="f">-H</span> <span class="s">'content-type: application/json'</span> \
+    <span class="f">-d</span> <span class="s">'{"vector":[1,1,0.9],"k":2,"include_metadata":true}'</span>
+<span class="out"># two hits, nearest first: id 2, then id 1</span></code></pre>
+        </div>
+        <div class="code" role="tabpanel" id="panel-py" aria-labelledby="tab-py" tabindex="0" hidden>
+<pre><code><span class="k">from</span> glider_client <span class="k">import</span> Client
 
-<section id="limits">
-  <div class="wrap">
-    <h2>Honest limits</h2>
-    <div class="limits">
-      <ul>
-        <li><strong>Single node, single writer.</strong> No replication, sharding, read replicas or standby. Availability during a restart depends on the writer lease (default 10 s) and the open time.</li>
-        <li><strong>Filtered search is approximate by default.</strong> Metadata is string-valued; filters support equality, sets, numeric ranges and nested logic. Only the declared resident predicate is exact by default; other filters may return fewer than <code>k</code> results unless you use <code>exact: true</code>, which scans every point.</li>
-        <li><strong>Memory above target at 1M.</strong> Peak engine RSS at 1,000,000 vectors is 257.9 MiB on AWS (235.6 MiB on MinIO), above the 192 MiB target.</li>
-        <li><strong>Opening a large collection on S3 takes seconds.</strong> 3.15 s (4.00 s for a reopen) at 1,000,000 vectors, above the 2 s target.</li>
-        <li><strong>TLS via a reverse proxy.</strong> The server speaks plain HTTP with an optional static bearer token; terminate TLS at a proxy or load balancer.</li>
-        <li>Dimension, metric, resident filter and routed keys are fixed when a collection is created. A point must fit in one 120 KiB storage block.</li>
-      </ul>
-    </div>
-  </div>
-</section>
-
-<section id="python">
-  <div class="wrap">
-    <h2>Python client <span class="tag">New in 1.1</span></h2>
-    <p>A client using only the Python standard library (3.9 or newer). Writes carry a client-generated request ID, and a timed-out write is resolved by ID before it is ever resent, so it is applied at most once.</p>
-    <div class="codeblock"><pre><code>pip install "git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</code></pre></div>
-    <div class="codeblock"><pre><code>from glider_client import Client
-
-client = Client("http://localhost:8080")   # token="..." if the server requires one
+client = Client(<span class="s">"http://localhost:8080"</span>)
 
 client.upsert([
-    {"id": 1, "vector": [0, 0, 0], "metadata": {"color": "red"}},
-    {"id": 2, "vector": [1, 1, 1], "metadata": {"color": "blue"}},
+    {<span class="s">"id"</span>: <span class="n">1</span>, <span class="s">"vector"</span>: [<span class="n">0</span>, <span class="n">0</span>, <span class="n">0</span>], <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"red"</span>}},
+    {<span class="s">"id"</span>: <span class="n">2</span>, <span class="s">"vector"</span>: [<span class="n">1</span>, <span class="n">1</span>, <span class="n">1</span>], <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"blue"</span>}},
 ])
-for hit in client.query([1, 1, 0.9], k=2, include_metadata=True):
+
+<span class="k">for</span> hit <span class="k">in</span> client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n">0.9</span>], k=<span class="n">2</span>, include_metadata=<span class="k">True</span>):
     print(hit.id, hit.distance, hit.metadata)
 
-# exact filtered query; every match is returned, up to k
-client.query([1, 1, 0.9], k=10, filter={"color": "red"}, exact=True)
+<span class="c"># exact filtered query: every match, up to k</span>
+client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n">0.9</span>], k=<span class="n">10</span>, filter={<span class="s">"color"</span>: <span class="s">"red"</span>}, exact=<span class="k">True</span>)</code></pre>
+        </div>
+        <div class="code" role="tabpanel" id="panel-mcp" aria-labelledby="tab-mcp" tabindex="0" hidden>
+<pre><code><span class="c"># durable agent memory, embedded locally with fastembed</span>
+<span class="p">$ </span><span class="k">pip</span> install <span class="s">"glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span>
 
-client.get(1)      # Point, or None if absent
-client.delete([1])</code></pre></div>
+<span class="p">$ </span><span class="k">claude</span> mcp add glider -- glider-mcp
+
+<span class="out"># tools: remember · recall · forget · memory_count</span></code></pre>
+        </div>
+        <div class="meta"><span>glider 1.1.0 &middot; upcoming release</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="metrics glass" aria-labelledby="metrics-title">
+      <h2 class="sr" id="metrics-title">Key measurements</h2>
+      <dl>
+        <div class="metric"><dt>Recall@10</dt><dd>0.998</dd><span class="goal">static, mean &middot; target &ge;0.90</span></div>
+        <div class="metric"><dt>Warm query p95</dt><dd>30.9<small>ms</small></dd><span class="goal">target &le;50 ms</span></div>
+        <div class="metric"><dt>Cold query p95</dt><dd>58.6<small>ms</small></dd><span class="goal">target &le;200 ms</span></div>
+        <div class="metric"><dt>Write p95</dt><dd>97.6<small>ms</small></dd><span class="goal">target &le;150 ms</span></div>
+      </dl>
+      <div class="ctx">
+        <span>1,000,000 SIFT vectors &middot; AWS S3 Standard &middot; c7g.2xlarge, eu-central-1 &middot; one run</span>
+        <a href="#benchmarks">All results and limits &darr;</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- why -->
+<section id="why" aria-labelledby="why-title">
+  <div class="wrap">
+    <div class="head">
+      <div>
+        <p class="kicker">Why Glider</p>
+        <h2 id="why-title">The bucket is the database. Everything else is a cache.</h2>
+      </div>
+      <p>Glider keeps no acknowledged state on local disk alone. That one rule makes crashes, cache loss and machine replacement ordinary events instead of incidents.</p>
+    </div>
+
+    <div class="bento">
+      <article class="cell glass s4">
+        <div class="viz chain" aria-hidden="true"><span>write batch</span><i></i><span>conditional create</span><i></i><span>immutable log object</span><i></i><span class="on">ack</span></div>
+        <h3>Durable on S3</h3>
+        <p>Every acknowledged write is part of an immutable log object published with a conditional create. Nothing is overwritten in place, and a local disk never holds the only copy. The response is sent only after publication, so an acknowledged write survives any later crash.</p>
+      </article>
+
+      <article class="cell glass s2">
+        <ol class="steps viz">
+          <li>Wait out the old writer&rsquo;s lease</li>
+          <li>Fence it at the object store</li>
+          <li>Replay the log tail</li>
+        </ol>
+        <h3>Crash-safe takeover</h3>
+        <p>A paused former owner can never commit again. No operator step after a crash.</p>
+      </article>
+
+      <article class="cell glass s3">
+<pre class="snip viz" aria-label="Example write with a request ID"><span class="y">"request_id"</span>: {
+  <span class="y">"boundary"</span>: <span class="n">1</span>,
+  <span class="y">"nonce"</span>: <span class="s">"ecd721367d3720c6b60de32f814c7097"</span>
+}</pre>
+        <h3>Retry-safe writes</h3>
+        <p>Agents retry tool calls after timeouts. Every write carries a request ID, and resending it returns the original outcome instead of applying the write twice. Outcomes are retained for 128 commits.</p>
+      </article>
+
+      <article class="cell glass s3">
+<pre class="snip viz" aria-label="Example metadata filter">{<span class="y">"color"</span>: <span class="s">"red"</span>,
+ <span class="y">"price"</span>: {<span class="y">"$gt"</span>: <span class="n">1.5</span>, <span class="y">"$lte"</span>: <span class="n">10</span>},
+ <span class="y">"tag"</span>:   {<span class="y">"$in"</span>: [<span class="s">"a"</span>, <span class="s">"b"</span>]}}</pre>
+        <h3>Metadata filters, exact when it matters <span class="tag">New in 1.1</span></h3>
+        <ul class="ops" aria-label="Filter operators">
+          <li>$eq</li><li>$ne</li><li>$in</li><li>$nin</li><li>$exists</li><li>$gt</li><li>$gte</li><li>$lt</li><li>$lte</li><li>$and</li><li>$or</li><li>$not</li>
+        </ul>
+        <p>Filtered search is approximate by default. Add <code>"exact": true</code> and a filtered query returns every match, up to <code>k</code>.</p>
+      </article>
+
+      <article class="cell glass s2">
+        <div class="pair viz">
+          <div><b>30.9 ms</b><span>warm p95</span></div>
+          <div><b>58.6 ms</b><span>cold p95</span></div>
+        </div>
+        <h3>Local SSD cache</h3>
+        <p>A block cache fills in the background so warm queries need no remote reads. Losing it loses no acknowledged writes; latency and approximate recall recover as it warms.</p>
+      </article>
+
+      <article class="cell glass s2">
+        <p class="big viz">250,000<small>rows</small></p>
+        <h3>Automatic clustering</h3>
+        <p>At 250,000 rows the server builds a clustered view (centroids and cluster-contiguous postings) by itself, and rebuilds it as the collection grows. Unfiltered queries read at most 8 remote ranges and 1&nbsp;MiB.</p>
+      </article>
+
+      <article class="cell glass s2">
+        <ul class="ops viz" aria-label="Operational tools">
+          <li>/metrics</li><li>/v1/status</li><li>bearer auth</li><li>glider-admin</li>
+        </ul>
+        <h3>Operations included</h3>
+        <p>Prometheus metrics, a status endpoint, optional bearer-token auth, and <code>glider-admin</code> for status, backup, restore and clustering.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- architecture -->
+<section id="architecture" aria-labelledby="arch-title">
+  <div class="wrap">
+    <div class="head">
+      <div>
+        <p class="kicker">Architecture</p>
+        <h2 id="arch-title">Three paths, one bucket.</h2>
+      </div>
+      <p>Writes become immutable log objects. Idle maintenance seals them into packs and a clustered view. Queries read a published snapshot through the local cache, and recovery fences the old writer at the store itself.</p>
+    </div>
+
+    <figure class="arch glass" role="group" aria-labelledby="arch-cap" style="margin:0">
+      <svg class="wide" viewBox="0 0 1120 470" role="img" aria-labelledby="arch-cap arch-desc" focusable="false">
+        <desc id="arch-desc">Write path: a write batch goes through a single committer and becomes a mutation-log object in the S3 bucket via a conditional create; it is acknowledged after it is durable. Read path: a query uses the published snapshot to route to the nearest clusters, served from the RAM and SSD cache or from range reads of sealed packs in S3. Recovery: a restarted server waits out the lease, fences the old writer and replays the log tail. Inside the bucket, idle maintenance seals the log into sealed packs and a clustered view, published through root generations; fence objects block a deposed writer.</desc>
+        <defs>
+          <marker id="aw" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" class="d-dot-w"/></marker>
+          <marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" class="d-dot-r"/></marker>
+          <marker id="ax" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" class="d-dot-x"/></marker>
+          <marker id="ag" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" fill="var(--ink-3)"/></marker>
+        </defs>
+        <!-- lane labels -->
+        <text class="d-lab" x="40" y="54">WRITE PATH</text>
+        <text class="d-lab" x="40" y="204">READ PATH</text>
+        <text class="d-lab" x="40" y="354">RECOVERY</text>
+        <!-- write lane -->
+        <rect class="d-node" x="40" y="68" width="170" height="64" rx="14"/>
+        <text class="d-t" x="58" y="96">POST /v1/write</text><text class="d-s" x="58" y="116">atomic batch</text>
+        <rect class="d-node" x="250" y="68" width="170" height="64" rx="14"/>
+        <text class="d-t" x="268" y="96">Single committer</text><text class="d-s" x="268" y="116">group commit</text>
+        <path class="d-line d-w" d="M210 100H246" marker-end="url(#aw)"/>
+        <path class="d-line d-w" d="M420 100H696" marker-end="url(#aw)"/>
+        <path class="d-dash" stroke="var(--sky-ink)" d="M420 100H696"/>
+        <text class="d-edge" x="558" y="90" text-anchor="middle">conditional create</text>
+        <text class="d-edge" x="558" y="120" text-anchor="middle" style="fill:var(--ink-3)">ack after durable</text>
+        <!-- read lane -->
+        <rect class="d-node" x="40" y="218" width="170" height="64" rx="14"/>
+        <text class="d-t" x="58" y="246">POST /v1/query</text><text class="d-s" x="58" y="266">k-NN, filters</text>
+        <rect class="d-node" x="250" y="218" width="170" height="64" rx="14"/>
+        <text class="d-t" x="268" y="246">Snapshot</text><text class="d-s" x="268" y="266">route to clusters</text>
+        <rect class="d-node" x="460" y="218" width="170" height="64" rx="14"/>
+        <text class="d-t" x="478" y="246">RAM + SSD cache</text><text class="d-s" x="478" y="266">warm: no remote reads</text>
+        <path class="d-line d-r" d="M210 250H246" marker-end="url(#ar)"/>
+        <path class="d-line d-r" d="M420 250H456" marker-end="url(#ar)"/>
+        <path class="d-line d-r" d="M630 250H696" marker-end="url(#ar)"/>
+        <path class="d-dash" stroke="var(--sage-ink)" d="M630 250H696" style="animation-duration:3s"/>
+        <text class="d-edge" x="663" y="240" text-anchor="middle">range</text>
+        <text class="d-edge" x="663" y="270" text-anchor="middle">reads</text>
+        <!-- recovery lane -->
+        <rect class="d-node" x="40" y="368" width="170" height="64" rx="14"/>
+        <text class="d-t" x="58" y="396">Restart</text><text class="d-s" x="58" y="416">same or new host</text>
+        <rect class="d-node" x="250" y="368" width="170" height="64" rx="14"/>
+        <text class="d-t" x="268" y="396">Lease, then fence</text><text class="d-s" x="268" y="416">old writer deposed</text>
+        <rect class="d-node" x="460" y="368" width="170" height="64" rx="14"/>
+        <text class="d-t" x="478" y="396">Replay log tail</text><text class="d-s" x="478" y="416">no operator step</text>
+        <path class="d-line d-x" d="M210 400H246" marker-end="url(#ax)"/>
+        <path class="d-line d-x" d="M420 400H456" marker-end="url(#ax)"/>
+        <path class="d-line d-x" d="M630 400H696" marker-end="url(#ax)"/>
+        <!-- bucket -->
+        <rect class="d-panel" x="680" y="18" width="420" height="434" rx="24"/>
+        <text class="d-t" x="704" y="50" style="font-weight:600">S3 bucket</text>
+        <text class="d-s" x="1076" y="50" text-anchor="end">source of truth</text>
+        <rect class="d-node" x="700" y="68" width="380" height="64" rx="14"/>
+        <text class="d-t" x="718" y="96">Mutation log</text><text class="d-s" x="718" y="116">immutable, never overwritten</text>
+        <rect class="d-tile" x="938" y="87" width="16" height="26" rx="4"/>
+        <rect class="d-tile" x="962" y="87" width="16" height="26" rx="4"/>
+        <rect class="d-tile" x="986" y="87" width="16" height="26" rx="4"/>
+        <rect class="d-tile" x="1010" y="87" width="16" height="26" rx="4"/>
+        <rect class="d-tile new" x="1034" y="87" width="16" height="26" rx="4"/>
+        <path class="d-line" d="M790 132V214" marker-end="url(#ag)"/>
+        <text class="d-edge" x="802" y="178">idle seal</text>
+        <rect class="d-node" x="700" y="218" width="180" height="64" rx="14"/>
+        <text class="d-t" x="718" y="246">Sealed packs</text><text class="d-s" x="718" y="266">vector-local blocks</text>
+        <rect class="d-node" x="900" y="218" width="180" height="64" rx="14"/>
+        <text class="d-t" x="918" y="246">Clustered view</text><text class="d-s" x="918" y="266">centroids, postings</text>
+        <path class="d-line" d="M990 282V364" marker-end="url(#ag)"/>
+        <text class="d-edge" x="1002" y="328">publish</text>
+        <rect class="d-node" x="700" y="368" width="180" height="64" rx="14"/>
+        <text class="d-t" x="718" y="396">Lease + fences</text><text class="d-s" x="718" y="416">deposed writer fails</text>
+        <rect class="d-node" x="900" y="368" width="180" height="64" rx="14"/>
+        <text class="d-t" x="918" y="396">Root generation</text><text class="d-s" x="918" y="416">per-run manifests</text>
+      </svg>
+
+      <svg class="tall" viewBox="0 0 360 800" role="img" aria-labelledby="arch-cap arch-desc" focusable="false">
+        <defs>
+          <marker id="mw" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" class="d-dot-w"/></marker>
+          <marker id="mr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" class="d-dot-r"/></marker>
+          <marker id="mx" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8z" class="d-dot-x"/></marker>
+        </defs>
+        <!-- write -->
+        <text class="d-lab" x="12" y="20">WRITE PATH</text>
+        <rect class="d-node" x="12" y="32" width="150" height="58" rx="12"/>
+        <text class="d-t" x="26" y="57">POST /v1/write</text><text class="d-s" x="26" y="76">atomic batch</text>
+        <rect class="d-node" x="198" y="32" width="150" height="58" rx="12"/>
+        <text class="d-t" x="212" y="57">Single committer</text><text class="d-s" x="212" y="76">group commit</text>
+        <path class="d-line d-w" d="M162 61H194" marker-end="url(#mw)"/>
+        <path class="d-line d-w" d="M273 90V138" marker-end="url(#mw)"/>
+        <text class="d-edge" x="262" y="112" text-anchor="end">conditional create</text>
+        <text class="d-edge" x="262" y="128" text-anchor="end" style="fill:var(--ink-3)">ack after durable</text>
+        <rect x="112" y="142" width="236" height="36" rx="10" fill="var(--sky-wash)"/>
+        <circle cx="130" cy="160" r="4" class="d-dot-w"/>
+        <text class="d-s" x="142" y="164" style="fill:var(--ink)">S3 &middot; mutation log</text>
+        <!-- read -->
+        <text class="d-lab" x="12" y="220">READ PATH</text>
+        <rect class="d-node" x="12" y="232" width="150" height="58" rx="12"/>
+        <text class="d-t" x="26" y="257">POST /v1/query</text><text class="d-s" x="26" y="276">k-NN, filters</text>
+        <rect class="d-node" x="198" y="232" width="150" height="58" rx="12"/>
+        <text class="d-t" x="212" y="257">RAM + SSD cache</text><text class="d-s" x="212" y="276">via snapshot</text>
+        <path class="d-line d-r" d="M162 261H194" marker-end="url(#mr)"/>
+        <path class="d-line d-r" d="M273 290V338" marker-end="url(#mr)"/>
+        <text class="d-edge" x="262" y="318" text-anchor="end">range reads on miss</text>
+        <rect x="112" y="342" width="236" height="36" rx="10" fill="var(--glass-strong)"/>
+        <circle cx="130" cy="360" r="4" class="d-dot-r"/>
+        <text class="d-s" x="142" y="364" style="fill:var(--ink)">S3 &middot; sealed packs</text>
+        <!-- recovery -->
+        <text class="d-lab" x="12" y="420">RECOVERY</text>
+        <rect class="d-node" x="12" y="432" width="150" height="58" rx="12"/>
+        <text class="d-t" x="26" y="457">Lease, then fence</text><text class="d-s" x="26" y="476">old writer deposed</text>
+        <rect class="d-node" x="198" y="432" width="150" height="58" rx="12"/>
+        <text class="d-t" x="212" y="457">Replay log tail</text><text class="d-s" x="212" y="476">no operator step</text>
+        <path class="d-line d-x" d="M162 461H194" marker-end="url(#mx)"/>
+        <path class="d-line d-x" d="M273 490V538" marker-end="url(#mx)"/>
+        <text class="d-edge" x="262" y="518" text-anchor="end">fence objects</text>
+        <rect x="112" y="542" width="236" height="36" rx="10" fill="var(--clay-wash)"/>
+        <circle cx="130" cy="560" r="4" class="d-dot-x"/>
+        <text class="d-s" x="142" y="564" style="fill:var(--ink)">S3 &middot; lease + fences</text>
+        <!-- bucket -->
+        <rect class="d-panel" x="0" y="606" width="360" height="190" rx="20"/>
+        <text class="d-t" x="18" y="636" style="font-weight:600">S3 bucket</text>
+        <text class="d-s" x="342" y="636" text-anchor="end">source of truth</text>
+        <rect class="d-node" x="14" y="652" width="160" height="38" rx="10"/><text class="d-s" x="28" y="676" style="fill:var(--ink)">Mutation log</text>
+        <rect class="d-node" x="186" y="652" width="160" height="38" rx="10"/><text class="d-s" x="200" y="676" style="fill:var(--ink)">Sealed packs</text>
+        <rect class="d-node" x="14" y="698" width="160" height="38" rx="10"/><text class="d-s" x="28" y="722" style="fill:var(--ink)">Clustered view</text>
+        <rect class="d-node" x="186" y="698" width="160" height="38" rx="10"/><text class="d-s" x="200" y="722" style="fill:var(--ink)">Root generation</text>
+        <rect class="d-node" x="14" y="744" width="160" height="38" rx="10"/><text class="d-s" x="28" y="768" style="fill:var(--ink)">Run manifests</text>
+        <rect class="d-node" x="186" y="744" width="160" height="38" rx="10"/><text class="d-s" x="200" y="768" style="fill:var(--ink)">Lease + fences</text>
+      </svg>
+      <figcaption id="arch-cap" class="sr">Glider architecture: write, read and recovery paths around one S3 bucket.</figcaption>
+    </figure>
+
+    <ul class="notes">
+      <li><b>Write</b>A write batch becomes one immutable log object, created conditionally, before it is acknowledged.</li>
+      <li><b>Seal</b>Idle maintenance seals the log tail into packs of vector-local blocks with compact five-bit sketches.</li>
+      <li><b>Cluster</b>Rows are assigned to centroids, so a query reads only the nearest clusters&rsquo; blocks; small extents merge in the background.</li>
+      <li><b>Fence</b>A renewed lease paces restarts, and permanent fence objects make a deposed writer&rsquo;s next publication fail at the store.</li>
+    </ul>
+    <p class="more">
+      <a href="runtime.svg">Detailed runtime diagram</a>
+      <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">Architecture guide and AWS pattern</a>
+      <a href="https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md">Formats, invariants and recovery</a>
+    </p>
+  </div>
+</section>
+
+<!-- agents -->
+<section id="agents" aria-labelledby="agents-title">
+  <div class="wrap split">
+    <div>
+      <p class="kicker">Agent memory &middot; MCP</p>
+      <h2 id="agents-title">Durable memory for agents that retry.</h2>
+      <p class="sub"><code>glider-mcp</code> gives AI agents durable memory backed by Glider. A memory is acknowledged only after it is durable in Glider&rsquo;s storage, and writes carry request IDs, so a retried tool call never stores it twice. <span class="tag">New in 1.1</span></p>
+      <ul class="tools" aria-label="MCP tools">
+        <li><code>remember</code><span>Store text with optional tags; the same text in a scope replaces, not duplicates.</span></li>
+        <li><code>recall</code><span>Return the closest memories of a scope, with similarity scores.</span></li>
+        <li><code>forget</code><span>Delete one memory by ID, or every memory matching a scope or tags.</span></li>
+        <li><code>memory_count</code><span>Number of memories in a scope.</span></li>
+      </ul>
+      <p class="note">Text is embedded locally with fastembed (default <code>BAAI/bge-small-en-v1.5</code>, 384 dimensions; Python 3.10 or newer). <code>recall</code> uses exact search, so its cost grows with the number of memories.</p>
+    </div>
+    <div>
+      <p class="stepl"><b>01</b> Run Glider: 384 dimensions, cosine</p>
+      <div class="code block"><pre><code><span class="k">docker</span> run -d --name glider-memory -p 8080:8080 \
+  <span class="f">-v</span> glider-memory:/var/lib/glider \
+  <span class="f">-e</span> GLIDER_DIMENSIONS=<span class="n">384</span> <span class="f">-e</span> GLIDER_METRIC=cosine \
+  <span class="f">-e</span> GLIDER_DATA_DIR=/var/lib/glider/data \
+  ghcr.io/omerfeyzioglu/glider:1.1.0</code></pre></div>
+      <p class="stepl"><b>02</b> Install the client with the MCP extra</p>
+      <div class="code block"><pre><code><span class="k">pip</span> install <span class="s">"glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span></code></pre></div>
+      <p class="stepl"><b>03</b> Register it with Claude Code</p>
+      <div class="code block"><pre><code><span class="k">claude</span> mcp add glider -- glider-mcp</code></pre></div>
+      <p class="note">Dimension and metric are fixed when a collection is created. Claude Desktop setup and environment variables are in the <a href="https://github.com/omerfeyzioglu/glider/tree/main/clients/python#mcp-memory-for-agents">client README</a>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- quickstart -->
+<section id="quickstart" aria-labelledby="qs-title">
+  <div class="wrap split qs">
+    <div class="qa">
+      <p class="kicker">Quickstart</p>
+      <h2 id="qs-title">Three commands to a nearest-neighbor query.</h2>
+      <p class="sub">You need Docker and curl, no Rust toolchain. The image is multi-platform (<code>linux/amd64</code>, <code>linux/arm64</code>). This starts a 3-dimensional collection on a local directory, so its data is lost when the container stops; point it at S3 with the <a href="https://github.com/omerfeyzioglu/glider#configuration">configuration variables</a> to keep it.</p>
+      <p class="note">The <code>1.1.0</code> image is the upcoming release; <code>1.0.1</code> is available today without exact queries, scans, batch reads or the operator filters. Docker Compose with MinIO and builds from source are in the <a href="https://github.com/omerfeyzioglu/glider#quickstart">README</a>.</p>
+    </div>
+    <div class="qb">
+      <p class="stepl"><b>01</b> Start a server</p>
+      <div class="code block"><pre><code><span class="k">docker</span> run --rm -p 8080:8080 <span class="f">-e</span> GLIDER_DIMENSIONS=<span class="n">3</span> \
+  <span class="f">-e</span> GLIDER_DATA_DIR=/var/lib/glider/data \
+  ghcr.io/omerfeyzioglu/glider:1.1.0</code></pre></div>
+      <p class="stepl"><b>02</b> Write two points</p>
+      <div class="code block"><pre><code><span class="k">curl</span> -sS localhost:8080/v1/write \
+  <span class="f">-H</span> <span class="s">'content-type: application/json'</span> \
+  <span class="f">-d</span> <span class="s">'{"upsert":[
+    {"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},
+    {"id":2,"vector":[1,1,1]}]}'</span></code></pre></div>
+      <p class="stepl"><b>03</b> Query</p>
+      <div class="code block"><pre><code><span class="k">curl</span> -sS localhost:8080/v1/query \
+  <span class="f">-H</span> <span class="s">'content-type: application/json'</span> \
+  <span class="f">-d</span> <span class="s">'{"vector":[1,1,0.9],"k":2,"include_metadata":true}'</span></code></pre></div>
+      <p class="note" style="margin-bottom:0">The write returns a <code>sequence</code> and <code>request_id</code>; the query returns two hits ordered by distance.</p>
+      <p class="stepl"><b>04</b> Exact filtered query <span class="tag">New in 1.1</span></p>
+      <div class="code block"><pre><code><span class="k">curl</span> -sS localhost:8080/v1/query \
+  <span class="f">-H</span> <span class="s">'content-type: application/json'</span> \
+  <span class="f">-d</span> <span class="s">'{"vector":[1,1,0.9],"k":2,"filter":{"color":"red"},"exact":true}'</span></code></pre></div>
+    </div>
+    <div class="new glass qc">
+      <h3>New in 1.1 <span class="tag">1.1.0</span></h3>
+      <ul>
+        <li><code>"exact": true</code> on <code>/v1/query</code>: a filtered query returns every match, up to <code>k</code>.</li>
+        <li>Operator filters: <code>$in</code>, numeric ranges, <code>$exists</code> and nested <code>$and</code>/<code>$or</code>/<code>$not</code>.</li>
+        <li><code>POST /v1/points/get</code> reads up to 1000 points by ID in one consistent read.</li>
+        <li><code>POST /v1/scan</code> counts and pages through points that match a filter.</li>
+      </ul>
+      <p class="note" style="margin:0">Exact queries and scans read every block of the collection: right for small collections, completeness-critical filters and evaluation. Limits are in the <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">API reference</a>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- python -->
+<section id="python" aria-labelledby="py-title">
+  <div class="wrap split">
+    <div>
+      <p class="kicker">Python client <span class="tag" style="margin-left:4px">New in 1.1</span></p>
+      <h2 id="py-title">A client that retries without writing twice.</h2>
+      <p class="sub">Standard library only, Python 3.9 or newer. Each write carries a client-generated request ID, and a timed-out write is resolved by that ID before it is ever resent, so it is applied at most once.</p>
+      <p class="note">Also: <code>get_many</code>, <code>scan</code>, <code>count</code>, <code>upsert_many</code> and <code>delete_by_filter</code>. See the <a href="https://github.com/omerfeyzioglu/glider/tree/main/clients/python">client README</a>.</p>
+    </div>
+    <div>
+      <div class="code block"><pre><code><span class="k">pip</span> install <span class="s">"git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span></code></pre></div>
+      <div class="code block" data-label="python"><pre><code><span class="k">from</span> glider_client <span class="k">import</span> Client
+
+<span class="c"># pass token="..." if the server requires one</span>
+client = Client(<span class="s">"http://localhost:8080"</span>)
+
+client.upsert([
+    {<span class="s">"id"</span>: <span class="n">1</span>, <span class="s">"vector"</span>: [<span class="n">0</span>, <span class="n">0</span>, <span class="n">0</span>], <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"red"</span>}},
+    {<span class="s">"id"</span>: <span class="n">2</span>, <span class="s">"vector"</span>: [<span class="n">1</span>, <span class="n">1</span>, <span class="n">1</span>], <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"blue"</span>}},
+])
+<span class="k">for</span> hit <span class="k">in</span> client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n">0.9</span>], k=<span class="n">2</span>, include_metadata=<span class="k">True</span>):
+    print(hit.id, hit.distance, hit.metadata)
+
+<span class="c"># exact filtered query; every match is returned, up to k</span>
+client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n">0.9</span>], k=<span class="n">10</span>, filter={<span class="s">"color"</span>: <span class="s">"red"</span>}, exact=<span class="k">True</span>)
+
+client.get(<span class="n">1</span>)      <span class="c"># Point, or None if absent</span>
+client.delete([<span class="n">1</span>])</code></pre></div>
+    </div>
+  </div>
+</section>
+
+<!-- benchmarks -->
+<section id="benchmarks" aria-labelledby="bench-title">
+  <div class="wrap">
+    <div class="head">
+      <div>
+        <p class="kicker">Benchmarks</p>
+        <h2 id="bench-title">Measured on AWS S3, misses included.</h2>
+      </div>
+      <p>1,000,000 SIFT1M vectors (128 dimensions, squared Euclidean, k=10, 200 queries) on S3 Standard from a c7g.2xlarge (8 Graviton3 vCPU, 16 GiB) in eu-central-1. Loaded in 100-row batches, then 300 s of four writers and four readers, then restart, cache-loss and backup checks. One run; results vary.</p>
+    </div>
+    <div class="table glass">
+      <div class="tscroll">
+        <table>
+          <caption>1M SIFT vectors, AWS S3 Standard, commit 9e2f602</caption>
+          <thead><tr><th scope="col">Measure</th><th scope="col" class="num">Result</th><th scope="col" class="num">Target</th><th scope="col" class="num"><span class="sr">Status</span></th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Static recall@10 (mean / p5)</th><td class="num">0.998 / 1.0</td><td class="num goal">&ge;0.90 / &ge;0.80</td><td class="num"><span class="st">met</span></td></tr>
+            <tr><th scope="row">Recall@10 after updates, cold (mean / p5)</th><td class="num">0.963 / 0.8</td><td class="num goal">&ge;0.90 / &ge;0.80</td><td class="num"><span class="st">met</span></td></tr>
+            <tr><th scope="row">Warm unfiltered query p95</th><td class="num">30.9 ms</td><td class="num goal">&le;50 ms</td><td class="num"><span class="st">met</span></td></tr>
+            <tr><th scope="row">Cold unfiltered query p95</th><td class="num">58.6 ms</td><td class="num goal">&le;200 ms</td><td class="num"><span class="st">met</span></td></tr>
+            <tr><th scope="row">Filtered (resident 1%) query p95</th><td class="num">10.6 ms</td><td class="num goal">&le;50 ms</td><td class="num"><span class="st">met</span></td></tr>
+            <tr><th scope="row">Write p95</th><td class="num">97.6 ms</td><td class="num goal">&le;150 ms</td><td class="num"><span class="st">met</span></td></tr>
+            <tr><th scope="row">Open / reopen</th><td class="num">3.15 / 4.00 s</td><td class="num goal">&le;2 s</td><td class="num"><span class="st miss">above target</span></td></tr>
+            <tr><th scope="row">Peak engine RSS</th><td class="num">257.9 MiB</td><td class="num goal">&le;192 MiB</td><td class="num"><span class="st miss">above target</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="after">
+      <p>The run lost no acknowledged writes, and returned equal results after cache loss and after a backup restore.</p>
+      <p>Datasets, seeds, configuration and raw results: <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#root-manifests-and-fast-open-on-s3">benchmarks/M39.md</a>, <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md">BENCHMARKS.md</a> and the <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/SUMMARY.md">benchmark summary</a>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- limits -->
+<section id="limits" aria-labelledby="limits-title">
+  <div class="wrap">
+    <div class="head">
+      <div>
+        <p class="kicker">Honest limits</p>
+        <h2 id="limits-title">A young engine, clear about its edges.</h2>
+      </div>
+      <p>Glider is deliberately single-node today. These are the trade-offs to know before you deploy it.</p>
+    </div>
+    <ul class="limits">
+      <li class="glass"><b>Single node, single writer</b>No replication, sharding, read replicas or standby. Availability during a restart depends on the writer lease (default 10 s) and the open time.</li>
+      <li class="glass"><b>Opening on S3 takes seconds</b>3.15 s, and 4.00 s for a reopen, at 1,000,000 vectors; the target is 2 s.</li>
+      <li class="glass"><b>Memory above target at 1M</b>Peak engine RSS is 257.9 MiB on AWS (235.6 MiB on MinIO) against a 192 MiB target.</li>
+      <li class="glass"><b>Filtered search is approximate by default</b>Metadata values are strings. Only the declared resident predicate is exact by default; other filters may return fewer than <code>k</code> results unless you use <code>exact: true</code>, which scans every point.</li>
+      <li class="glass"><b>TLS via a reverse proxy</b>The server speaks plain HTTP with an optional static bearer token; terminate TLS at a proxy or load balancer.</li>
+      <li class="glass"><b>Fixed at creation</b>Dimension, metric, resident filter and routed keys are set when a collection is created. A point must fit in one 120 KiB storage block.</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="close-title">
+  <div class="wrap">
+    <div class="closing glass">
+      <p class="kicker">Get started</p>
+      <h2 id="close-title">Put your vectors where your data already lives.</h2>
+      <p>One process, one bucket, and no operator step after a crash.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/omerfeyzioglu/glider">View on GitHub</a>
+        <a class="btn ghost" href="#quickstart">Quickstart <span aria-hidden="true">&rarr;</span></a>
+      </div>
+    </div>
   </div>
 </section>
 </main>
 
 <footer>
   <div class="wrap">
-    <ul aria-label="Documentation">
-      <li><a href="https://github.com/omerfeyzioglu/glider">GitHub</a></li>
-      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">API</a></li>
-      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">Architecture</a></li>
-      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md">Design</a></li>
-      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/CHANGELOG.md">Changelog</a></li>
-      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/SECURITY.md">Security</a></li>
-    </ul>
-    <p>Glider is licensed under either of <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-APACHE">Apache License 2.0</a> or <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-MIT">MIT license</a>, at your option.</p>
+    <div class="fgrid">
+      <div>
+        <a class="brand" href="#top" aria-label="Glider, back to top">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="currentColor"/><path d="M5 21 27 8l-6 17-5-6-4 4 1-6z" fill="var(--bg)"/></svg>
+          glider
+        </a>
+        <p class="lic">Licensed under either of <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-APACHE">Apache License 2.0</a> or <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-MIT">MIT license</a>, at your option.</p>
+      </div>
+      <nav aria-labelledby="f-docs">
+        <h3 id="f-docs">Documentation</h3>
+        <ul>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">API</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">Architecture</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md">Design</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md">Benchmarks</a></li>
+        </ul>
+      </nav>
+      <nav aria-labelledby="f-project">
+        <h3 id="f-project">Project</h3>
+        <ul>
+          <li><a href="https://github.com/omerfeyzioglu/glider">GitHub</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/SECURITY.md">Security</a></li>
+          <li><a href="https://github.com/omerfeyzioglu/glider/tree/main/clients/python">Python client</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="mark" aria-hidden="true">glider</div>
   </div>
 </footer>
 
 <script>
 (function () {
-  if (!navigator.clipboard) return;
-  document.querySelectorAll(".codeblock").forEach(function (block) {
-    var code = block.querySelector("pre");
+  // Copy buttons: copy the command text, without prompts or sample output.
+  function text(pre) {
+    var c = pre.cloneNode(true);
+    c.querySelectorAll(".p, .out").forEach(function (n) { n.remove(); });
+    return c.textContent.replace(/\n{3,}/g, "\n\n").replace(/^\n+|\n+$/g, "");
+  }
+  function addCopy(host, getPre) {
+    if (!navigator.clipboard) return;
     var btn = document.createElement("button");
     btn.type = "button";
     btn.className = "copy";
     btn.textContent = "Copy";
     btn.setAttribute("aria-label", "Copy code to clipboard");
     btn.addEventListener("click", function () {
-      navigator.clipboard.writeText(code.innerText.replace(/\n$/, "")).then(function () {
+      navigator.clipboard.writeText(text(getPre())).then(function () {
         btn.textContent = "Copied";
       }, function () {
         btn.textContent = "Failed";
       }).then(function () {
-        setTimeout(function () { btn.textContent = "Copy"; }, 1800);
+        setTimeout(function () { btn.textContent = "Copy"; }, 1600);
       });
     });
-    block.classList.add("has-copy");
-    block.appendChild(btn);
+    host.appendChild(btn);
+  }
+  document.querySelectorAll(".code.block").forEach(function (b) {
+    var bar = document.createElement("div");
+    bar.className = "cbar";
+    var label = document.createElement("span");
+    label.textContent = b.getAttribute("data-label") || "shell";
+    bar.appendChild(label);
+    b.insertBefore(bar, b.firstChild);
+    addCopy(bar, function () { return b.querySelector("pre"); });
   });
+
+  // Tabs in the hero terminal.
+  var term = document.getElementById("try");
+  var tabs = Array.prototype.slice.call(term.querySelectorAll('[role="tab"]'));
+  function select(t) {
+    tabs.forEach(function (o) {
+      var on = o === t;
+      o.setAttribute("aria-selected", on ? "true" : "false");
+      o.tabIndex = on ? 0 : -1;
+      document.getElementById(o.getAttribute("aria-controls")).hidden = !on;
+    });
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener("click", function () { select(t); });
+    t.addEventListener("keydown", function (e) {
+      var j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : null;
+      if (j === null) return;
+      e.preventDefault();
+      var n = tabs[(j + tabs.length) % tabs.length];
+      select(n); n.focus();
+    });
+  });
+  addCopy(term.querySelector(".meta"), function () { return term.querySelector('[role="tabpanel"]:not([hidden]) pre'); });
 })();
 </script>
 </body>
