@@ -80,6 +80,9 @@ function drawBase() {
 }
 function draw() {
   frame = 0;
+  // Before the first layout (or while the section is hidden) the canvases
+  // have no size; drawing then throws, so wait for the resize to redraw.
+  if (!width || !height || !layer.width || !layer.height) return;
   ctx.clearRect(0, 0, width, height);
   ctx.globalAlpha = activeClusters.length ? .48 : 1;
   ctx.drawImage(layer, 0, 0, layer.width, layer.height, 0, 0, width, height);
