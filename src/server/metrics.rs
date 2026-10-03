@@ -190,6 +190,33 @@ pub(super) fn render_metrics(
     queue: admission::Status,
     engine: admission::EngineMetrics,
 ) -> String {
+    let mut body = render_http_metrics(http);
+    for (name, value, kind) in [
+        ("glider_admission_commands", queue.commands as u64, "gauge"),
+        ("glider_admission_bytes", queue.bytes as u64, "gauge"),
+        ("glider_worker_failed", u64::from(queue.failed), "gauge"),
+        ("glider_worker_closed", u64::from(queue.closed), "gauge"),
+        (
+            "glider_maintenance_errors_total",
+            queue.maintenance_errors,
+            "counter",
+        ),
+        ("glider_committed_sequence", engine.sequence, "gauge"),
+    ] {
+        writeln!(body, "# TYPE {name} {kind}\n{name} {value}").unwrap();
+    }
+    for (name, value) in engine.samples {
+        let kind = if name.ends_with("_total") {
+            "counter"
+        } else {
+            "gauge"
+        };
+        writeln!(body, "# TYPE {name} {kind}\n{name} {value}").unwrap();
+    }
+    body
+}
+
+pub(super) fn render_http_metrics(http: &HttpMetrics) -> String {
     let mut body = String::new();
     body.push_str("# TYPE glider_http_requests_total counter\n");
     for (name, metrics) in ENDPOINTS.iter().zip(&http.endpoints) {
@@ -226,28 +253,6 @@ pub(super) fn render_metrics(
             metrics.buckets[BUCKETS.len()].load(Ordering::Relaxed)
         )
         .unwrap();
-    }
-    for (name, value, kind) in [
-        ("glider_admission_commands", queue.commands as u64, "gauge"),
-        ("glider_admission_bytes", queue.bytes as u64, "gauge"),
-        ("glider_worker_failed", u64::from(queue.failed), "gauge"),
-        ("glider_worker_closed", u64::from(queue.closed), "gauge"),
-        (
-            "glider_maintenance_errors_total",
-            queue.maintenance_errors,
-            "counter",
-        ),
-        ("glider_committed_sequence", engine.sequence, "gauge"),
-    ] {
-        writeln!(body, "# TYPE {name} {kind}\n{name} {value}").unwrap();
-    }
-    for (name, value) in engine.samples {
-        let kind = if name.ends_with("_total") {
-            "counter"
-        } else {
-            "gauge"
-        };
-        writeln!(body, "# TYPE {name} {kind}\n{name} {value}").unwrap();
     }
     body
 }

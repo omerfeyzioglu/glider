@@ -1331,7 +1331,7 @@ are in `docs/SERVING.md` and `docs/RECOVERY.md`.
 
 ### HTTP service
 
-`glider-server` (feature `server`) exposes one segmented collection over
+`glider-server` (feature `server`) exposes segmented collections over
 HTTP/JSON through an axum router in front of `admission::Service`; blocking
 ticket waits run on Tokio's blocking pool. `/v1/query` optionally includes
 metadata and/or vector on each hit; omitted flags preserve the
@@ -1353,6 +1353,66 @@ while a read-only admission command samples sequence, segmented maintenance,
 cache, warm-up, writer epoch and sketch values on the committer; `/v1/status` reports
 the same cache warm-up state. Queue state is sampled separately;
 metrics are observational and do not change publication or recovery semantics.
+
+### Collection catalog and lifecycle
+
+With `GLIDER_DIMENSIONS` set, the server continues to use the configured base
+as one segmented namespace and the original `/v1/*` routes. Without it, the
+base is a collection catalog; it must not be reused in single-collection mode.
+The base contains `catalog/<name>` and `data/<name>/<generation>/`.
+Names match `^[a-z0-9][a-z0-9-]{0,62}$`. A catalog object is immutable
+version 1 JSON containing `version`, `name`, positive `dimensions`, `metric`,
+optional `[key,value]` `resident_filter`, sorted `routed_keys`, and a random
+32-character lowercase hexadecimal `generation`. Each data prefix is an
+ordinary, independently leased segmented namespace; engine formats are
+unchanged. One server process owns a multi-collection base at a time.
+
+`POST /v1/collections` conditionally creates the catalog object. Its
+successful complete-object PUT is the creation acknowledgement and the
+catalog entry is the existence authority. A competing create reads the winner:
+identical configuration returns `200`, different configuration `409`.
+Failure during creation is uncertain; a later GET or retry on a fresh store
+resolves whether the entry exists. No engine data is created until first use.
+A crash before catalog publication leaves no collection; after publication,
+recovery lists the catalog and lazily opens its generation. LIST of `catalog/`
+is complete and strongly consistent and returns names in sorted order.
+
+Deletion first stops admission for that collection, drains in-flight work and
+releases its lease. The successful removal of `catalog/<name>` is the deletion
+acknowledgement and authoritative absence point. After that, every new request
+for the name returns `404`; a later create chooses a fresh generation, so its
+engine cannot read old data. The server then removes the old generation's
+objects as best effort. A crash before catalog removal leaves the collection
+intact (possibly closed); a crash after removal but before cleanup leaves
+unreachable objects. Startup and idle sweeps, and later deletes, remove
+generations not named by a catalog entry, rechecking the entry before removal.
+An uncertain catalog removal must be resolved by a fresh GET before reporting
+an outcome. Generation object keys are never reused, so delayed cleanup
+cannot affect a recreated collection.
+
+The catalog name key itself is reused. The current object-store interface has
+unconditional DELETE, so a delete whose outcome is uncertain can remain in
+flight while another delete removes the old entry and a create publishes a
+new one. That late first DELETE could remove the new entry. A fresh GET alone
+does not rule out this race. Until conditional deletion of the observed
+catalog generation (or non-reused catalog keys) is available, operators must
+quiesce uncertain catalog DELETE requests before retrying deletion or reusing
+the name after a crash; this is a limitation of the multi-collection catalog
+protocol, not of the segmented engine's generation namespaces.
+
+First use acquires that generation's lease, takes over through the normal
+segmented fence path, then starts its admission service. A per-name async lock
+serializes opening and deletion for one name; other names can open in parallel.
+At most `GLIDER_MAX_OPEN_COLLECTIONS` (default 64) stay open. A new open
+closes the least recently used collection with no requests in flight, draining
+its service and releasing its lease; a later use reopens it. When every open
+collection is busy, an open fails with `429`. Each open collection has two
+query readers and two scoped scoring threads, and its disposable cache lies
+under `<GLIDER_CACHE_DIR>/<name>-<generation>/` with a budget of
+`max(16 MiB, GLIDER_CACHE_BYTES / GLIDER_MAX_OPEN_COLLECTIONS)`. Graceful
+process shutdown drains and releases every open lease. A deposed lease closes
+only its collection. `glider-admin` currently operates on single-collection
+prefixes; collection-aware commands remain future work.
 
 ## Bounded concurrent admission (M16)
 

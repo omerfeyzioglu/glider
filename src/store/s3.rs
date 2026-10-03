@@ -193,6 +193,25 @@ pub struct S3Store {
     read_limits: Option<ReadLimits>,
 }
 impl S3Store {
+    /// Inventory below this prefix, including descendants. Catalog cleanup
+    /// uses this to find orphaned generation namespaces; engine listings stay flat.
+    pub fn list_descendants(&self) -> Result<Vec<String>> {
+        self.ready()?;
+        let prefix = format!("{}/", self.namespace);
+        self.runtime
+            .as_ref()
+            .unwrap()
+            .block_on(self.retry_read(|| async {
+                let mut objects = self.remote.list(Some(&self.namespace));
+                let mut keys = Vec::new();
+                while let Some(object) = objects.try_next().await.map_err(read_remote_error)? {
+                    if let Some(key) = object.location.as_ref().strip_prefix(&prefix) {
+                        keys.push(key.to_owned());
+                    }
+                }
+                Ok(keys)
+            }))
+    }
     /// Configure endpoint/region/credentials with the builder. This method forces
     /// conditional writes, disables SDK retries and installs request metrics.
     /// It performs no requests; Database::open validates the namespace remotely.

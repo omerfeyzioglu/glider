@@ -90,6 +90,11 @@ fn run() -> Result<Value> {
         return Err(Error::Invalid("unexpected arguments".into()));
     }
     let config = ServerConfig::from_env()?;
+    if config.multi {
+        return Err(Error::Invalid(
+            "glider-admin currently requires GLIDER_DIMENSIONS (single-collection mode)".into(),
+        ));
+    }
     match command.as_str() {
         "status" => config.with_engine(|engine| {
             let db = engine.database();

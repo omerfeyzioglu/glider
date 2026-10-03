@@ -62,6 +62,7 @@ impl ObjectStore for Store {
 }
 
 /// Everything the server needs; see [`ServerConfig::from_env`].
+#[derive(Clone)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
     pub store: StoreConfig,
@@ -74,6 +75,9 @@ pub struct ServerConfig {
     /// Writer lease duration: a restart after a crash waits at most this
     /// long before taking over. It never affects correctness.
     pub lease: Duration,
+    /// Whether the base is a collection catalog rather than an engine namespace.
+    pub multi: bool,
+    pub max_open_collections: usize,
 }
 
 #[derive(Clone)]
@@ -120,9 +124,27 @@ impl ServerConfig {
     ///   the rows its centroid count was sized for; 0 disables
     pub fn from_env() -> crate::Result<Self> {
         let invalid = |name: &str| Error::Invalid(format!("invalid {name}"));
-        let dimensions = required("GLIDER_DIMENSIONS")?
-            .parse()
-            .map_err(|_| invalid("GLIDER_DIMENSIONS"))?;
+        let multi = std::env::var_os("GLIDER_DIMENSIONS").is_none();
+        if multi
+            && [
+                "GLIDER_METRIC",
+                "GLIDER_RESIDENT_FILTER",
+                "GLIDER_ROUTED_KEYS",
+            ]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+        {
+            return Err(Error::Invalid(
+                "collection options require GLIDER_DIMENSIONS".into(),
+            ));
+        }
+        let dimensions = if multi {
+            1
+        } else {
+            required("GLIDER_DIMENSIONS")?
+                .parse()
+                .map_err(|_| invalid("GLIDER_DIMENSIONS"))?
+        };
         let metric = match env("GLIDER_METRIC")
             .as_deref()
             .unwrap_or("squared_euclidean")
@@ -179,6 +201,17 @@ impl ServerConfig {
                 .parse()
                 .map_err(|_| invalid("GLIDER_AUTO_RECLUSTER_FACTOR"))?;
         }
+        let max_open_collections = env("GLIDER_MAX_OPEN_COLLECTIONS")
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| invalid("GLIDER_MAX_OPEN_COLLECTIONS"))
+            })
+            .transpose()?
+            .unwrap_or(64);
+        if max_open_collections == 0 {
+            return Err(invalid("GLIDER_MAX_OPEN_COLLECTIONS"));
+        }
         Ok(Self {
             listen: env("GLIDER_LISTEN")
                 .unwrap_or_else(|| "127.0.0.1:8080".into())
@@ -204,6 +237,8 @@ impl ServerConfig {
                     .ok_or_else(|| invalid("GLIDER_LEASE_SECONDS"))?,
                 None => Duration::from_secs(10),
             },
+            multi,
+            max_open_collections,
         })
     }
 
@@ -214,6 +249,63 @@ impl ServerConfig {
 }
 
 impl StoreConfig {
+    /// Discover data generations without interpreting engine objects.
+    pub fn data_generations(&self) -> crate::Result<Vec<(String, String)>> {
+        let mut found = std::collections::BTreeSet::new();
+        match self.child("data") {
+            Self::Local(path) => {
+                if !path.exists() {
+                    return Ok(Vec::new());
+                }
+                for name in std::fs::read_dir(path)? {
+                    let name = name?;
+                    if !name.file_type()?.is_dir() {
+                        continue;
+                    }
+                    for generation in std::fs::read_dir(name.path())? {
+                        let generation = generation?;
+                        if generation.file_type()?.is_dir() {
+                            found.insert((
+                                name.file_name().to_string_lossy().into_owned(),
+                                generation.file_name().to_string_lossy().into_owned(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Self::S3 { .. } => {
+                let store = self.child("data").open()?;
+                if let Store::S3(store) = store {
+                    for key in store.list_descendants()? {
+                        let mut parts = key.split('/');
+                        if let (Some(name), Some(generation), Some(_)) =
+                            (parts.next(), parts.next(), parts.next())
+                        {
+                            found.insert((name.to_owned(), generation.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+    /// A child prefix; each child remains an ordinary flat-key object namespace.
+    pub fn child(&self, suffix: &str) -> Self {
+        match self {
+            Self::Local(path) => Self::Local(path.join(suffix)),
+            Self::S3 {
+                bucket,
+                namespace,
+                region,
+                endpoint,
+            } => Self::S3 {
+                bucket: bucket.clone(),
+                namespace: format!("{namespace}/{suffix}"),
+                region: region.clone(),
+                endpoint: endpoint.clone(),
+            },
+        }
+    }
     /// Open a local directory or S3 prefix without claiming it.
     pub fn open(&self) -> crate::Result<Store> {
         Ok(match self {
