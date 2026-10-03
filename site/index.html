@@ -297,7 +297,6 @@ hits = docs.query([1, 1, 0.9], k=10)</code></pre></div>
       <h2 id="sim-title">A million vectors. Three places to live.</h2>
       <p>Pick a spot, follow the blocks, then pull the plug.</p>
     </div>
-    <p class="sim-disclaimer">Browser simulation &middot; synthetic vectors &middot; estimated sizes and latency. No live engine or S3 connection. <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/WEBSITE.md#storage-playground">How it works &rarr;</a></p>
     <div class="sheet sim" id="sim-app">
       <div class="sim-toolbar">
         <label class="sim-dataset">Dataset <select id="sim-size"><option value="100000">100K vectors</option><option value="1000000" selected>1M vectors</option><option value="10000000">10M vectors</option></select></label>
@@ -338,7 +337,7 @@ hits = docs.query([1, 1, 0.9], k=10)</code></pre></div>
             <div id="sim-blocks" class="sim-query-blocks" aria-label="Candidate block reads"><span>Up to 12 candidate blocks · 8 range GETs · 1 MiB remote</span></div>
             <p class="sim-result" id="sim-results">Top-10 neighbours appear as connected points after a query.</p>
             <table class="sim-result-table" id="sim-result-table" hidden>
-              <caption>Synthetic 2D neighbors &middot; squared Euclidean distance</caption>
+              <caption>Nearest neighbors &middot; squared Euclidean distance</caption>
               <thead><tr><th scope="col">Rank</th><th scope="col">ID</th><th scope="col">Distance</th></tr></thead>
               <tbody id="sim-result-rows"></tbody>
             </table>
@@ -348,7 +347,7 @@ hits = docs.query([1, 1, 0.9], k=10)</code></pre></div>
         <div class="sim-tiers">
           <article class="sim-tier sim-s3" id="sim-s3">
             <header><h3><i class="sim-tier-chip s3" aria-hidden="true"></i>S3</h3><strong id="sim-s3-size"></strong></header>
-            <p>The durable authority in the illustrated deployment.</p>
+            <p>Every acknowledged write is durable here.</p>
             <div class="sim-objects" id="sim-objects"></div>
             <details class="sim-details"><summary>Details</summary><div id="sim-object-details"></div><p id="sim-s3-note"></p><p>Immutable logs acknowledge writes; a published root selects sealed packs, indexes and manifests.</p></details>
           </article>

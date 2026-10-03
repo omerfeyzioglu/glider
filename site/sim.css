@@ -1,5 +1,4 @@
 /* Storage simulation: one visual per tier, technical detail on disclosure. */
-.sim-disclaimer{font:500 .85rem/1.5 var(--mono);margin:0 0 16px;color:var(--muted)}
 .sim{--tier-s3:var(--navy);--tier-ssd:#8FA6BC;--tier-ram:var(--orange);min-width:0;position:relative;overflow:clip}
 .sim button,.sim select{font:600 .8rem/1.2 var(--mono);color:var(--ink);background:var(--sheet);border:2px solid var(--ink);padding:10px;max-width:100%}
 .sim button{cursor:pointer;box-shadow:2px 2px 0 var(--ink)}
