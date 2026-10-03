@@ -280,6 +280,19 @@ The [architecture guide](docs/ARCHITECTURE.md) includes an AWS deployment
 diagram. [DESIGN.md](DESIGN.md) states the formats, invariants, and crash and
 recovery semantics in full.
 
+## Python client and agent memory
+
+[`clients/python`](clients/python/README.md) is a dependency-free Python
+client for the whole HTTP API, with safe write retries, paging scans, count
+and delete-by-filter. Its optional MCP server gives AI agents (Claude Code,
+Claude Desktop, Cursor and other MCP clients) durable `remember`, `recall`
+and `forget` tools backed by Glider:
+
+```sh
+pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"
+claude mcp add glider -- glider-mcp
+```
+
 ## Library
 
 The crate can also be used directly from Rust, including the resident
