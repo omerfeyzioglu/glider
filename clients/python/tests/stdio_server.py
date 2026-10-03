@@ -6,4 +6,7 @@ import support
 from glider_client import Client
 from glider_client.mcp_server import Memory, build_server
 
-build_server(Memory(Client(os.environ["GLIDER_URL"]), support.fake_embed)).run(transport="stdio")
+memory = Memory(
+    Client(os.environ["GLIDER_URL"]), support.fake_embed, os.environ.get("GLIDER_COLLECTION")
+)
+build_server(memory).run(transport="stdio")

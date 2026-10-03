@@ -39,6 +39,9 @@ client.get(1)                                    # Point, or None if absent
 client.delete([1])
 ```
 
+A server started without `GLIDER_DIMENSIONS` serves many collections; see
+[Collections](#collections) below.
+
 `query(..., exact=True)`, `get_many`, `scan`, `count` and `delete_by_filter`
 need server endpoints that are newer than the 1.0.1 image (`exact` on
 `/v1/query`, `/v1/scan`, `/v1/points/get`); use a server built from a release
@@ -46,7 +49,7 @@ that includes them.
 
 ## API
 
-`Client(url="http://localhost:8080", token=None, timeout=30, max_retries=5)`
+`Client(url="http://localhost:8080", token=None, timeout=30, max_retries=5, collection=None)`
 
 | Method | Purpose |
 |---|---|
@@ -61,10 +64,51 @@ that includes them.
 | `count(filter=None)` | Number of matching points |
 | `delete_by_filter(filter)` | Scans matching IDs, deletes them in batches of 100, returns how many. **Not atomic**; points written concurrently may match later and are not deleted. An empty filter is refused. |
 
+Collection methods (multi-collection servers only) are described in
+[Collections](#collections).
+
 Points are `Point(id, vector, metadata)` objects or dicts with those keys.
 Query results are `Hit` (the same class as `Point`) with `distance` set;
 fields the server did not return are `None`. Errors raise `GliderError` with
 `.status` (HTTP status, `None` for connection failures) and `.message`.
+
+## Collections
+
+Start the server without `GLIDER_DIMENSIONS` to serve many collections, each
+with its own dimension and metric (see the
+[server README](../../README.md#configuration) and
+[API](../../docs/API.md#collections)). Create them over HTTP and bind a client
+to one; every data call of a bound client (writes, queries, points, scans, and
+the request-ID resolution behind write retries) then goes to
+`/v1/collections/{name}/...`:
+
+```python
+from glider_client import Client
+
+admin = Client("http://localhost:8080")
+admin.create_collection("docs", dimensions=3, metric="cosine")   # 201; idempotent
+admin.list_collections()                  # [{"name": "docs", "dimensions": 3, ...}]
+
+docs = admin.collection("docs")           # or Client(url, collection="docs")
+docs.upsert([{"id": 1, "vector": [0, 0, 1], "metadata": {"lang": "en"}}])
+docs.query([0, 0, 1], k=1)
+docs.delete_by_filter({"lang": "en"})
+
+admin.delete_collection("docs")           # irreversible; a new "docs" starts empty
+```
+
+| Method | Behavior |
+|---|---|
+| `Client(..., collection="name")` | Bind every data call to that collection. |
+| `collection(name)` | A bound copy sharing url, token and retry settings. |
+| `create_collection(name, dimensions, metric="squared_euclidean", resident_filter=None, routed_keys=None)` | Returns the description. Creating an existing collection with the same configuration succeeds; a different configuration raises `GliderError` with `.status == 409`. Dimension and metric cannot change later. |
+| `list_collections()` | Descriptions sorted by name. |
+| `get_collection(name)` | Description plus current `status`, or `None` when absent. |
+| `delete_collection(name)` | `True` when deleted, `False` when it did not exist. |
+
+Names must match `[a-z0-9][a-z0-9-]{0,62}` and are checked before any request
+(`ValueError`). A multi-collection server answers `404` on the un-prefixed
+data routes, and a single-collection server has no `/v1/collections`.
 
 ## Retry semantics
 
@@ -96,14 +140,14 @@ memories. Text is embedded locally with
 [fastembed](https://github.com/qdrant/fastembed) (default
 `BAAI/bge-small-en-v1.5`, 384 dimensions); vectors and text live in Glider.
 
-1. Run Glider with the model's dimension and the cosine metric. Dimension
-   and metric are fixed when the collection is created. The volume keeps the
-   memories across container restarts (S3 works too, see the server README):
+1. Run Glider in multi-collection mode (no `GLIDER_DIMENSIONS`). The MCP
+   server creates its collection with the model's dimension and the cosine
+   metric on first use. The volume keeps the memories across container
+   restarts (S3 works too, see the server README):
 
    ```sh
-   docker run -d --name glider-memory -p 8080:8080 \
-     -v glider-memory:/var/lib/glider \
-     -e GLIDER_DIMENSIONS=384 -e GLIDER_METRIC=cosine \
+   docker run -d --name glider -p 8080:8080 \
+     -v glider-data:/var/lib/glider \
      -e GLIDER_DATA_DIR=/var/lib/glider/data \
      ghcr.io/omerfeyzioglu/glider:1.1.0
    ```
@@ -114,10 +158,10 @@ memories. Text is embedded locally with
    pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"
    ```
 
-3. Register it. With Claude Code:
+3. Register it with `GLIDER_COLLECTION=memory`. With Claude Code:
 
    ```sh
-   claude mcp add glider -- glider-mcp
+   claude mcp add glider -e GLIDER_COLLECTION=memory -- glider-mcp
    ```
 
    With Claude Desktop, add to `claude_desktop_config.json`:
@@ -127,18 +171,34 @@ memories. Text is embedded locally with
      "mcpServers": {
        "glider": {
          "command": "glider-mcp",
-         "env": {"GLIDER_URL": "http://localhost:8080"}
+         "env": {
+           "GLIDER_URL": "http://localhost:8080",
+           "GLIDER_COLLECTION": "memory"
+         }
        }
      }
    }
    ```
 
 Environment: `GLIDER_URL` (default `http://localhost:8080`),
-`GLIDER_API_TOKEN` (bearer token, if the server has one) and
-`GLIDER_EMBED_MODEL` (any fastembed text model; the server's
-`GLIDER_DIMENSIONS` must equal its dimension). The model is downloaded on
-first use, which can take a while, and a dimension mismatch is reported as
-an error on the first tool call.
+`GLIDER_API_TOKEN` (bearer token, if the server has one),
+`GLIDER_COLLECTION` (collection name; see below) and `GLIDER_EMBED_MODEL`
+(any fastembed text model). The model is downloaded on first use, which can
+take a while.
+
+With `GLIDER_COLLECTION` set, the first tool call creates the collection if
+it is missing (the embedder's dimension, cosine metric); an existing
+collection with the same configuration is reused. If it exists with another
+dimension or metric (for example after changing `GLIDER_EMBED_MODEL`), the
+tool call fails with an error saying so; pick another collection name or
+delete the old one. Several agents or projects can share one Glider server
+with different collection names.
+
+Single-collection variant: leave `GLIDER_COLLECTION` unset and start the
+server with the model's dimension and the cosine metric
+(`-e GLIDER_DIMENSIONS=384 -e GLIDER_METRIC=cosine` in the `docker run`
+above; dimension and metric are fixed at creation). A dimension mismatch is
+reported as an error on the first tool call.
 
 Tools:
 
@@ -160,8 +220,8 @@ after a lost response does not apply a write twice.
 python3 -m unittest discover -s clients/python/tests
 ```
 
-Unit tests use a fake HTTP server. Integration tests run a real server and
-are skipped unless `GLIDER_SERVER_BIN` points to a `glider-server` binary
+Unit tests use a fake HTTP server. Integration tests run a real server, in
+single-collection and in multi-collection mode, and are skipped unless `GLIDER_SERVER_BIN` points to a `glider-server` binary
 (`cargo build --release --features server --bin glider-server`); those that
 need `exact`, `/v1/scan` or `/v1/points/get` skip themselves on older
 binaries. The MCP tests need `pip install mcp`.

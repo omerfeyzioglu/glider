@@ -6,9 +6,12 @@ Run with ``glider-mcp`` (stdio transport). Configuration by environment:
 * ``GLIDER_API_TOKEN``: bearer token, if the server requires one
 * ``GLIDER_EMBED_MODEL``: fastembed model, default ``BAAI/bge-small-en-v1.5``
   (384 dimensions)
-
-The server must be started with the model's dimension and, for sensible
-scores, the cosine metric: ``GLIDER_DIMENSIONS=384 GLIDER_METRIC=cosine``.
+* ``GLIDER_COLLECTION``: collection name. Set it when the server runs in
+  multi-collection mode (started without ``GLIDER_DIMENSIONS``): the collection
+  is created on first use with the model's dimension and the cosine metric.
+  Unset, the server must be a single-collection server started with the
+  model's dimension and, for sensible scores, the cosine metric:
+  ``GLIDER_DIMENSIONS=384 GLIDER_METRIC=cosine``.
 
 ``mcp`` and ``fastembed`` are imported lazily, so the :class:`Memory` logic is
 usable (and testable) without them.
@@ -88,10 +91,19 @@ def _parse_id(value: Union[int, str]) -> int:
 
 
 class Memory:
-    """Memory operations over a Glider collection. Independent of MCP."""
+    """Memory operations over a Glider collection. Independent of MCP.
 
-    def __init__(self, client: Client, embedder: Embedder) -> None:
-        self._client = client
+    With ``collection``, memories live in that collection of a multi-collection
+    server, created on first use if missing; otherwise ``client`` is used as it
+    is (a single-collection server, or a client already bound to a collection).
+    """
+
+    def __init__(
+        self, client: Client, embedder: Embedder, collection: Optional[str] = None
+    ) -> None:
+        self._collection = collection
+        self._admin = client
+        self._client = client.collection(collection) if collection else client
         self._embedder = embedder
         self._ready = False
 
@@ -107,12 +119,18 @@ class Memory:
     def check(self) -> None:
         """Verify the server accepts vectors of the embedder's dimension.
 
-        Uses a read-only query, so nothing is written. Called before the first
-        operation; raises :class:`ConfigError` on a mismatch.
+        Single-collection mode uses a read-only query, so nothing is written.
+        With a ``collection`` it is created if missing (cosine metric, the
+        embedder's dimension). Called before the first operation; raises
+        :class:`ConfigError` on a mismatch.
         """
         if self._ready:
             return
         dimensions = len(self._embed("dimension probe"))
+        if self._collection:
+            self._ensure_collection(dimensions)
+            self._ready = True
+            return
         probe = [1.0] + [0.0] * (dimensions - 1)
         try:
             self._client.query(probe, k=1)
@@ -126,6 +144,28 @@ class Memory:
                 ) from exc
             raise
         self._ready = True
+
+    def _ensure_collection(self, dimensions: int) -> None:
+        name = self._collection
+        try:
+            self._admin.create_collection(name, dimensions, metric="cosine")
+        except GliderError as exc:
+            if exc.status == 409:
+                raise ConfigError(
+                    f"collection {name!r} already exists with a different "
+                    f"configuration ({exc.message}). Memory needs {dimensions} "
+                    "dimensions and the cosine metric (dimension and metric are "
+                    "fixed at creation): set GLIDER_COLLECTION to another name, "
+                    "or delete the collection if it is not needed."
+                ) from exc
+            if exc.status == 404:
+                raise ConfigError(
+                    f"glider-server has no /v1/collections ({exc.message}). "
+                    "GLIDER_COLLECTION needs a server in multi-collection mode "
+                    "(started without GLIDER_DIMENSIONS); unset GLIDER_COLLECTION "
+                    "for a single-collection server."
+                ) from exc
+            raise
 
     def remember(
         self,
@@ -314,9 +354,15 @@ def main() -> None:
         url=os.environ.get("GLIDER_URL", "http://localhost:8080"),
         token=os.environ.get("GLIDER_API_TOKEN") or None,
     )
+    collection = os.environ.get("GLIDER_COLLECTION") or None
+    if collection is not None:
+        try:
+            client.collection(collection)
+        except ValueError as exc:
+            sys.exit(f"GLIDER_COLLECTION: {exc}")
     embedder = FastEmbedder(os.environ.get("GLIDER_EMBED_MODEL", DEFAULT_MODEL))
     # stdout carries the MCP protocol; diagnostics go to stderr only.
-    build_server(Memory(client, embedder)).run(transport="stdio")
+    build_server(Memory(client, embedder, collection)).run(transport="stdio")
 
 
 if __name__ == "__main__":
