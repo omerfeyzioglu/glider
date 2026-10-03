@@ -228,11 +228,31 @@ No implementation tuning was performed from these measurements.
 
 ### Multi-tenant server scenario
 
+Latest result ([raw](benchmarks/tenants/aws-10k/run.json)): 10,000
+collections of 1,000 SIFT vectors each (10,000,000 vectors; SIFT1M rows are
+reused across tenants, each tenant holds distinct rows), one `glider-server`
+on a c7g.2xlarge against S3 Standard in eu-central-1, 32 client workers,
+seed 42, revision `dc249e2`.
+
+| Measure | Result |
+|---|---:|
+| Create 10,000 collections | 19.0 s |
+| Ingest 10,000,000 vectors (100 per write, SIGKILL halfway) | 1,326 s (7,539 vectors/s) |
+| Restart to healthy after SIGKILL | 0.64 s |
+| Tenants verified (exact ids, each batch acknowledged once) | 10,000 / 10,000 |
+| Cold tenant first query (opens from S3), p50 / p95 | 581 / 716 ms |
+| Warm queries over 64 tenants, QPS; p50 / p95 | 2,457; 10.7 / 18.5 ms |
+| Recall@10 against exact search (500 queries) | 1.0 |
+| Exact filtered queries, p50 / p95 | 12.0 / 19.8 ms |
+| Collections open after the idle period | 0 |
+| Peak server RSS | 612 MiB |
+| Objects / bytes in S3 | 120,480 / 6.70 GB (about $0.15 per month) |
+
 `tools/tenants_benchmark.py` runs one `glider-server` in multi-collection mode
 against a fresh local directory or S3 namespace. It creates 1,000 collections
 with 1,000 SIFT vectors each by default, kills and restarts the server halfway
 through acknowledged ingest, verifies every ID by count and full scan and checks
-each tenant's commit sequence for extra writes, then
+that every batch was acknowledged exactly once, then
 measures cold, warm, recall and exact filtered queries. The runner owns server
 startup and shutdown. Its JSON records per-phase wall-clock timing, nearest-rank
 latencies, throughput, crash recovery, verification mismatches, seed, SIFT file
@@ -241,9 +261,8 @@ footprint and the stated $0.023/decimal-GB-month estimate. `passed` requires all
 tenants to have exactly the expected IDs and all phases to complete; it is not a
 performance threshold. The process high-water RSS covers all server phases and
 restarts. Idle S3 request rates are null when the server does not expose such
-counters. The current server also does not implement
-`GLIDER_COLLECTION_IDLE_SECONDS`, so an open count above zero is an observation,
-not an ingest failure.
+counters; the idle phase records how many collections remain open after
+`GLIDER_COLLECTION_IDLE_SECONDS`.
 
 ```sh
 cargo build --release --locked --features server --bin glider-server
