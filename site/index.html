@@ -317,7 +317,12 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
           </div>
           <div class="sim-map-key"><span><i class="sim-dot"></i> Vectors, coloured by cluster</span><span><i class="sim-center"></i> Centroids</span><span><i class="sim-write-dot"></i> Recent writes</span></div>
           <div class="sim-presets" aria-label="Preset queries"><span>Query a neighbourhood</span><button type="button" data-query="0">Northwest</button><button type="button" data-query="1">Centre</button><button type="button" data-query="2">Southeast</button><button type="button" id="sim-again" disabled>Run again</button></div>
-          <ol class="sim-phases" aria-label="Query stages"><li data-phase="0">01 Route</li><li data-phase="1">02 Select</li><li data-phase="2">03 Fetch</li><li data-phase="3">04 Rerank</li></ol>
+          <div class="sim-trace">
+            <div class="sim-trace-heading"><strong>Query trace <small>· simulated</small></strong><div class="sim-tier-key" aria-label="Tier colours"><span><i class="sim-tier-chip s3" aria-hidden="true"></i>S3</span><span><i class="sim-tier-chip ssd" aria-hidden="true"></i>SSD</span><span><i class="sim-tier-chip ram" aria-hidden="true"></i>RAM</span></div></div>
+            <ol id="sim-trace-bar" class="sim-trace-bar" aria-label="Query phases in execution order" hidden></ol>
+            <p id="sim-trace-summary" class="sim-trace-summary">Route and select in RAM → fetch from RAM, SSD or S3 → rerank in RAM on the CPU.</p>
+            <p class="sim-trace-note">Fetch: RAM hot cache → SSD cache → S3 range read. Then CPU rerank in RAM: fetched blocks + unsealed tail.</p>
+          </div>
           <p id="sim-caption" class="sim-caption" role="status" aria-live="polite">Click the map to route a query through centroids and cached blocks.</p>
           <dl id="sim-query-card" class="sim-query-card" aria-label="Current query statistics">
             <div><dt>Read from S3</dt><dd id="sim-remote">—</dd></div>
@@ -329,18 +334,18 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
             <dl class="sim-query-extra"><div><dt>Clusters probed</dt><dd id="sim-probes">—</dd></div><div><dt>Blocks read / candidates</dt><dd id="sim-reads">—</dd></div><div><dt>RAM / SSD / S3 hits</dt><dd id="sim-sources">—</dd></div></dl>
             <div id="sim-blocks" class="sim-query-blocks" aria-label="Candidate block reads"><span>Up to 12 candidate blocks · 8 range GETs · 1 MiB remote</span></div>
             <p class="sim-result" id="sim-results">Top-10 neighbours appear as connected points after a query.</p>
-            <p>Latency = 1 ms compute + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 reads. Illustrative, not measured.</p>
+            <p>Latency = 0.25 ms RAM routing + 0.25 ms RAM selection + 0.5 ms RAM CPU reranking + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 reads. Illustrative, not measured.</p>
           </details>
         </div>
         <div class="sim-tiers">
           <article class="sim-tier sim-s3" id="sim-s3">
-            <header><h3>S3</h3><strong id="sim-s3-size"></strong></header>
+            <header><h3><i class="sim-tier-chip s3" aria-hidden="true"></i>S3</h3><strong id="sim-s3-size"></strong></header>
             <p>Every acknowledged write is durable here.</p>
             <div class="sim-objects" id="sim-objects"></div>
             <details class="sim-details"><summary>Details</summary><div id="sim-object-details"></div><p id="sim-s3-note"></p><p>Immutable logs acknowledge writes; a published root selects sealed packs, indexes and manifests.</p></details>
           </article>
           <article class="sim-tier" id="sim-ssd">
-            <header><h3>SSD</h3><strong id="sim-ssd-size"></strong></header>
+            <header><h3><i class="sim-tier-chip ssd" aria-hidden="true"></i>SSD</h3><strong id="sim-ssd-size"></strong></header>
             <p>Fetched blocks stay here for the next query.</p>
             <div class="sim-slots" id="sim-ssd-slots" role="img" aria-label="SSD cache occupancy"></div>
             <strong class="sim-tier-number" id="sim-ssd-count"></strong>
@@ -350,7 +355,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
             </details>
           </article>
           <article class="sim-tier sim-ram" id="sim-ram">
-            <header><h3>RAM</h3><strong id="sim-ram-size"></strong></header>
+            <header><h3><i class="sim-tier-chip ram" aria-hidden="true"></i>RAM</h3><strong id="sim-ram-size"></strong></header>
             <p>Routing and recent data live in process memory.</p>
             <div class="sim-memory" id="sim-memory"></div>
             <details class="sim-details"><summary>Details</summary><div id="sim-memory-details"></div><p>Full vectors enter RAM only as fetched blocks or unsealed writes. The hot block cache is bounded to 4 MiB; a crash clears all process memory.</p></details>
@@ -358,7 +363,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
           <div class="sim-recovery" id="sim-recovery" hidden><label for="sim-progress">Rebuilding from S3</label><progress id="sim-progress" value="0" max="1"></progress></div>
         </div>
       </div>
-      <details class="sim-model-note"><summary>How the illustration is sized and timed</summary><p>30,000 sampled dots stand for the selected dataset, already sealed and clustered (including the 100K example). Seeded Gaussian-mixture islands with Poisson-disc centres have varied populations averaging about 4,000 vectors per centroid. Projected islands can overlap; cluster membership represents the original embedding. Routing uses the M31 profile's 32 probes, scaled to 4 for 100K. Reranking is exact within selected blocks and the tail; the overall search is approximate. The projection and five-bit scores use two dimensions, while sizes assume 128-dimensional float32 vectors: 24 B per directory slot, 80 B of five-bit codes + 4 B ID offset + 8 B posting sequence per sealed row, 512 B per centroid, and 640 B per tail/log row. Blocks are sized proportionally up to 120 KiB; packs hold up to eight blocks (960 KiB) plus sketches. Compression, allocator overhead, routing cache files and retired objects are omitted. RAM's hot cache is 4 MiB; SSD defaults to 256 MiB. Latency = 1 ms compute + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 range GETs. Each batch adds 100 new IDs; 32 log objects trigger sealing. Restart compresses the real lease wait and recovery into five visual stages.</p></details>
+      <details class="sim-model-note"><summary>How the illustration is sized and timed</summary><p>30,000 sampled dots stand for the selected dataset, already sealed and clustered (including the 100K example). Seeded Gaussian-mixture islands with Poisson-disc centres have varied populations averaging about 4,000 vectors per centroid. Projected islands can overlap; cluster membership represents the original embedding. Routing uses the M31 profile's 32 probes, scaled to 4 for 100K. Reranking is exact within selected blocks and the tail; the overall search is approximate. The projection and five-bit scores use two dimensions, while sizes assume 128-dimensional float32 vectors: 24 B per directory slot, 80 B of five-bit codes + 4 B ID offset + 8 B posting sequence per sealed row, 512 B per centroid, and 640 B per tail/log row. Blocks are sized proportionally up to 120 KiB; packs hold up to eight blocks (960 KiB) plus sketches. Compression, allocator overhead, routing cache files and retired objects are omitted. RAM's hot cache is 4 MiB; SSD defaults to 256 MiB. Latency = 0.25 ms RAM routing + 0.25 ms RAM selection + 0.5 ms RAM CPU reranking + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 range GETs. Trace widths follow these simulated phase times with a 14% minimum per phase; the animation stretches the whole query to 1.2 seconds. Each batch adds 100 new IDs; 32 log objects trigger sealing. Restart compresses the real lease wait and recovery into five visual stages.</p></details>
     </div>
     <p class="sim-cta"><a class="btn sm go" href="#quickstart">Try it on your own data <span aria-hidden="true">→</span> Quickstart</a></p>
     <noscript><p>Enable JavaScript for the storage simulation, or <a href="#quickstart">run Glider locally</a>.</p></noscript>

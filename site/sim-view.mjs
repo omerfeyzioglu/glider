@@ -1,5 +1,5 @@
 import {
-  createSimulation, sampleDataset, query, QUERY_PRESETS, QUERY_ANIMATION_MS, queryAnimationProgress, writeBatch,
+  createSimulation, sampleDataset, query, QUERY_PRESETS, QUERY_ANIMATION_MS, queryAnimationProgress, queryPhaseFractions, writeBatch,
   seal, crash, beginRestart, restartStep, RESTART_PHASES, warmStep, sizes, MiB,
 } from './sim-model.mjs';
 
@@ -22,7 +22,44 @@ function node(tag, className, text) {
 const say = text => { el('caption').textContent = text; };
 const wait = ms => motion.matches ? Promise.resolve() : new Promise(resolve => setTimeout(resolve, ms));
 function phase(index) {
-  document.querySelectorAll('[data-phase]').forEach(n => n.classList.toggle('active', +n.dataset.phase === index));
+  traceSegments.forEach((segment, i) => segment.classList.toggle('active', i === index));
+}
+let traceSegments = [];
+function traceProgress(progress) {
+  traceSegments.forEach((segment, i) => { segment.style.setProperty('--progress', progress[i]); });
+}
+function renderTrace() {
+  const shares = queryPhaseFractions(plan);
+  traceSegments = plan.phases.map((phase, i) => {
+    const title = phase.name[0].toUpperCase() + phase.name.slice(1);
+    const segment = node('li', 'sim-trace-phase');
+    segment.style.flex = `${shares[i]} 1 0%`;
+    segment.style.setProperty('--progress', 0);
+    const fill = node('div', 'sim-trace-fill');
+    const tiers = phase.sources ? ['s3', 'ssd', 'ram'].filter(tier => phase.sources[tier]) : [phase.tier];
+    const detail = phase.sources ? tiers.map(tier => `${tier.toUpperCase()} ×${phase.sources[tier]}`).join(', ')
+      : `RAM${phase.name === 'rerank' ? ' CPU over fetched blocks + unsealed tail' : phase.name === 'route' ? ' centroid comparison' : ' candidate selection'}`;
+    segment.title = `${title}: ${phase.ms} ms · ${detail}`;
+    segment.setAttribute('aria-label', segment.title);
+    fill.setAttribute('aria-hidden', 'true');
+    for (const tier of tiers) {
+      const source = node('div', `sim-trace-source ${tier}`);
+      source.style.flex = `${phase.sources?.[tier] ?? 1} 1 0%`;
+      source.append(node('strong', 'sim-trace-label', title),
+        node('span', 'sim-trace-label', phase.sources ? `${tier.toUpperCase()} ×${phase.sources[tier]}` : phase.name === 'rerank' ? 'RAM · CPU' : 'RAM'));
+      fill.append(source);
+    }
+    segment.append(fill);
+    return segment;
+  });
+  el('trace-bar').replaceChildren(...traceSegments); el('trace-bar').hidden = false;
+  const {s3, ssd, ram} = plan.sources, count = plan.reads.length;
+  const blocks = n => `${n} block${n === 1 ? '' : 's'}`;
+  const origin = s3 === count ? `Fetched ${blocks(count)} from S3 (${+(plan.bytes / 1024).toFixed(1)} KiB)`
+    : ram === count ? `All ${blocks(count)} came from RAM — no S3 read`
+    : ssd === count ? `${blocks(count)} from SSD — no S3 read`
+    : `Fetched ${[['S3', s3], ['SSD', ssd], ['RAM', ram]].filter(([, n]) => n).map(([tier, n]) => `${blocks(n)} from ${tier}`).join(', ')}${s3 ? ` (${+(plan.bytes / 1024).toFixed(1)} KiB from S3)` : ' — no S3 read'}`;
+  el('trace-summary').textContent = `${origin}; reranked in RAM on the CPU.`;
 }
 function glow(tier) {
   for (const name of ['ram', 'ssd', 's3']) el(name).classList.toggle('lit', tier === name);
@@ -145,6 +182,8 @@ function clearQuery() {
   for (const name of ['probes', 'reads', 'sources', 'remote', 'cache', 'latency']) el(name).textContent = '—';
   el('results').textContent = 'Top-10 neighbours appear as connected points after a query.';
   el('blocks').replaceChildren(node('span', '', 'Up to 12 candidate blocks · 8 range GETs · 1 MiB remote'));
+  traceSegments = []; el('trace-bar').replaceChildren(); el('trace-bar').hidden = true;
+  el('trace-summary').textContent = 'Route and select in RAM → fetch from RAM, SSD or S3 → rerank in RAM on the CPU.';
   phase(-1); glow(null); invalidate();
 }
 function renderQuery() {
@@ -173,7 +212,7 @@ function renderBlocks() {
 const grid = el('grid'), tracks = el('tracks'), rail = tracks.getContext('2d');
 let geometry = {}, trackWidth = 1, trackHeight = 1, transfer = null;
 const flashes = new Map();
-const TRANSFER_SPEED = 2; // CSS pixels per millisecond, including bends.
+const TRANSFER_SPEED = 2; // Non-query flows: CSS pixels/ms, including bends.
 const TRANSFER_FADE_MS = 200;
 const tierCounters = {ssd: ['ssd-size', 'ssd-count'], ram: ['ram-size'], s3: ['s3-size']};
 function snapshotCounters() {
@@ -274,7 +313,7 @@ function routeFor(legs) {
 }
 function buildRoutes() {
   transfer.route = routeFor(transfer.legs);
-  transfer.duration = transfer.sealing ? transfer.duration : transfer.route.length / TRANSFER_SPEED;
+  transfer.duration = transfer.sealing || transfer.queryFlow ? transfer.duration : transfer.route.length / TRANSFER_SPEED;
   if (transfer.done && transfer.fadeStarted === null) {
     clearTimeout(transfer.deadline);
     transfer.deadline = setTimeout(() => stopTransfers(true, !transfer.sealing),
@@ -348,8 +387,13 @@ function paintTransfers(now) {
   if (!transfer) return;
   const elapsed = now - transfer.started;
   if (transfer.sealing) { if (!motion.matches) paintSeal(Math.min(1, elapsed / transfer.duration)); return; }
-  const distance = transfer.fadeStarted !== null || motion.matches ? transfer.route.length
+  let distance = transfer.fadeStarted !== null || motion.matches ? transfer.route.length
     : Math.min(transfer.route.length, Math.max(0, elapsed) * TRANSFER_SPEED);
+  if (transfer.queryFlow && transfer.fadeStarted === null && !motion.matches) {
+    const progress = queryAnimationProgress(elapsed, plan);
+    const ramDistance = transfer.route.stops.find(stop => stop.tier === 'ram')?.distance ?? 0;
+    distance = ramDistance * progress.phases[2] + (transfer.route.length - ramDistance) * progress.phases[3];
+  }
   for (const stop of transfer.route.stops) if (distance >= stop.distance) transferArrival(stop.tier);
   if (motion.matches) return;
   const opacity = transfer.fadeStarted === null ? 1 : Math.max(0, 1 - (now - transfer.fadeStarted) / TRANSFER_FADE_MS);
@@ -377,7 +421,7 @@ function stopTransfers(settle = false, fade = false) {
 }
 function startTransfers(flow, {duration = 900, point = queryPoint ?? presets[1], sealing = false, counters = null, queryFlow = false} = {}) {
   stopTransfers(); clearArrivals();
-  transfer = {started: performance.now(), legs: flow?.legs ?? [],
+  transfer = {started: queryFlow ? queryAnimation.started : performance.now(), legs: flow?.legs ?? [],
     colour: flow?.colour ?? '#F07A1A', arrived: new Set(), fadeStarted: null,
     counters, queryFlow, finalCounters: snapshotCounters(), point: {...point}, duration, sealing, frame: 0, deadline: 0};
   measureTracks();
@@ -416,10 +460,11 @@ function stopQueryAnimation() {
 function finishQueryAnimation() {
   if (!queryAnimation) return;
   stopQueryAnimation();
-  // Query execution settles independently of frames; a longer measured route
-  // keeps its constant-speed fill until the illustration reaches the query.
+  // Execution and cache admission never wait for frames. The query track and
+  // trace share a deadline; settling also completes the reduced-motion path.
   if (transfer && (motion.matches || performance.now() - transfer.started >= transfer.duration)) stopTransfers(true, true);
   for (const read of plan.reads) blockCards.get(read.block.id).className = `sim-read ${read.source}`;
+  traceProgress([1, 1, 1, 1]);
   results = plan.results; phase(3); busy = false; glow(null); renderInventory(); invalidate();
   say(plan.sources.s3 ? 'Query complete. Those blocks are now cached — run again to see the difference.' : 'Cache hit. Every selected block was served locally.');
 }
@@ -437,7 +482,7 @@ function runQuery(point) {
   busy = true;
   const started = performance.now();
   queryAnimation = {started, frame: 0, deadline: 0};
-  renderQuery(); renderBlocks(); renderInventory(); invalidate();
+  renderQuery(); renderTrace(); renderBlocks(); renderInventory(); invalidate();
   const remote = plan.reads.filter(read => read.source === 's3');
   const local = plan.reads.filter(read => read.source !== 's3');
   // One aggregate flow starts at the deepest source needed by this plan.
@@ -446,18 +491,19 @@ function runQuery(point) {
     ...(source === 's3' ? [{track: 's3-ssd', to: 'ssd'}] : []),
     ...(source !== 'ram' ? [{track: 'ssd-ram', to: 'ram'}] : []),
     {track: 'ram-map', to: 'map'},
-  ]}, {counters, queryFlow: true});
+  ]}, {duration: QUERY_ANIMATION_MS, counters, queryFlow: true});
   let shownStage = -1;
   const update = () => {
     if (!queryAnimation) return;
     const elapsed = performance.now() - started;
-    const progress = queryAnimationProgress(elapsed, remote.length);
+    const progress = queryAnimationProgress(elapsed, plan);
     if (motion.matches || progress.done) { finishQueryAnimation(); return; }
+    traceProgress(progress.phases);
     if (progress.stage !== shownStage) {
       shownStage = progress.stage; phase(progress.stage);
-      say(['Find nearby clusters.', 'Choose the most promising blocks.',
-        remote.length ? 'Read missing blocks in parallel and keep them in cache.' : 'Serve the selected blocks directly from cache.',
-        'Rank the nearest neighbours.'][progress.stage]);
+      say(['Compare centroids in RAM.', 'Select candidate blocks using RAM routing sketches.',
+        remote.length ? 'Fetch blocks from RAM, then SSD, otherwise S3 range reads.' : 'Fetch selected blocks from the RAM / SSD caches.',
+        'Rerank fetched blocks + the unsealed tail in RAM on the CPU.'][progress.stage]);
       for (const read of local) blockCards.get(read.block.id).className = progress.stage >= 2 ? `sim-read ${read.source}` : 'sim-read pending';
     }
     for (let i = 0; i < remote.length; i++) {

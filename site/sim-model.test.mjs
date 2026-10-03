@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SEED, MiB, BLOCK_BYTES, BUDGET, SEAL_LOGS, QUERY_PRESETS, QUERY_ANIMATION_MS, queryAnimationProgress, LRU, generateDataset, sampleDataset,
-  basePoint, assignCluster, createSimulation, query, writeBatch, seal, crash,
+  SEED, MiB, BLOCK_BYTES, BUDGET, SEAL_LOGS, QUERY_PRESETS, QUERY_ANIMATION_MS, queryAnimationProgress, queryPhaseFractions, LRU, generateDataset, sampleDataset,
+  basePoint, assignCluster, createSimulation, planQuery, query, writeBatch, seal, crash,
   restart, beginRestart, restartStep, scanRows, sizes, warmStep, blockRows, prng,
 } from './sim-model.mjs';
 
@@ -241,16 +241,54 @@ test('organic layouts cover the panel, vary populations and density, and preserv
 });
 
 test('query animation settles parallel batches by elapsed time, including skipped frames', () => {
+  const plan = planQuery(createSimulation({count: 100000}), midpoint);
+  const shares = queryPhaseFractions(plan);
+  const fetchStart = (shares[0] + shares[1]) * QUERY_ANIMATION_MS;
+  const fetchEnd = fetchStart + shares[2] * QUERY_ANIMATION_MS;
   assert.ok(QUERY_ANIMATION_MS <= 1500);
-  assert.equal(queryAnimationProgress(0, 8).stage, 0);
-  assert.equal(queryAnimationProgress(140, 8).stage, 1);
-  assert.equal(queryAnimationProgress(280, 8).stage, 2);
-  assert.equal(queryAnimationProgress(639, 8).remoteDone, 0);
-  assert.equal(queryAnimationProgress(640, 8).remoteDone, 4);
-  assert.equal(queryAnimationProgress(1000, 8).remoteDone, 8);
+  assert.equal(queryAnimationProgress(0, plan).stage, 0);
+  assert.equal(queryAnimationProgress(shares[0] * QUERY_ANIMATION_MS + 1, plan).stage, 1);
+  assert.equal(queryAnimationProgress(fetchStart + 1, plan).stage, 2);
+  assert.equal(queryAnimationProgress((fetchStart + fetchEnd) / 2 - 1, plan).remoteDone, 0);
+  assert.equal(queryAnimationProgress((fetchStart + fetchEnd) / 2 + 1, plan).remoteDone, 4);
+  assert.equal(queryAnimationProgress(fetchEnd + 1, plan).remoteDone, 8);
   for (const remote of [0, 1, 4, 5, 8]) {
-    assert.equal(queryAnimationProgress(QUERY_ANIMATION_MS, remote).done, true);
-    assert.equal(queryAnimationProgress(60000, remote).remoteDone, remote);
+    const sample = {...plan, sources: {...plan.sources, s3: remote}};
+    assert.equal(queryAnimationProgress(QUERY_ANIMATION_MS, sample).done, true);
+    assert.equal(queryAnimationProgress(60000, sample).remoteDone, remote);
+  }
+});
+
+test('pure query plans trace RAM CPU phases and account for every fetch source and millisecond', () => {
+  const state = createSimulation({count: 100000});
+  writeBatch(state, midpoint);
+  const before = structuredClone(state);
+  const cold = planQuery(state, midpoint);
+  assert.deepEqual(structuredClone(state), before, 'planning must not touch LRU entries or admit blocks');
+  query(state, midpoint);
+  const warm = planQuery(state, midpoint);
+  assert.equal(warm.phases[2].sources.s3, 0);
+  assert.equal(warm.phases[2].sources.ram, warm.reads.length);
+  crash(state); restart(state);
+  const disk = planQuery(state, midpoint);
+  assert.equal(disk.phases[2].sources.ssd, disk.reads.length);
+  // Mix all three tiers in one read plan.
+  state.ram.hot.admit(disk.reads[0].block.id, disk.reads[0].block.bytes);
+  state.ssd.clear();
+  state.ssd.admit(disk.reads[1].block.id, disk.reads[1].block.bytes);
+  const mixed = planQuery(state, midpoint);
+  assert.ok(Object.values(mixed.sources).every(n => n > 0));
+  for (const plan of [cold, warm, disk, mixed]) {
+    assert.deepEqual(plan.phases.map(p => p.name), ['route', 'select', 'fetch', 'rerank']);
+    for (const i of [0, 1, 3]) assert.equal(plan.phases[i].tier, 'ram');
+    assert.deepEqual(plan.phases[2].sources, plan.sources);
+    assert.equal(Object.values(plan.phases[2].sources).reduce((sum, n) => sum + n, 0), plan.reads.length);
+    assert.ok(Math.abs(plan.phases.reduce((sum, p) => sum + p.ms, 0) - plan.latency) < 1e-10);
+    assert.equal(plan.latency, +(1 + plan.sources.ram * .1 + plan.sources.ssd * .5 + Math.ceil(plan.sources.s3 / 4) * 20).toFixed(1));
+    const shares = queryPhaseFractions(plan);
+    assert.ok(shares.every(share => share >= .14));
+    assert.ok(Math.abs(shares.reduce((sum, share) => sum + share, 0) - 1) < 1e-10);
+    assert.ok(queryAnimationProgress(60000, plan).phases.every(p => p === 1));
   }
 });
 
@@ -266,7 +304,8 @@ async function viewHarness(reducedMotion = false) {
   const drawing = new Proxy({}, {get: () => () => {}, set: () => true});
   class Element {
     constructor() {
-      this.children = []; this.dataset = {}; this.style = {}; this.listeners = new Map();
+      this.children = []; this.dataset = {}; this.style = {setProperty(key, value) { this[key] = value; }}; this.listeners = new Map();
+      this.attributes = new Map();
       this.classList = {toggle() {}}; this.checked = false; this.disabled = false;
     }
     append(...children) { this.children.push(...children); }
@@ -276,7 +315,7 @@ async function viewHarness(reducedMotion = false) {
       if (event === 'click') assert.equal(this.disabled, false, 'control must remain usable');
       return this.listeners.get(event)?.({detail: 1, ...properties});
     }
-    setAttribute() {}
+    setAttribute(key, value) { this.attributes.set(key, value); }
     getContext() { return drawing; }
     getBoundingClientRect() { return {left: 0, top: 0, width: 375, height: 390}; }
     getAnimations() { return []; }
@@ -327,8 +366,10 @@ test('view immediately shows the current plan; repeated and interrupted clicks h
   assert.equal(view.get('remote').textContent, '0 blocks (0 KiB)');
   // No frames at all: the deadline must still finish and unblock idle writes.
   view.advance(1200);
-  assert.equal(view.timers.size, 0);
+  assert.ok(view.get('trace-bar').children.every(segment => segment.style['--progress'] === 1));
   assert.match(view.get('caption').textContent, /Cache hit/);
+  view.advance(200); // The completed track's existing fade follows the query.
+  assert.equal(view.timers.size, 0);
   view.get('stream').dispatch(); view.idle();
   assert.equal(view.get('count').textContent, '1,000,100 vectors');
   view.presets[0].dispatch(); view.get('reset').dispatch(); view.advance(60000, true);
@@ -358,4 +399,41 @@ test('view keeps seal, crash, lost-disk recovery and dataset controls usable wit
   assert.equal(view.get('count').textContent, '100,000 vectors');
   view.presets[1].dispatch(); view.get('again').dispatch();
   assert.equal(view.get('remote').textContent, '0 blocks (0 KiB)');
+});
+
+test('view explains cold, RAM and preserved SSD origins while rerank stays in RAM', async () => {
+  const view = await viewHarness(true);
+  view.presets[1].dispatch();
+  assert.equal(view.get('trace-summary').textContent, 'Fetched 8 blocks from S3 (960 KiB); reranked in RAM on the CPU.');
+  const cold = view.get('trace-bar').children;
+  assert.equal(cold.length, 4);
+  assert.match(cold[0].attributes.get('aria-label'), /Route: 0.25 ms · RAM centroid comparison/);
+  assert.match(cold[2].attributes.get('aria-label'), /Fetch: 40 ms · S3 ×8/);
+  assert.match(cold[3].attributes.get('aria-label'), /Rerank: 0.5 ms · RAM CPU over fetched blocks \+ unsealed tail/);
+  assert.ok(cold.every(segment => segment.style['--progress'] === 1), 'reduced motion settles immediately');
+  view.get('again').dispatch();
+  assert.equal(view.get('trace-summary').textContent, 'All 8 blocks came from RAM — no S3 read; reranked in RAM on the CPU.');
+  view.get('crash').dispatch();
+  assert.equal(view.get('trace-bar').hidden, true);
+  await view.get('restart').dispatch();
+  view.presets[1].dispatch();
+  assert.equal(view.get('trace-summary').textContent, '8 blocks from SSD — no S3 read; reranked in RAM on the CPU.');
+  assert.match(view.get('trace-bar').children[2].attributes.get('aria-label'), /SSD ×8/);
+});
+
+test('view fills the trace in phase order and finishes when motion preference changes', async () => {
+  const view = await viewHarness();
+  view.presets[1].dispatch();
+  const segments = view.get('trace-bar').children;
+  assert.ok(segments.every(segment => segment.style['--progress'] === 0));
+  view.advance(84, true); // Half of the minimum-width route phase.
+  assert.ok(Math.abs(segments[0].style['--progress'] - .5) < 1e-10);
+  assert.ok(segments.slice(1).every(segment => segment.style['--progress'] === 0));
+  view.advance(252 + 348, true); // Halfway through the cold fetch.
+  assert.equal(segments[0].style['--progress'], 1);
+  assert.equal(segments[1].style['--progress'], 1);
+  assert.ok(Math.abs(segments[2].style['--progress'] - .5) < 1e-10);
+  assert.equal(segments[3].style['--progress'], 0);
+  view.motion.matches = true; view.motion.dispatch('change');
+  assert.ok(segments.every(segment => segment.style['--progress'] === 1));
 });

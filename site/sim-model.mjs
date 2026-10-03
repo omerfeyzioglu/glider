@@ -13,12 +13,37 @@ export const QUERY_PRESETS = Object.freeze([
   Object.freeze({x: .24, y: .24}), Object.freeze({x: .5, y: .5}), Object.freeze({x: .76, y: .76}),
 ]);
 export const QUERY_ANIMATION_MS = 1200;
+// Keep tiny CPU phases legible in the trace. Unclamped phases retain their
+// relative timing; animation and layout use these same shares.
+export function queryPhaseFractions(plan) {
+  const minimum = .14, fractions = plan.phases.map(() => 0);
+  let pending = plan.phases.map((phase, i) => ({ms: phase.ms, i})), remaining = 1;
+  while (pending.length) {
+    const total = pending.reduce((sum, phase) => sum + phase.ms, 0);
+    const small = pending.filter(phase => phase.ms / total * remaining < minimum);
+    if (!small.length) {
+      for (const phase of pending) fractions[phase.i] = phase.ms / total * remaining;
+      break;
+    }
+    for (const phase of small) { fractions[phase.i] = minimum; remaining -= minimum; }
+    pending = pending.filter(phase => !small.includes(phase));
+  }
+  return fractions;
+}
 // Absolute elapsed time: skipped frames never lengthen the illustration.
-export function queryAnimationProgress(elapsed, remoteCount) {
-  const stage = elapsed < 140 ? 0 : elapsed < 280 ? 1 : elapsed < 1000 ? 2 : 3;
+export function queryAnimationProgress(elapsed, plan) {
+  const fractions = queryPhaseFractions(plan), position = Math.max(0, elapsed) / QUERY_ANIMATION_MS;
+  let start = 0;
+  const phases = fractions.map(fraction => {
+    const progress = Math.max(0, Math.min(1, (position - start) / fraction));
+    start += fraction;
+    return progress;
+  });
+  const active = phases.findIndex(p => p < 1), stage = active < 0 ? 3 : active;
+  const remoteCount = plan.sources.s3;
   const batches = Math.ceil(remoteCount / 4);
-  const completed = Math.min(batches, Math.floor(Math.max(0, elapsed - 280) / (720 / Math.max(1, batches))));
-  return {stage, remoteDone: Math.min(remoteCount, completed * 4), done: elapsed >= QUERY_ANIMATION_MS};
+  const completed = Math.min(batches, Math.floor(phases[2] * batches));
+  return {stage, phases, remoteDone: Math.min(remoteCount, completed * 4), done: elapsed >= QUERY_ANIMATION_MS};
 }
 
 export function prng(seed) {
@@ -242,9 +267,16 @@ export function planQuery(state, point) {
   const sources = {ram: 0, ssd: 0, s3: 0};
   for (const read of reads) sources[read.source]++;
   const bytes = reads.filter(r => r.source === 's3').reduce((n, r) => n + r.block.bytes, 0);
-  // 4 parallel ranges per batch; local access sums + 1ms compute, all simulated.
-  const latency = +(1 + sources.ram * .1 + sources.ssd * .5 + Math.ceil(sources.s3 / 4) * 20).toFixed(1);
-  return {point: {...point}, clusters, candidates, reads, sources, bytes, latency};
+  // The illustrative 1ms CPU budget is split across routing, selection and
+  // reranking. Fetch sums local access and batches of four parallel ranges.
+  const phases = [
+    {name: 'route', tier: 'ram', ms: .25},
+    {name: 'select', tier: 'ram', ms: .25},
+    {name: 'fetch', tier: null, sources: {...sources}, ms: +(sources.ram * .1 + sources.ssd * .5 + Math.ceil(sources.s3 / 4) * 20).toFixed(1)},
+    {name: 'rerank', tier: 'ram', ms: .5},
+  ];
+  const latency = +phases.reduce((sum, phase) => sum + phase.ms, 0).toFixed(1);
+  return {point: {...point}, clusters, candidates, reads, sources, bytes, latency, phases};
 }
 export function fetchBlock(state, read, promoteToRam = true) {
   running(state);
