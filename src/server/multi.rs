@@ -12,8 +12,12 @@ use std::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
-use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::{
+    sync::{watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore},
+    task::JoinHandle,
+};
 
 struct Open {
     client: Client<Engine0>,
@@ -23,6 +27,7 @@ struct Open {
     idle: Notify,
     closing: AtomicBool,
     used: AtomicU64,
+    last_used: Mutex<Instant>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -49,6 +54,8 @@ struct Inner {
     names: AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     permits: Arc<Semaphore>,
     tick: AtomicU64,
+    idle_stop: watch::Sender<bool>,
+    idle_task: Mutex<Option<JoinHandle<()>>>,
 }
 #[derive(Clone)]
 pub struct Multi {
@@ -65,7 +72,9 @@ impl Multi {
         let catalog = Catalog::new(config.store.clone());
         // Open and validate the catalog before serving requests.
         catalog.sweep()?;
-        Ok(Self {
+        let idle = config.collection_idle;
+        let (idle_stop, mut idle_stopped) = watch::channel(false);
+        let multi = Self {
             inner: Arc::new(Inner {
                 permits: Arc::new(Semaphore::new(config.max_open_collections)),
                 config,
@@ -73,8 +82,35 @@ impl Multi {
                 opened: AsyncMutex::new(HashMap::new()),
                 names: AsyncMutex::new(HashMap::new()),
                 tick: AtomicU64::new(0),
+                idle_stop,
+                idle_task: Mutex::new(None),
             }),
-        })
+        };
+        if !idle.is_zero() {
+            let interval = (idle / 4)
+                .min(Duration::from_secs(5))
+                .max(Duration::from_millis(1));
+            let weak = Arc::downgrade(&multi.inner);
+            let task = tokio::runtime::Handle::try_current()
+                .map_err(|error| Error::Invalid(format!("multi mode requires Tokio: {error}")))?
+                .spawn(async move {
+                    let mut ticks = tokio::time::interval(interval);
+                    ticks.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = ticks.tick() => {
+                                let Some(inner) = weak.upgrade() else { break };
+                                Multi { inner }.close_idle(idle).await;
+                            }
+                            changed = idle_stopped.changed() => {
+                                if changed.is_err() || *idle_stopped.borrow() { break }
+                            }
+                        }
+                    }
+                });
+            *multi.inner.idle_task.lock().unwrap() = Some(task);
+        }
+        Ok(multi)
     }
     async fn name_lock(&self, name: &str) -> Arc<AsyncMutex<()>> {
         let mut names = self.inner.names.lock().await;
@@ -122,6 +158,7 @@ impl Multi {
             .map_err(|error| Error::Invalid(error.to_string()))?
     }
     fn touch(&self, open: &Open) {
+        *open.last_used.lock().unwrap() = Instant::now();
         open.used.store(
             self.inner.tick.fetch_add(1, Ordering::Relaxed) + 1,
             Ordering::Relaxed,
@@ -181,6 +218,7 @@ impl Multi {
             idle: Notify::new(),
             closing: AtomicBool::new(false),
             used: AtomicU64::new(0),
+            last_used: Mutex::new(Instant::now()),
             _permit: permit,
         });
         self.touch(&open);
@@ -235,6 +273,31 @@ impl Multi {
         Err(Error::Busy(
             "all open collections have requests in flight".into(),
         ))
+    }
+    async fn close_idle(&self, idle: Duration) {
+        let names: Vec<_> = self.inner.opened.lock().await.keys().cloned().collect();
+        for name in names {
+            let lock = self.name_lock(&name).await;
+            let Ok(_guard) = lock.try_lock() else {
+                continue;
+            };
+            let open = {
+                let mut opened = self.inner.opened.lock().await;
+                if opened.get(&name).is_some_and(|open| {
+                    open.active.load(Ordering::Acquire) == 0
+                        && open.last_used.lock().unwrap().elapsed() >= idle
+                }) {
+                    opened.remove(&name)
+                } else {
+                    None
+                }
+            };
+            if let Some(open) = open {
+                if let Err(error) = self.close(open).await {
+                    eprintln!("idle collection close failed for {name}: {error}");
+                }
+            }
+        }
     }
     async fn close(&self, open: Arc<Open>) -> Result<()> {
         open.closing.store(true, Ordering::Release);
@@ -307,6 +370,12 @@ impl Multi {
         Ok(true)
     }
     pub async fn shutdown(&self) -> Result<()> {
+        self.inner.idle_stop.send_replace(true);
+        let task = self.inner.idle_task.lock().unwrap().take();
+        if let Some(task) = task {
+            task.await
+                .map_err(|error| Error::Invalid(error.to_string()))?;
+        }
         let names: Vec<_> = self.inner.opened.lock().await.keys().cloned().collect();
         let mut first_error = None;
         for name in names {
