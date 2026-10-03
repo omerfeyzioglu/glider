@@ -176,6 +176,8 @@ struct QueryBody {
     include_metadata: bool,
     #[serde(default)]
     include_vector: bool,
+    #[serde(default)]
+    exact: bool,
 }
 
 fn default_k() -> usize {
@@ -200,11 +202,12 @@ async fn query(
             include_vector: body.include_vector,
         };
         let result = client
-            .query_with_options(
+            .query_with_mode(
                 body.vector,
                 body.k,
                 body.filter.into_iter().collect(),
                 options,
+                body.exact,
             )?
             .wait()?
             .value;
@@ -225,6 +228,108 @@ async fn query(
                 })
                 .collect::<Vec<_>>(),
         })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchGetBody {
+    ids: Vec<u64>,
+    #[serde(default = "default_true")]
+    include_vector: bool,
+    #[serde(default = "default_true")]
+    include_metadata: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+async fn batch_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BatchGetBody>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers)?;
+    if body.ids.is_empty() || body.ids.len() > 1_000 {
+        return Err(bad_request("ids must contain 1 to 1000 entries"));
+    }
+    let client = state.client.clone();
+    blocking(move || {
+        let ids = body.ids;
+        let result = client.batch_get(ids.clone())?.wait()?.value;
+        let mut points = Vec::new();
+        let mut missing = Vec::new();
+        for (id, document) in ids.into_iter().zip(result.points) {
+            if let Some(document) = document {
+                let mut point = json!({ "id": id });
+                if body.include_vector {
+                    point["vector"] = json!(document.vector);
+                }
+                if body.include_metadata {
+                    point["metadata"] = json!(document.metadata);
+                }
+                points.push(point);
+            } else {
+                missing.push(id);
+            }
+        }
+        Ok(Json(
+            json!({ "points": points, "missing": missing, "sequence": result.sequence }),
+        ))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanBody {
+    #[serde(default)]
+    filter: BTreeMap<String, String>,
+    after: Option<u64>,
+    #[serde(default = "default_scan_limit")]
+    limit: usize,
+    #[serde(default)]
+    include_metadata: bool,
+}
+
+fn default_scan_limit() -> usize {
+    1_000
+}
+
+async fn scan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ScanBody>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers)?;
+    if body.limit == 0 || body.limit > 10_000 {
+        return Err(bad_request("limit must be between 1 and 10000"));
+    }
+    let client = state.client.clone();
+    blocking(move || {
+        let result = client
+            .scan(
+                body.filter.into_iter().collect(),
+                body.after,
+                body.limit,
+                body.include_metadata,
+            )?
+            .wait()?
+            .value;
+        let mut response =
+            json!({ "next": result.next, "matched": result.matched, "sequence": result.sequence });
+        if body.include_metadata {
+            response["points"] = json!(result
+                .points
+                .into_iter()
+                .map(|(id, metadata)| json!({ "id": id, "metadata": metadata.unwrap_or_default() }))
+                .collect::<Vec<_>>());
+        } else {
+            response["ids"] = json!(result.points.into_keys().collect::<Vec<_>>());
+        }
+        Ok(Json(response))
     })
     .await
 }
@@ -328,6 +433,8 @@ pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/write", post(write))
         .route("/v1/query", post(query))
+        .route("/v1/points/get", post(batch_get))
+        .route("/v1/scan", post(scan))
         .route("/v1/points/{id}", get(point))
         .route("/v1/requests/{boundary}/{nonce}", get(request))
         .with_state(AppState {
