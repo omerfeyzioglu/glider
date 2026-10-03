@@ -1,11 +1,26 @@
 version: 2
 updates:
+  # Minor and patch updates in one weekly PR. Major versions change APIs and
+  # are upgraded deliberately on their own branch.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Tags of this action are Rust versions; CI pins the MSRV (rust-version
+      # in Cargo.toml) and moves it only with the crate.
+      - dependency-name: dtolnay/rust-toolchain
+    groups:
+      actions:
+        patterns: ["*"]
