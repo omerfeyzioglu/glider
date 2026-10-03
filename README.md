@@ -12,12 +12,26 @@ local RAM and SSD accelerate reads but hold no acknowledged data exclusively.
 
 ## Quickstart
 
-You need Git, Docker with Compose and curl. Docker builds the Rust server;
-**you do not need Rust installed locally**. There is no published binary or
-prebuilt image yet. This Compose setup uses local MinIO and example credentials
-for a demo, not an internet-facing deployment.
+You need Docker and curl; **you do not need Rust installed locally**.
+
+### Prebuilt image
+
+Each release is published as a multi-platform image (`linux/amd64`,
+`linux/arm64`). To try it with a local directory as storage:
+
+```sh
+docker run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.0.1
+```
+
+Data in the container is lost when it stops; point it at S3 with the
+[configuration](#configuration) variables to keep it. The write and query
+examples below work against it as well.
 
 ### Docker Compose (with MinIO)
+
+This setup also needs Git and builds the server from source. It uses local
+MinIO and example credentials for a demo, not an internet-facing deployment.
 
 ```sh
 git clone https://github.com/omerfeyzioglu/glider.git
@@ -285,6 +299,7 @@ cargo test --release --all-features --locked
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tools/benchmarks.py summary --check
 python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
+python3 tools/check_links.py
 ```
 
 Object-store integration tests run against a disposable, pinned MinIO
@@ -292,6 +307,7 @@ container (requires Docker and Python 3):
 
 ```sh
 python3 tools/test_s3.py
+python3 tools/quickstart_smoke.py
 ```
 
 Local failure drills: `python3 tools/drills.py --seed 29`. Benchmarks and

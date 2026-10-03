@@ -44,6 +44,9 @@ jobs:
           python3 tools/benchmarks.py summary --check
           python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 
+      - name: Check documentation links
+        run: python3 tools/check_links.py
+
       - name: Check S3 and segmented features
         run: |
           cargo clippy --all-targets --all-features --locked -- -D warnings
@@ -133,3 +136,31 @@ jobs:
             target/m16-comparison/*.json
             target/m19-study/**/*.json
           if-no-files-found: ignore
+
+  drills:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Build drill binaries
+        run: cargo build --release --locked --features server --bin glider-server --bin glider-admin
+
+      - name: Run recovery drills
+        run: python3 tools/drills.py --seed 29
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify Compose quickstart
+        run: python3 tools/quickstart_smoke.py
