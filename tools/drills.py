@@ -152,7 +152,7 @@ def drill(seed):
             for point_id in range(1, 9):
                 answer = request(port, "POST", "/v1/write",
                                  write_body(point_id, request_id(port)))
-                assert answer["conflict"] is None, answer
+                assert "conflict" not in answer, answer
                 acknowledged.append(point_id)
             print(f"kill drill: {len(acknowledged)} writes acknowledged before SIGKILL", flush=True)
             uncertain_body = write_body(9, request_id(port))
@@ -188,7 +188,7 @@ def drill(seed):
             verify(port, acknowledged)
             first = request(port, "POST", "/v1/write", uncertain_body)
             second = request(port, "POST", "/v1/write", uncertain_body)
-            assert first == second and first["conflict"] is None, (first, second)
+            assert first == second and "conflict" not in first, (first, second)
             stable_ids = sorted(set(acknowledged + [9]))
             verify(port, stable_ids)
             print(f"PASS kill seed={seed}", flush=True)
@@ -204,7 +204,7 @@ def drill(seed):
             process = start(env, log)
             verify(port, stable_ids)
             answer = request(port, "POST", "/v1/write", write_body(10, request_id(port)))
-            assert answer["conflict"] is None, answer
+            assert "conflict" not in answer, answer
             stable_ids.append(10)
             fenced_body = write_body(11, {"boundary": 0,
                                           "nonce": f"{rng.getrandbits(128):032x}"})
@@ -266,7 +266,7 @@ def drill(seed):
             for point_id in range(100, 140):
                 answer = request(port, "POST", "/v1/write",
                                  write_body(point_id, request_id(port)))
-                assert answer["conflict"] is None, answer
+                assert "conflict" not in answer, answer
                 auto_ids.append(point_id)
             deadline = time.monotonic() + 30
             while request(port, "GET", "/v1/status")["clustering"]["state"] != "clustered":
