@@ -8,6 +8,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Built-in web console at `/console` for server status, collection management,
+  point browsing and vector queries; set `GLIDER_CONSOLE=0` to disable it.
 - Collections: without `GLIDER_DIMENSIONS`, one server creates, lists,
   deletes and serves many collections over HTTP (`/v1/collections`), each
   in its own namespace under a versioned catalog; collections open lazily

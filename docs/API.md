@@ -16,6 +16,7 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 | [`GET /v1/status`](#get-v1status) | bearer | Sequence, queue, cache and clustering state |
 | [`GET /healthz`](#get-healthz) | none | Liveness |
 | [`GET /metrics`](#get-metrics) | none | Prometheus text metrics |
+| [`GET /console`](#get-console) | none | Built-in browser console; `/` redirects here |
 
 ## Collections
 
@@ -25,7 +26,7 @@ catalog. All seven data endpoints above use the prefix
 `POST /v1/collections/demo/write` and `GET /v1/collections/demo/status`).
 Request and response schemas, request IDs and durability are unchanged.
 Unprefixed data endpoints return JSON `404` directing clients to the prefix.
-`/healthz` and `/metrics` remain global. Names match
+`/healthz`, `/metrics`, `/console` and `/` remain global. Names match
 `^[a-z0-9][a-z0-9-]{0,62}$`.
 
 | Method and path | Body and result |
@@ -43,7 +44,7 @@ returns `429`. `glider-admin` currently supports only single-collection mode.
 ## Conventions
 
 - **Authentication.** When `GLIDER_API_TOKEN` is set, every route except
-  `/healthz` and `/metrics` requires `Authorization: Bearer <token>`; a
+  `/healthz`, `/metrics`, `/console` and `/` requires `Authorization: Bearer <token>`; a
   missing or different token returns `401`. Without the variable no route
   is authenticated. The server speaks plain HTTP; terminate TLS in a
   reverse proxy.
@@ -334,6 +335,14 @@ Resolve a write whose response was lost, by its request ID.
 | `clustering.auto_cluster_rows`, `clustering.auto_recluster_factor` | The configured thresholds (0 = disabled) |
 | `clustering.progress` | While converting: `phase` (`sample`, `assign`, `gather`, `write`, `catalog`, `root`), `sources`, `sources_done`, `pass`, `passes`, `posting_packs`, `rows`, and the `epoch` and `centroids` being built; otherwise `null` |
 | `clustering.reclusters`, `clustering.conversions`, `clustering.conversion_failures` | Automatic rebuilds started, conversions published, and automatic conversions abandoned since start |
+
+## `GET /console`
+
+Returns a self-contained HTML console for overview, collection browsing and
+vector queries. `GET /` redirects to it. Both routes are public and can be
+disabled with `GLIDER_CONSOLE=0`; the page sends the token entered by the user
+on API requests and keeps it in browser session storage only. The response
+sets a restrictive Content Security Policy and loads no external resources.
 
 ## `GET /healthz`
 

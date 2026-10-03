@@ -1355,7 +1355,9 @@ SIGINT/SIGTERM, or a renewal that finds the server deposed, stops accepting
 connections, drains queued commands and releases the lease, even after a
 worker failure; after a crash the next start waits out the lease. Either
 way the next takeover fences the old process. An optional static bearer token guards every
-endpoint except `/healthz` and `/metrics`. The latter serves Prometheus 0.0.4
+endpoint except `/healthz`, `/metrics`, `/console` and the redirect from `/`.
+The self-contained console performs data calls through the authenticated API;
+`GLIDER_CONSOLE=0` removes its two routes. `/metrics` serves Prometheus 0.0.4
 text: server atomics record per-endpoint response classes and latency buckets,
 while a read-only admission command samples sequence, segmented maintenance,
 cache, warm-up, writer epoch and sketch values on the committer; `/v1/status` reports
