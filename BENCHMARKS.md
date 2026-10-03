@@ -226,6 +226,48 @@ No implementation tuning was performed from these measurements.
 
 ## S3 benchmarks
 
+### Multi-tenant server scenario
+
+`tools/tenants_benchmark.py` runs one `glider-server` in multi-collection mode
+against a fresh local directory or S3 namespace. It creates 1,000 collections
+with 1,000 SIFT vectors each by default, kills and restarts the server halfway
+through acknowledged ingest, verifies every ID by count and full scan and checks
+each tenant's commit sequence for extra writes, then
+measures cold, warm, recall and exact filtered queries. The runner owns server
+startup and shutdown. Its JSON records per-phase wall-clock timing, nearest-rank
+latencies, throughput, crash recovery, verification mismatches, seed, SIFT file
+SHA-256 values, Git revision and dirty state, platform, instance type, storage
+footprint and the stated $0.023/decimal-GB-month estimate. `passed` requires all
+tenants to have exactly the expected IDs and all phases to complete; it is not a
+performance threshold. The process high-water RSS covers all server phases and
+restarts. Idle S3 request rates are null when the server does not expose such
+counters. The current server also does not implement
+`GLIDER_COLLECTION_IDLE_SECONDS`, so an open count above zero is an observation,
+not an ingest failure.
+
+```sh
+cargo build --release --locked --features server --bin glider-server
+GLIDER_DATA_DIR=target/tenants-data GLIDER_CACHE_DIR=target/tenants-cache \
+  python3 tools/tenants_benchmark.py --server-bin target/release/glider-server \
+  --smoke --output target/tenants-smoke.json
+
+python3 tools/aws_acceptance.py target/tenants-aws \
+  --scenario tenants --revision "$(git rev-parse HEAD)" \
+  --tenants 1000 --per-tenant 1000
+```
+
+Use an empty namespace per run. The AWS driver downloads and checks the SIFT
+files, builds the server at `--revision`, uploads `run.json` and `run.log`, and
+removes the run namespace after inventory. The revision must include the runner
+and AWS scenario changes; uncommitted local edits are not present on EC2. Retain
+raw run JSON and log together. SIFT base rows are assigned contiguously by
+tenant; local IDs restart at zero for each tenant. Warm queries draw from the
+SIFT query file using the recorded seed. Exact results are the recall oracle.
+Query vectors are materialized before each timed HTTP query phase; latency
+includes client JSON encoding, transport, server work and response decoding.
+
+## S3 backend harness
+
 Select `--backend local|s3`; omitting it preserves the existing LocalStore defaults,
 workloads, timing boundaries, version-2 JSON shape and measurement protocol.
 The workloads are statically specialized for each backend, with the same vector

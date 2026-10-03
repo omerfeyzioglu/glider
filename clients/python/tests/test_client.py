@@ -36,6 +36,21 @@ class WriteRetryTests(ClientTestCase):
         self.client.upsert([Point(id=3, vector=[1, 2, 3], metadata={"a": "b"})])
         self.assertEqual(self.writes()[0][3]["upsert"][0]["metadata"], {"a": "b"})
 
+    def test_explicit_request_id_is_reused_without_status_lookup(self):
+        rid = {"boundary": 3, "nonce": "a" * 32}
+        self.server.script("POST", "/v1/write", (429, {"error": "busy"}), (200, {"sequence": 4}))
+        self.assertEqual(self.client.upsert([{"id": 1, "vector": [1]}], request_id=rid), 4)
+        self.assertEqual([w[3]["request_id"] for w in self.writes()], [rid, rid])
+        self.assertEqual(self.server.calls("GET", "/v1/status"), [])
+
+    def test_explicit_request_id_is_validated(self):
+        for rid in ({"boundary": -1, "nonce": "a" * 32},
+                    {"boundary": 1, "nonce": "A" * 32},
+                    {"boundary": 1, "nonce": "a" * 32, "extra": 1}):
+            with self.subTest(rid=rid), self.assertRaises(ValueError):
+                self.client.write(delete=[1], request_id=rid)
+        self.assertEqual(self.server.requests, [])
+
     def test_429_retries_with_same_request_id(self):
         self.server.script(
             "POST", "/v1/write",

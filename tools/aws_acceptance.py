@@ -38,6 +38,9 @@ def main():
     parser.add_argument("--revision", required=True)
     parser.add_argument("--rows", type=int, default=1000000)
     parser.add_argument("--rounds", type=int, default=300)
+    parser.add_argument("--scenario", choices=("acceptance", "tenants"), default="acceptance")
+    parser.add_argument("--tenants", type=int, default=1000)
+    parser.add_argument("--per-tenant", type=int, default=1000)
     parser.add_argument("--bucket", default="glider-pilot-test-t1g1p")
     parser.add_argument("--prefix", default="glider-pilot")
     parser.add_argument("--region", default="eu-central-1")
@@ -47,8 +50,10 @@ def main():
     parser.add_argument("--clustered", action="store_true",
                         help="convert to an M37 clustered view after load (GLIDER_M24_CLUSTERED=1)")
     args = parser.parse_args()
+    if args.tenants < 1 or args.per_tenant < 1:
+        parser.error("--tenants and --per-tenant must be positive")
     args.output.mkdir(parents=True, exist_ok=False)
-    run_id = "m39-" + secrets.token_hex(4)
+    run_id = ("m39-" if args.scenario == "acceptance" else "tenants-") + secrets.token_hex(4)
     results = f"s3://{args.bucket}/{args.prefix}/results/{run_id}"
     creds = json.loads(aws("sts", "get-session-token", "--duration-seconds", "10800"))["Credentials"]
     script = Path(__file__).with_name("aws_user_data.sh").read_text()
@@ -58,6 +63,8 @@ def main():
         "REGION": args.region, "BUCKET": args.bucket, "PREFIX": args.prefix,
         "ROWS": args.rows, "ROUNDS": args.rounds, "RUN": run_id, "REVISION": args.revision,
         "CLUSTERED": int(args.clustered),
+        "SCENARIO": args.scenario, "TENANTS": args.tenants,
+        "PER_TENANT": args.per_tenant, "INSTANCE_TYPE": args.instance_type,
     }.items():
         script = script.replace(f"@@{key}@@", str(value))
     assert "@@" not in script
@@ -83,6 +90,9 @@ def main():
     try:
         while time.monotonic() - started < (args.max_minutes + 10) * 60:
             time.sleep(60)
+            if args.scenario == "tenants" and exists(f"{results}/FAILED"):
+                outcome = "failed"
+                break
             if exists(f"{results}/run.json"):
                 outcome = "done"
                 break
@@ -95,7 +105,8 @@ def main():
             print(f"{int(time.monotonic() - started) // 60} min: instance {state}", flush=True)
             if state in ("shutting-down", "terminated"):
                 time.sleep(30)
-                outcome = "done" if exists(f"{results}/run.json") else "failed"
+                outcome = ("failed" if args.scenario == "tenants" and exists(f"{results}/FAILED")
+                           else "done" if exists(f"{results}/run.json") else "failed")
                 break
     finally:
         subprocess.run(["aws", "ec2", "terminate-instances", "--region", args.region,
