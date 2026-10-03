@@ -8,6 +8,7 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Optional query profiles report the executed search mode, latency, queue wait and remote I/O.
 - Collections: without `GLIDER_DIMENSIONS`, one server creates, lists,
   deletes and serves many collections over HTTP (`/v1/collections`), each
   in its own namespace under a versioned catalog; collections open lazily

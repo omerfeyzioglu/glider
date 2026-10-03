@@ -395,6 +395,7 @@ impl Snapshot for Counted {
             hits: Vec::new(),
             remote_reads: 0,
             remote_bytes: 0,
+            mode: glider::admission::QueryMode::Approximate,
         })
     }
 }

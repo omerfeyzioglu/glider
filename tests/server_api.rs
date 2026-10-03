@@ -32,6 +32,57 @@ async fn call(app: &Router, path: &str, body: Value) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&body).unwrap())
 }
 
+fn assert_profile(response: &Value, mode: &str) {
+    let profile = &response["profile"];
+    assert_eq!(profile["mode"], mode);
+    let server_ms = profile["server_ms"].as_f64().unwrap();
+    let queue_ms = profile["queue_ms"].as_f64().unwrap();
+    assert!(server_ms.is_finite() && server_ms >= 0.0, "{profile}");
+    assert!(queue_ms.is_finite() && queue_ms >= 0.0, "{profile}");
+    assert!(queue_ms <= server_ms, "{profile}");
+    let reads = profile["remote_reads"].as_u64().unwrap();
+    let bytes = profile["remote_bytes"].as_u64().unwrap();
+    if reads == 0 {
+        assert_eq!(bytes, 0, "{profile}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn profile_tail_only_query_has_no_remote_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    std::env::set_var("GLIDER_DIMENSIONS", "3");
+    std::env::set_var("GLIDER_METRIC", "squared_euclidean");
+    std::env::set_var("GLIDER_DATA_DIR", "unused");
+    std::env::set_var("GLIDER_RESIDENT_FILTER", "color=red");
+    let mut config = ServerConfig::from_env().unwrap();
+    config.store = StoreConfig::Local(temp.path().join("data"));
+    config.serving.cache = None;
+    config.serving.warm_unit_bytes = 0;
+    config.serving.auto_cluster_rows = 0;
+    config.token = None;
+
+    let running = tokio::task::block_in_place(|| config.start().unwrap());
+    let app = router(running.client(), None);
+    let (status, written) = call(
+        &app,
+        "/v1/write",
+        json!({"upsert":[{"id":1,"vector":[1.0,0.0,0.0]}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    let (status, query) = call(
+        &app,
+        "/v1/query",
+        json!({"vector":[1.0,0.0,0.0],"profile":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{query}");
+    assert_profile(&query, "approximate");
+    assert_eq!(query["profile"]["remote_reads"], 0);
+    assert_eq!(query["profile"]["remote_bytes"], 0);
+    tokio::task::block_in_place(|| running.shutdown(Shutdown::Drain).unwrap());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn exact_batch_get_and_scan_use_published_view() {
     let temp = tempfile::tempdir().unwrap();
@@ -94,13 +145,30 @@ async fn exact_batch_get_and_scan_use_published_view() {
     let query = json!({"vector":[201.0,1.0,0.0],"k":1000,"filter":{"color":"blue"}});
     let (status, approximate) = call(&app, "/v1/query", query.clone()).await;
     assert_eq!(status, StatusCode::OK, "{approximate}");
+    assert!(approximate.get("profile").is_none());
+    let mut approximate_profile_request = query.clone();
+    approximate_profile_request["profile"] = json!(true);
+    let (status, approximate_profile) = call(&app, "/v1/query", approximate_profile_request).await;
+    assert_eq!(status, StatusCode::OK, "{approximate_profile}");
+    assert_profile(&approximate_profile, "approximate");
     let mut exact_request = query;
     exact_request["exact"] = json!(true);
+    exact_request["profile"] = json!(true);
     let (status, exact) = call(&app, "/v1/query", exact_request).await;
     assert_eq!(status, StatusCode::OK, "{exact}");
+    assert_profile(&exact, "exact_scan");
     assert_eq!(exact["sequence"], sequence);
     assert_eq!(exact["results"].as_array().unwrap().len(), 41);
     assert!(approximate["results"].as_array().unwrap().len() < 41);
+    let (status, resident) = call(
+        &app,
+        "/v1/query",
+        json!({"vector":[1.0,1.0,0.0],"filter":{"color":"red"},"profile":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resident}");
+    assert_profile(&resident, "resident_exact");
+    assert_eq!(resident["profile"]["remote_reads"], 0);
 
     let rich = json!({"$and":[{"color":{"$in":["red","blue"]}},{"score":{"$gt":10,"$lte":20}},{"$not":{"color":{"$eq":"green"}}}]});
     let (status, rich_exact) = call(

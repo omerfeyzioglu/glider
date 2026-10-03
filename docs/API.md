@@ -146,6 +146,7 @@ Return the `k` nearest current points to `vector`. See [Filters](#filters).
 | `include_metadata` | bool | `false` | Add each hit's `metadata` |
 | `include_vector` | bool | `false` | Add each hit's stored `vector` |
 | `exact` | bool | `false` | Exhaustive exact search of the acknowledged view |
+| `profile` | bool | `false` | Include query mode, elapsed time, queue wait and remote I/O counters in the response |
 
 How the query is answered depends on the filter:
 
@@ -176,6 +177,9 @@ curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
 
 curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
   -d '{"vector":[1,1,0.9],"k":2,"filter":{"color":"red"},"exact":true}'
+
+curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
+  -d '{"vector":[1,1,0.9],"k":2,"profile":true}'
 ```
 
 Response `200`:
@@ -193,6 +197,21 @@ Response `200`:
 `metadata` and `vector` appear only when requested, and come from the same
 version of the point that the distance was computed on. `sequence` is the
 acknowledged state the query read.
+
+With `"profile":true`, the response also includes a `profile` object, for
+example:
+
+```json
+{"profile":{"mode":"approximate","server_ms":1.42,"queue_ms":0.08,"remote_reads":0,"remote_bytes":0}}
+```
+
+`mode` is `approximate`, `resident_exact`, or `exact_scan` for the path used.
+`server_ms` measures from the query handler start until the engine result is
+received, including admission queue wait; `queue_ms` is the admission queue
+wait. The remote counters count this query's object reads and payload bytes.
+They can be zero when the query is served from the unsealed tail or cache.
+Without `profile`, the response shape is unchanged. Collection query routes
+accept the same field.
 
 ## `GET /v1/points/{id}`
 
