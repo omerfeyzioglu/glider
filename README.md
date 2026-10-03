@@ -111,8 +111,8 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 
 Glider 1.0 is a single-node, single-writer database. Its scope:
 
-- one collection per server process, stored under one object-store prefix
-  (run several processes on separate prefixes for several collections);
+- one or many collections per server process, with one writer and lease per
+  open collection;
 - upsert, delete, get and k-NN query (squared Euclidean, Manhattan or
   cosine) with metadata filters, over HTTP or as a Rust library;
 - validated up to 1,000,000 128-dimensional vectors on MinIO and on AWS S3
@@ -141,18 +141,23 @@ Known limitations:
 ## Configuration
 
 `glider-server` and `glider-admin` read these environment variables (see
-`ServerConfig::from_env` in `src/server/config.rs`). Empty values count as
-unset; an invalid value stops the server with an error.
+`ServerConfig::from_env` in `src/server/config.rs`). An invalid value stops
+the server with an error. Set `GLIDER_DIMENSIONS`
+for the existing single-collection mode. Leave it unset for multi-collection
+mode and create collections through HTTP. In multi mode, also leave
+`GLIDER_METRIC`, `GLIDER_RESIDENT_FILTER`, and `GLIDER_ROUTED_KEYS` unset; these
+settings belong to each collection. **Use a base prefix in only one mode.** In
+multi mode it contains `catalog/` and `data/`, not an engine namespace.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GLIDER_DIMENSIONS` | required | Vector dimension. Fixed at creation. |
+| `GLIDER_DIMENSIONS` | unset (multi mode) | Set a positive dimension for single-collection mode; unset selects multi-collection mode. |
 | `GLIDER_METRIC` | `squared_euclidean` | `squared_euclidean`, `manhattan` or `cosine`. Fixed at creation. |
 | `GLIDER_RESIDENT_FILTER` | unset | One `key=value` equality predicate answered exactly from vectors kept in memory. Fixed at creation. |
 | `GLIDER_ROUTED_KEYS` | unset | Up to four comma-separated metadata keys whose values restrict query routing (sorted and deduplicated). Fixed at creation. |
-| `GLIDER_DATA_DIR` | unset | Store the collection in this local directory; when set, the S3 variables are ignored. |
+| `GLIDER_DATA_DIR` | unset | Local base directory; when set, the S3 variables are ignored. |
 | `GLIDER_S3_BUCKET` | required without `GLIDER_DATA_DIR` | Bucket name. |
-| `GLIDER_S3_NAMESPACE` | required without `GLIDER_DATA_DIR` | Key prefix owned by this collection. Use one prefix per collection and never overlap prefixes. |
+| `GLIDER_S3_NAMESPACE` | required without `GLIDER_DATA_DIR` | Base key prefix owned by this server. Do not overlap prefixes or mix modes. |
 | `GLIDER_S3_REGION` | `us-east-1` | Bucket region. |
 | `GLIDER_S3_ENDPOINT` | unset | Endpoint for S3-compatible stores such as MinIO; an `http://` endpoint enables plain HTTP. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | unset | Credentials, read by the `object_store` S3 client (`AmazonS3Builder::from_env`). |
@@ -161,6 +166,7 @@ unset; an invalid value stops the server with an error.
 | `GLIDER_LEASE_SECONDS` | `10` | Writer lease duration (fractions allowed). After a crash, the next start waits at most this long before taking over. |
 | `GLIDER_CACHE_DIR` | `glider-cache` | Local block cache directory, relative to the working directory (`/var/lib/glider/cache` in the Docker image). Any local disk works: instance-store NVMe, EBS or a container volume. |
 | `GLIDER_CACHE_BYTES` | `268435456` (256 MiB) | Local cache limit. While idle the server copies the collection into the cache up to this limit; set it above `cache.namespace_bytes` from `/v1/status` to keep everything local. |
+| `GLIDER_MAX_OPEN_COLLECTIONS` | `64` | Maximum open collections in multi mode. Opening another closes the least recently used idle collection. Per-collection cache budget is `max(16 MiB, GLIDER_CACHE_BYTES / GLIDER_MAX_OPEN_COLLECTIONS)` under `<GLIDER_CACHE_DIR>/<name>-<generation>/`. |
 | `GLIDER_LOCAL_BLOCKS` | `24` | Cached blocks a query may rerank in addition to its remote budget. `0` makes results independent of the cache contents. |
 | `GLIDER_AUTO_CLUSTER_ROWS` | `250000` | Live sealed rows at which a collection without a clustered view is converted to one in the background. `0` disables. |
 | `GLIDER_AUTO_RECLUSTER_FACTOR` | `4` | Rebuild the clustered view with more clusters once the collection holds more than this factor times the rows it was sized for (about 4,000 per cluster). `0` disables. |
@@ -169,9 +175,28 @@ The server uses the 1,000,000-row serving profile
 (`SegmentedServingOptions::m31`): per query 12 candidate blocks, 8 remote
 range requests and 1 MiB, 32 cluster probes, 8 routing threads; at most 4
 concurrent queries; an admission queue of 8 commands and 1 MiB. These are
-not configurable through the environment.
+not configurable through the environment. Multi mode uses two concurrent
+queries and two scoring threads per open collection; other serving settings
+are shared. If all open collections have requests in flight, a new open
+returns `429` until one becomes idle.
 
 ## HTTP API
+
+With `GLIDER_DIMENSIONS` unset, use these collection routes. The data routes
+in the table below move under `/v1/collections/{name}` with the same bodies,
+responses and error rules. The unprefixed data routes return `404` in multi
+mode; `/healthz` and `/metrics` remain global.
+
+| Collection endpoint | Purpose |
+|---|---|
+| `POST /v1/collections` | Create from `{"name":"demo","dimensions":3,"metric":"squared_euclidean","resident_filter":{"key":"value"},"routed_keys":["key"]}`. Returns `201`, or `200` for the same configuration, `409` for a different one. |
+| `GET /v1/collections` | Sorted descriptions with `open` state. |
+| `GET /v1/collections/{name}` | Description and current `status` (opens lazily). |
+| `DELETE /v1/collections/{name}` | Drain and release, delete the catalog entry, then clean its generation; `204` or `404`. |
+
+Names must match `^[a-z0-9][a-z0-9-]{0,62}$`. `glider-admin` still requires
+`GLIDER_DIMENSIONS` and operates on single-collection prefixes; collection
+selection for admin commands is a follow-up.
 
 | Endpoint | Purpose |
 |---|---|

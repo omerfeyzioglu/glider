@@ -28,7 +28,7 @@ sha2 = "0.10"
 thiserror = "2"
 getrandom = "0.2"
 zstd = { version = "0.13", default-features = false }
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"], optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "original-uri"], optional = true }
 
 [dev-dependencies]
 bytes = "1"
