@@ -1392,8 +1392,10 @@ for the name returns `404`; a later create chooses a fresh generation, so its
 engine cannot read old data. The server then removes the old generation's
 objects as best effort. A crash before catalog removal leaves the collection
 intact (possibly closed); a crash after removal but before cleanup leaves
-unreachable objects. Startup and idle sweeps, and later deletes, remove
-generations not named by a catalog entry, rechecking the entry before removal.
+unreachable objects. A background sweep starts after startup without delaying
+serving, then runs periodically; later deletes also reclaim orphaned generations.
+Each sweep rechecks the catalog entry before removing a generation. Serving and
+recovery never depend on cleanup because recreated names use new generations.
 An uncertain catalog removal must be resolved by a fresh GET before reporting
 an outcome. Generation object keys are never reused, so delayed cleanup
 cannot affect a recreated collection.

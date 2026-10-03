@@ -6,6 +6,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Scale multi-collection startup, catalog listing, and graceful shutdown with background cleanup and bounded concurrent reads and closes.
+
 ### Added
 
 - Close idle multi-mode collections after `GLIDER_COLLECTION_IDLE_SECONDS` to release their writer leases.

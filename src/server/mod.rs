@@ -187,17 +187,6 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
             .await
             .map_err(|error| Error::Invalid(error.to_string()))??;
         let app = multi_router(multi.clone(), config.token.clone());
-        let sweeper = multi.clone();
-        let sweep_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            interval.tick().await; // Startup already swept the base.
-            loop {
-                interval.tick().await;
-                if let Err(error) = sweeper.sweep().await {
-                    eprintln!("collection orphan sweep failed: {error}");
-                }
-            }
-        });
         let served = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let interrupt = tokio::signal::ctrl_c();
@@ -214,9 +203,9 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
                 }
             })
             .await;
-        sweep_task.abort();
+        let stopped = multi.shutdown().await;
         served?;
-        return multi.shutdown().await;
+        return stopped;
     }
     let running = tokio::task::block_in_place(|| config.start())?;
     let app = router(running.client(), config.token.clone());

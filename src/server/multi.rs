@@ -6,6 +6,7 @@ use crate::{
     admission::{Client, Shutdown},
     Error, Result,
 };
+use futures::{stream, StreamExt};
 use std::{
     collections::HashMap,
     sync::{
@@ -56,6 +57,7 @@ struct Inner {
     tick: AtomicU64,
     idle_stop: watch::Sender<bool>,
     idle_task: Mutex<Option<JoinHandle<()>>>,
+    sweep_task: Mutex<Option<JoinHandle<()>>>,
 }
 #[derive(Clone)]
 pub struct Multi {
@@ -69,9 +71,9 @@ impl Multi {
                 "GLIDER_DIMENSIONS selects single-collection mode".into(),
             ));
         }
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|error| Error::Invalid(format!("multi mode requires Tokio: {error}")))?;
         let catalog = Catalog::new(config.store.clone());
-        // Open and validate the catalog before serving requests.
-        catalog.sweep()?;
         let idle = config.collection_idle;
         let (idle_stop, mut idle_stopped) = watch::channel(false);
         let multi = Self {
@@ -84,30 +86,48 @@ impl Multi {
                 tick: AtomicU64::new(0),
                 idle_stop,
                 idle_task: Mutex::new(None),
+                sweep_task: Mutex::new(None),
             }),
         };
+        let weak = Arc::downgrade(&multi.inner);
+        let mut sweep_stopped = multi.inner.idle_stop.subscribe();
+        let sweep_task = runtime.spawn(async move {
+            let mut ticks = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = ticks.tick() => {
+                        let Some(inner) = weak.upgrade() else { break };
+                        if let Err(error) = (Multi { inner }).sweep().await {
+                            eprintln!("collection orphan sweep failed: {error}");
+                        }
+                    }
+                    changed = sweep_stopped.changed() => {
+                        if changed.is_err() || *sweep_stopped.borrow() { break }
+                    }
+                }
+            }
+        });
+        *multi.inner.sweep_task.lock().unwrap() = Some(sweep_task);
         if !idle.is_zero() {
             let interval = (idle / 4)
                 .min(Duration::from_secs(5))
                 .max(Duration::from_millis(1));
             let weak = Arc::downgrade(&multi.inner);
-            let task = tokio::runtime::Handle::try_current()
-                .map_err(|error| Error::Invalid(format!("multi mode requires Tokio: {error}")))?
-                .spawn(async move {
-                    let mut ticks = tokio::time::interval(interval);
-                    ticks.tick().await;
-                    loop {
-                        tokio::select! {
-                            _ = ticks.tick() => {
-                                let Some(inner) = weak.upgrade() else { break };
-                                Multi { inner }.close_idle(idle).await;
-                            }
-                            changed = idle_stopped.changed() => {
-                                if changed.is_err() || *idle_stopped.borrow() { break }
-                            }
+            let task = runtime.spawn(async move {
+                let mut ticks = tokio::time::interval(interval);
+                ticks.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = ticks.tick() => {
+                            let Some(inner) = weak.upgrade() else { break };
+                            Multi { inner }.close_idle(idle).await;
+                        }
+                        changed = idle_stopped.changed() => {
+                            if changed.is_err() || *idle_stopped.borrow() { break }
                         }
                     }
-                });
+                }
+            });
             *multi.inner.idle_task.lock().unwrap() = Some(task);
         }
         Ok(multi)
@@ -277,6 +297,9 @@ impl Multi {
     async fn close_idle(&self, idle: Duration) {
         let names: Vec<_> = self.inner.opened.lock().await.keys().cloned().collect();
         for name in names {
+            if *self.inner.idle_stop.borrow() {
+                break;
+            }
             let lock = self.name_lock(&name).await;
             let Ok(_guard) = lock.try_lock() else {
                 continue;
@@ -371,20 +394,32 @@ impl Multi {
     }
     pub async fn shutdown(&self) -> Result<()> {
         self.inner.idle_stop.send_replace(true);
+        if let Some(task) = self.inner.sweep_task.lock().unwrap().take() {
+            // An already running blocking sweep may finish later. Reclamation
+            // is best effort and rechecks the catalog before each removal.
+            task.abort();
+        }
         let task = self.inner.idle_task.lock().unwrap().take();
+        let mut first_error = None;
         if let Some(task) = task {
-            task.await
-                .map_err(|error| Error::Invalid(error.to_string()))?;
+            if let Err(error) = task.await {
+                first_error = Some(Error::Invalid(error.to_string()));
+            }
         }
         let names: Vec<_> = self.inner.opened.lock().await.keys().cloned().collect();
-        let mut first_error = None;
-        for name in names {
+        let mut closes = stream::iter(names.into_iter().map(|name| async move {
             let lock = self.name_lock(&name).await;
             let _guard = lock.lock().await;
             if let Some(open) = self.inner.opened.lock().await.remove(&name) {
-                if let Err(error) = self.close(open).await {
-                    first_error.get_or_insert(error);
-                }
+                self.close(open).await
+            } else {
+                Ok(())
+            }
+        }))
+        .buffer_unordered(32);
+        while let Some(result) = closes.next().await {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
             }
         }
         first_error.map_or(Ok(()), Err)
