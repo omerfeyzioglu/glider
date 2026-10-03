@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glider: a vector database with S3 as the source of truth</title>
+<meta name="description" content="Glider is an open-source, single-node vector database written in Rust. Object storage is the durable state; crash-safe takeover, clustered ANN search and equality filters over HTTP/JSON.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="Glider: a vector database with S3 as the source of truth">
+<meta property="og:description" content="Single-node, crash-safe vector database in Rust. Durable state lives in S3; local RAM and SSD only accelerate reads.">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+:root{
+  --bg:#ffffff; --bg-alt:#f4f6f9; --text:#14181f; --muted:#4a5565; --border:#d5dbe3;
+  --accent:#0b4fd6; --accent-text:#ffffff; --code-bg:#0f1720; --code-text:#e6edf3;
+  --code-border:#243142; --warn-bg:#fff6e5; --warn-border:#e0b25c; --tag-bg:#e3ecff; --tag-text:#0a3aa0;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0d1117; --bg-alt:#151b23; --text:#e6edf3; --muted:#a4b0be; --border:#2a3441;
+    --accent:#7cb0ff; --accent-text:#0d1117; --code-bg:#010409; --code-text:#e6edf3;
+    --code-border:#2a3441; --warn-bg:#241d0e; --warn-border:#7a5f1f; --tag-bg:#1c2b4a; --tag-text:#a9c8ff;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--sans);-webkit-text-size-adjust:100%}
+a{color:var(--accent)}
+a:focus-visible,button:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:4px}
+.wrap{max-width:62rem;margin:0 auto;padding:0 16px}
+.skip{position:absolute;left:-999px;top:0;background:var(--accent);color:var(--accent-text);padding:8px 12px;z-index:10}
+.skip:focus{left:8px;top:8px}
+header.site{border-bottom:1px solid var(--border)}
+header.site .wrap{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;padding-top:12px;padding-bottom:12px}
+.brand{font-weight:700;font-size:1.15rem;color:var(--text);text-decoration:none;display:flex;align-items:center;gap:8px}
+.brand img{width:24px;height:24px}
+nav ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:4px 16px}
+nav a{color:var(--muted);text-decoration:none;font-size:.95rem}
+nav a:hover{color:var(--accent);text-decoration:underline}
+section{padding:48px 0;border-top:1px solid var(--border)}
+section.hero{border-top:0;padding:56px 0 48px}
+h1{font-size:clamp(1.9rem,5.5vw,3rem);line-height:1.15;margin:0 0 16px;letter-spacing:-.02em}
+h2{font-size:clamp(1.4rem,3.5vw,1.8rem);line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+h3{font-size:1.05rem;margin:0 0 6px}
+p{margin:0 0 14px}
+.lead{font-size:clamp(1.05rem,2.4vw,1.25rem);color:var(--muted);max-width:44rem}
+.muted{color:var(--muted)}
+.pills{list-style:none;padding:0;margin:20px 0 24px;display:flex;flex-wrap:wrap;gap:8px}
+.pills li{border:1px solid var(--border);border-radius:999px;padding:3px 12px;font-size:.9rem;background:var(--bg-alt)}
+.btns{display:flex;flex-wrap:wrap;gap:12px}
+.btn{display:inline-block;padding:10px 18px;border-radius:8px;font-weight:600;text-decoration:none;border:2px solid var(--accent);min-height:44px;line-height:1.4}
+.btn.primary{background:var(--accent);color:var(--accent-text)}
+.btn.secondary{color:var(--accent);background:transparent}
+.btn:hover{filter:brightness(1.1)}
+.tag{display:inline-block;background:var(--tag-bg);color:var(--tag-text);font-size:.75rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 8px;border-radius:4px;vertical-align:middle;margin-left:6px}
+.codeblock{position:relative;margin:0 0 16px}
+.codeblock pre{margin:0;background:var(--code-bg);color:var(--code-text);border:1px solid var(--code-border);border-radius:8px;padding:14px 16px;overflow-x:auto;font:.875rem/1.55 var(--mono);tab-size:2}
+.codeblock.has-copy pre{padding-right:76px}
+.copy{position:absolute;top:8px;right:8px;background:transparent;color:var(--code-text);border:1px solid var(--code-border);border-radius:6px;padding:4px 10px;font:.8rem var(--sans);cursor:pointer;min-height:28px}
+.copy:hover{background:#243142}
+code.inline,p code,li code,td code{font:.88em var(--mono);background:var(--bg-alt);border:1px solid var(--border);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,17rem),1fr));gap:16px;margin-top:20px}
+.card{border:1px solid var(--border);border-radius:10px;padding:16px 18px;background:var(--bg-alt)}
+.card p{margin:0;color:var(--muted);font-size:.95rem}
+.tablewrap{overflow-x:auto;margin:16px 0}
+table{border-collapse:collapse;width:100%;min-width:34rem;font-size:.95rem}
+caption{text-align:left;color:var(--muted);padding-bottom:8px;font-size:.9rem}
+th,td{border-bottom:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--bg-alt);font-weight:600}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+figure{margin:20px 0}
+.diagram{background:#ffffff;border:1px solid var(--border);border-radius:10px;padding:8px}
+.diagram img{display:block;width:100%;height:auto}
+figcaption{color:var(--muted);font-size:.9rem;margin-top:8px}
+ul.plain{padding-left:1.2rem;margin:0 0 14px}
+ul.plain li{margin-bottom:8px}
+.limits{border:1px solid var(--warn-border);background:var(--warn-bg);border-radius:10px;padding:8px 20px 8px 20px}
+.limits ul{margin:12px 0;padding-left:1.1rem}
+.limits li{margin-bottom:8px}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr));gap:24px}
+footer{border-top:1px solid var(--border);padding:32px 0 48px;color:var(--muted);font-size:.95rem}
+footer ul{list-style:none;padding:0;margin:0 0 16px;display:flex;flex-wrap:wrap;gap:6px 18px}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="favicon.svg" alt="" width="24" height="24">Glider</a>
+    <nav aria-label="Primary">
+      <ul>
+        <li><a href="#quickstart">Quickstart</a></li>
+        <li><a href="#why">Why Glider</a></li>
+        <li><a href="#agents">Agent memory</a></li>
+        <li><a href="#performance">Performance</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#limits">Limits</a></li>
+        <li><a href="https://github.com/omerfeyzioglu/glider">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" id="top">
+  <div class="wrap">
+    <h1>A single-node vector database where S3 is the source of truth.</h1>
+    <p class="lead">Glider is an open-source vector database written in Rust. One server process serves one collection over HTTP/JSON; every acknowledged write is durable in object storage, and local RAM and SSD only accelerate reads.</p>
+    <ul class="pills" aria-label="Highlights">
+      <li>Crash-safe</li>
+      <li>Clustered ANN</li>
+      <li>Equality filters</li>
+      <li>MIT OR Apache-2.0</li>
+    </ul>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/omerfeyzioglu/glider">View on GitHub</a>
+      <a class="btn secondary" href="#quickstart">Quickstart</a>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <h2>Quickstart</h2>
+    <p>You need Docker and curl; no local Rust toolchain. The image is multi-platform (<code>linux/amd64</code>, <code>linux/arm64</code>). This starts a 3-dimensional collection backed by a local directory; its data is lost when the container stops. Point it at S3 with the <a href="https://github.com/omerfeyzioglu/glider#configuration">configuration variables</a> to keep it.</p>
+    <div class="codeblock"><pre><code>docker run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.1.0</code></pre></div>
+    <p>Write two points, then run a nearest-neighbor query:</p>
+    <div class="codeblock"><pre><code>curl -sS localhost:8080/v1/write -H 'content-type: application/json' \
+  -d '{"upsert":[{"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},{"id":2,"vector":[1,1,1]}]}'
+
+curl -sS localhost:8080/v1/query -H 'content-type: application/json' \
+  -d '{"vector":[1,1,0.9],"k":2,"include_metadata":true}'</code></pre></div>
+    <p>The write returns a <code>sequence</code> and <code>request_id</code>; the query returns two hits ordered by distance. Other ways to run it (Docker Compose with MinIO, from source, S3 settings) are in the <a href="https://github.com/omerfeyzioglu/glider#quickstart">README</a>.</p>
+
+    <h3>New in 1.1 <span class="tag">1.1.0</span></h3>
+    <ul class="plain">
+      <li><code>"exact": true</code> on <code>/v1/query</code>: a filtered query returns every match, up to <code>k</code>, instead of an approximate subset.</li>
+      <li><code>POST /v1/points/get</code>: read up to 1000 points by ID in one consistent read.</li>
+      <li><code>POST /v1/scan</code>: count and page through points that match a filter, which makes delete-by-filter possible.</li>
+    </ul>
+    <div class="codeblock"><pre><code>curl -sS localhost:8080/v1/query -H 'content-type: application/json' \
+  -d '{"vector":[1,1,0.9],"k":2,"filter":{"color":"red"},"exact":true}'</code></pre></div>
+    <p class="muted">Exact queries and scans read every block of the collection, so they suit small collections, completeness-critical filters and evaluation. See the <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">API reference</a> for limits.</p>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <h2>Why Glider</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Durable on S3</h3>
+        <p>Every acknowledged write is an immutable log object published with a conditional create. Nothing is overwritten in place, and a local disk never holds the only copy.</p>
+      </div>
+      <div class="card">
+        <h3>Crash-safe takeover</h3>
+        <p>A restarted server waits out the old writer's lease, fences it at the object store and replays the log tail. A paused former owner can never commit again. No operator step after a crash.</p>
+      </div>
+      <div class="card">
+        <h3>Retry-safe writes</h3>
+        <p>Every write carries a request ID; resending it returns the original outcome instead of applying the write twice. That is what you want when an agent retries a tool call after a timeout. Outcomes are retained for 128 commits.</p>
+      </div>
+      <div class="card">
+        <h3>SSD cache</h3>
+        <p>A local block cache fills in the background so warm queries need no remote reads. Losing it does not lose acknowledged writes; it can affect latency and approximate recall until warm again.</p>
+      </div>
+      <div class="card">
+        <h3>Automatic clustering</h3>
+        <p>The server builds a global clustered view (centroids and cluster-contiguous postings) by itself at 250,000 rows and rebuilds it as the collection grows. Unfiltered queries read at most 8 remote ranges and 1 MiB.</p>
+      </div>
+      <div class="card">
+        <h3>Operations included</h3>
+        <p>Prometheus metrics, <code>/v1/status</code>, optional bearer-token auth, and <code>glider-admin</code> for status, backup, restore and clustering.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="agents">
+  <div class="wrap">
+    <h2>Agent memory (MCP) <span class="tag">New in 1.1</span></h2>
+    <p><code>glider-mcp</code> is an MCP server that gives AI agents durable memory backed by Glider, with three tools: <code>remember</code>, <code>recall</code> and <code>forget</code>. A memory is acknowledged only after it is durable in Glider's storage, and writes carry request IDs, so a retried tool call does not store it twice.</p>
+    <p>Start the server with the embedding model's dimension and the cosine metric (dimension and metric are fixed when a collection is created):</p>
+    <div class="codeblock"><pre><code>docker run -d --name glider-memory -p 8080:8080 \
+  -v glider-memory:/var/lib/glider \
+  -e GLIDER_DIMENSIONS=384 -e GLIDER_METRIC=cosine \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data \
+  ghcr.io/omerfeyzioglu/glider:1.1.0</code></pre></div>
+    <p>Install the client with the MCP extra, then register it. Text is embedded locally with fastembed (default <code>BAAI/bge-small-en-v1.5</code>, 384 dimensions), which needs Python 3.10 or newer.</p>
+    <div class="codeblock"><pre><code>pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</code></pre></div>
+    <div class="codeblock"><pre><code>claude mcp add glider -- glider-mcp</code></pre></div>
+    <p class="muted"><code>recall</code> uses exact search, so its cost grows with the number of memories in the collection.</p>
+  </div>
+</section>
+
+<section id="performance">
+  <div class="wrap">
+    <h2>Performance</h2>
+    <p>Measured on AWS S3 Standard from a c7g.2xlarge (8 Graviton3 vCPU, 16 GiB) in eu-central-1, at 1,000,000 vectors of SIFT1M (128 dimensions, squared Euclidean, k=10, 200 queries). The workload loads in 100-row batches, then runs 300 s of four writers each overwriting 100 rows per second and four readers each querying every 100 ms, then restart, cache-loss and backup checks. One run; results vary between runs.</p>
+    <div class="tablewrap">
+      <table>
+        <caption>1M SIFT vectors, AWS S3 Standard, commit <code>9e2f602</code></caption>
+        <thead><tr><th scope="col">Measure</th><th scope="col" class="num">Result</th><th scope="col" class="num">Target</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Static recall@10 (mean / p5)</th><td class="num">0.998 / 1.0</td><td class="num">&ge;0.90 / &ge;0.80</td></tr>
+          <tr><th scope="row">Recall@10 after updates, cold (mean / p5)</th><td class="num">0.963 / 0.8</td><td class="num">&ge;0.90 / &ge;0.80</td></tr>
+          <tr><th scope="row">Warm unfiltered query p95</th><td class="num">30.9 ms</td><td class="num">&le;50 ms</td></tr>
+          <tr><th scope="row">Cold unfiltered query p95</th><td class="num">58.6 ms</td><td class="num">&le;200 ms</td></tr>
+          <tr><th scope="row">Filtered (resident 1%) query p95</th><td class="num">10.6 ms</td><td class="num">&le;50 ms</td></tr>
+          <tr><th scope="row">Write p95</th><td class="num">97.6 ms</td><td class="num">&le;150 ms</td></tr>
+          <tr><th scope="row">Open / reopen</th><td class="num">3.15 / 4.00 s</td><td class="num">&le;2 s</td></tr>
+          <tr><th scope="row">Peak engine RSS</th><td class="num">257.9 MiB</td><td class="num">&le;192 MiB</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The run lost no acknowledged writes and returned equal results after cache loss and after a backup restore. Open time and peak memory miss their targets; see <a href="#limits">Honest limits</a>. Datasets, seeds, configuration and raw results: <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#root-manifests-and-fast-open-on-s3">benchmarks/M39.md</a>, <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md">BENCHMARKS.md</a> and the <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/SUMMARY.md">benchmark summary</a>.</p>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <h2>Architecture</h2>
+    <figure>
+      <div class="diagram"><img src="runtime.svg" width="1540" height="790" alt="Glider runtime architecture: writes pass bounded admission and a single committer that conditionally creates a mutation-log object in the object store; reads use a published snapshot to route to blocks and read ranges or cached blocks; maintenance publishes immutable packs, indexes, manifests and a root generation." loading="lazy"></div>
+      <figcaption>Runtime request paths and the objects stored in the bucket.</figcaption>
+    </figure>
+    <ul class="plain">
+      <li>A write batch becomes one immutable log object, created conditionally, before it is acknowledged.</li>
+      <li>Idle maintenance seals the log tail into immutable packs of vector-local blocks with compact five-bit sketches, and publishes each new state as a root generation that references per-run manifests.</li>
+      <li>The clustered view assigns rows to centroids so a query reads only the nearest clusters' blocks; new seals keep it clustered and small extents are merged in the background.</li>
+      <li>Takeover uses a renewed lease to pace restarts and permanent fence objects so that a deposed writer's next publication fails at the store.</li>
+    </ul>
+    <p>See the <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">architecture guide</a> for the AWS deployment pattern and <a href="https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md">DESIGN.md</a> for formats, invariants and recovery semantics.</p>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <h2>Honest limits</h2>
+    <div class="limits">
+      <ul>
+        <li><strong>Single node, single writer.</strong> No replication, sharding, read replicas or standby. Availability during a restart depends on the writer lease (default 10 s) and the open time.</li>
+        <li><strong>Equality-based filters.</strong> Filters are equality conjunctions on string metadata. Only the declared resident predicate is exact by default; other filters are applied to routed blocks and may return fewer than <code>k</code> results unless you use <code>exact: true</code>.</li>
+        <li><strong>Memory above target at 1M.</strong> Peak engine RSS at 1,000,000 vectors is 257.9 MiB on AWS (235.6 MiB on MinIO), above the 192 MiB target.</li>
+        <li><strong>Opening a large collection on S3 takes seconds.</strong> 3.15 s (4.00 s for a reopen) at 1,000,000 vectors, above the 2 s target.</li>
+        <li><strong>TLS via a reverse proxy.</strong> The server speaks plain HTTP with an optional static bearer token; terminate TLS at a proxy or load balancer.</li>
+        <li>Dimension, metric, resident filter and routed keys are fixed when a collection is created. A point must fit in one 120 KiB storage block.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="python">
+  <div class="wrap">
+    <h2>Python client <span class="tag">New in 1.1</span></h2>
+    <p>A client using only the Python standard library (3.9 or newer). Writes carry a client-generated request ID, and a timed-out write is resolved by ID before it is ever resent, so it is applied at most once.</p>
+    <div class="codeblock"><pre><code>pip install "git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</code></pre></div>
+    <div class="codeblock"><pre><code>from glider_client import Client
+
+client = Client("http://localhost:8080")   # token="..." if the server requires one
+
+client.upsert([
+    {"id": 1, "vector": [0, 0, 0], "metadata": {"color": "red"}},
+    {"id": 2, "vector": [1, 1, 1], "metadata": {"color": "blue"}},
+])
+for hit in client.query([1, 1, 0.9], k=2, include_metadata=True):
+    print(hit.id, hit.distance, hit.metadata)
+
+# exact filtered query; every match is returned, up to k
+client.query([1, 1, 0.9], k=10, filter={"color": "red"}, exact=True)
+
+client.get(1)      # Point, or None if absent
+client.delete([1])</code></pre></div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <ul aria-label="Documentation">
+      <li><a href="https://github.com/omerfeyzioglu/glider">GitHub</a></li>
+      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md">API</a></li>
+      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/ARCHITECTURE.md">Architecture</a></li>
+      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md">Design</a></li>
+      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/CHANGELOG.md">Changelog</a></li>
+      <li><a href="https://github.com/omerfeyzioglu/glider/blob/main/SECURITY.md">Security</a></li>
+    </ul>
+    <p>Glider is licensed under either of <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-APACHE">Apache License 2.0</a> or <a href="https://github.com/omerfeyzioglu/glider/blob/main/LICENSE-MIT">MIT license</a>, at your option.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  if (!navigator.clipboard) return;
+  document.querySelectorAll(".codeblock").forEach(function (block) {
+    var code = block.querySelector("pre");
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copy";
+    btn.textContent = "Copy";
+    btn.setAttribute("aria-label", "Copy code to clipboard");
+    btn.addEventListener("click", function () {
+      navigator.clipboard.writeText(code.innerText.replace(/\n$/, "")).then(function () {
+        btn.textContent = "Copied";
+      }, function () {
+        btn.textContent = "Failed";
+      }).then(function () {
+        setTimeout(function () { btn.textContent = "Copy"; }, 1800);
+      });
+    });
+    block.classList.add("has-copy");
+    block.appendChild(btn);
+  });
+})();
+</script>
+</body>
+</html>
