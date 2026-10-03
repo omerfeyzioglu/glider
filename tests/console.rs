@@ -55,6 +55,8 @@ async fn get(app: &Router, path: &str) -> (StatusCode, axum::http::HeaderMap, St
 
 async fn assert_console(app: &Router) {
     let (status, headers, body) = get(app, "/console").await;
+    // API paths are relative so the console works under a path prefix.
+    assert!(!body.contains("'/v1"), "no root-relative API path");
     assert_eq!(status, StatusCode::OK);
     assert!(headers[header::CONTENT_TYPE]
         .to_str()
@@ -68,7 +70,7 @@ async fn assert_console(app: &Router) {
     assert!(!body.contains("https://"));
     let (status, headers, _) = get(app, "/").await;
     assert!(status.is_redirection());
-    assert_eq!(headers[header::LOCATION], "/console");
+    assert_eq!(headers[header::LOCATION], "console");
 }
 
 #[tokio::test(flavor = "multi_thread")]

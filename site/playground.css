@@ -1,0 +1,53 @@
+/* Search playground: the same paper, ink and orange as the landing page. */
+.pg-shell{padding:28px;box-shadow:8px 8px 0 var(--ink)}
+.pg-top{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}
+.pg-stamp{font:600 .75rem/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;border:2px solid var(--ink);padding:7px 10px;background:var(--silver)}
+.pg-presets{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:.9rem}
+.pg-presets button{font:600 .8rem/1.3 var(--mono);border:2px solid var(--ink);background:var(--sheet);padding:7px 10px;cursor:pointer;color:var(--ink)}
+.pg-presets button:hover{background:var(--fold)}
+.pg-controls{display:grid;grid-template-columns:.7fr .7fr 1.7fr .65fr 1.1fr 1.1fr;gap:16px;padding-bottom:24px;border-bottom:2px dashed var(--silver)}
+.pg-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.pg-field label{font:600 .8rem/1.4 var(--mono)}
+.pg-field input,.pg-field select{width:100%;min-height:44px;border:2px solid var(--ink);border-radius:0;background:var(--paper);color:var(--ink);padding:8px;font:500 1rem/1.2 var(--sans)}
+.pg-main{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:28px;margin-top:24px;align-items:start}
+.pg-map{width:100%;display:block;background:var(--paper);border:2px solid var(--ink);touch-action:manipulation;cursor:crosshair}
+.pg-map text{font:500 12px var(--mono);fill:var(--muted);pointer-events:none}
+.pg-map .pg-rank{fill:var(--ink);font-weight:600}
+.pg-gridline{stroke:var(--fold);stroke-width:1}
+.pg-link{stroke:var(--orange-ink);stroke-width:1;stroke-dasharray:4 5}
+.pg-point{stroke:var(--ink);stroke-width:1.5}
+.pg-point-hit{stroke-width:3}
+.pg-excluded{opacity:.15}
+.pg-query{fill:var(--orange);stroke:var(--ink);stroke-width:2.5}
+.pg-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:14px 0 0;padding:0;list-style:none;font:500 .78rem/1.4 var(--mono)}
+.pg-legend li{display:flex;align-items:center;gap:7px}
+.pg-dot{width:10px;height:10px;border:1.5px solid var(--ink);border-radius:50%;display:inline-block;flex:none}
+.pg-docs{background:var(--steel)}
+.pg-memory{background:var(--orange)}
+.pg-ops{background:var(--silver)}
+.pg-legend .pg-diamond{border-radius:0;transform:rotate(45deg);background:var(--orange)}
+.pg-hint{font-size:.85rem;line-height:1.5;color:var(--muted);margin-top:12px}
+.pg-result-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:14px}
+.pg-count{font:500 .75rem/1.4 var(--mono);color:var(--muted)}
+.pg-table{width:100%;border-collapse:collapse;font:500 .82rem/1.45 var(--mono)}
+.pg-table caption{text-align:left;font:400 .9rem/1.5 var(--sans);color:var(--muted);padding-bottom:16px}
+.pg-table th{text-align:left;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;padding:9px 8px;border-bottom:2px solid var(--ink)}
+.pg-table td{padding:12px 8px;border-bottom:1px solid var(--fold)}
+.pg-table th:last-child,.pg-table td:last-child{text-align:right}
+.pg-table td:first-child{font-weight:600}
+.pg-table tbody tr:first-child{background:var(--fold)}
+.pg-empty{padding:24px 0;font-size:1rem}
+.pg-error{color:#9C271E;font-weight:600;margin-top:14px}
+.pg-code{margin-top:28px;box-shadow:none}
+.pg-code pre{max-height:360px;font-size:.8rem;line-height:1.65}
+.pg-code .card-title{letter-spacing:.03em}
+.pg-reproduce{margin-top:22px;border-top:2px dashed var(--silver);padding-top:18px}
+.pg-reproduce summary{cursor:pointer;font-weight:700;line-height:1.4}
+.pg-reproduce p{margin-top:16px;font-size:.95rem;color:var(--muted)}
+.pg-reproduce pre{overflow:auto;padding:18px;background:var(--paper);border:2px solid var(--ink);font:400 .8rem/1.65 var(--mono)}
+.pg-reproduce .pg-code{margin-top:16px}
+.pg-note{margin-top:24px;font-size:.95rem;line-height:1.6;color:var(--muted);max-width:54rem}
+[hidden]{display:none!important}
+@media(max-width:980px){.pg-controls{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:720px){.pg-shell{padding:20px 16px}.pg-main{grid-template-columns:minmax(0,1fr)}.pg-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.pg-top{align-items:flex-start}.pg-result-head{margin-top:8px}}
+@media(prefers-reduced-motion:reduce){.pg-map{scroll-behavior:auto}}
