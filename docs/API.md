@@ -2,7 +2,7 @@
 
 `glider-server` serves one collection or many collections over HTTP/JSON. This page describes
 every route the router (`src/server/http.rs`) registers. Configuration is in
-the [README](../README.md#configuration); durability and recovery semantics
+[CONFIGURATION.md](CONFIGURATION.md); durability and recovery semantics
 are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 
 | Method and path | Auth | Purpose |
@@ -34,7 +34,7 @@ Unprefixed data endpoints return JSON `404` directing clients to the prefix.
 | `POST /v1/collections` | JSON `{"name":"demo","dimensions":3,"metric":"squared_euclidean","resident_filter":{"key":"value"},"routed_keys":["key"]}`. `metric` defaults to `squared_euclidean`; filter and routed keys are optional. Returns a description with `open` and `201` on create, `200` for identical configuration, `409` for a conflict. |
 | `GET /v1/collections` | `{"collections":[...]}` sorted by name; descriptions include `name`, `dimensions`, `metric`, `resident_filter`, `routed_keys` and `open`. Listing does not open collections. |
 | `GET /v1/collections/{name}` | Description plus `status` containing the same body as that collection's `/status`; opens it if needed. `404` if absent. |
-| `DELETE /v1/collections/{name}` | `204` after the catalog deletion, `404` if absent. A later create uses a new generation and starts empty. |
+| `DELETE /v1/collections/{name}` | Drains and releases the collection, deletes its catalog entry, then cleans its generation. `204` after the catalog deletion, `404` if absent. A later create uses a new generation and starts empty. |
 
 Opening is lazy. At the configured open limit, the least recently used
 collection without requests in flight drains and closes; a later request

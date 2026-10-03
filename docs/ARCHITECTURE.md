@@ -46,9 +46,9 @@ edge before exposing the service. Monitor [`/healthz`](API.md#get-healthz),
 [`/metrics`](API.md#get-metrics) and [`/v1/status`](API.md#get-v1status);
 the [serving guide](SERVING.md) covers backup and recovery. There is one active
 server and no built-in standby. The repository does not ship an AWS deployment
-template; each release publishes the server image as
-`ghcr.io/omerfeyzioglu/glider:<version>`. The [Compose quickstart](../README.md#quickstart)
-is a local demo; [configuration](../README.md#configuration) lists the S3
+template; the server image is published as
+`ghcr.io/omerfeyzioglu/glider:latest`. The [Compose demo](INSTALL.md#docker-compose-with-minio)
+is a local demo; [configuration](CONFIGURATION.md) lists the S3
 variables.
 
 ## Diagram sources
