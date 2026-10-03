@@ -134,6 +134,7 @@ impl Target {
                         hits: Vec::new(),
                         remote_reads: 0,
                         remote_bytes: 0,
+                        mode: glider::admission::QueryMode::ExactScan,
                     },
                     queue_wait,
                     execution: start.elapsed(),

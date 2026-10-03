@@ -39,6 +39,7 @@ fn config(path: &Path, max: usize) -> ServerConfig {
         lease: Duration::from_millis(100),
         multi: true,
         max_open_collections: max,
+        collection_idle: Duration::from_secs(60),
     }
 }
 fn request(name: &str, dimensions: usize) -> CreateCollection {
@@ -248,11 +249,13 @@ async fn collections_lifecycle_isolation_and_restart() {
         &app,
         "POST",
         "/v1/collections/b/query",
-        Some(json!({"vector":[1.0,2.0,3.0],"exact":true})),
+        Some(json!({"vector":[1.0,2.0,3.0],"exact":true,"profile":true})),
     )
     .await;
     assert_eq!(code, StatusCode::OK, "{result}");
     assert_eq!(result["results"][0]["id"], 1);
+    assert_eq!(result["profile"]["mode"], "exact_scan");
+    assert!(result["profile"]["server_ms"].as_f64().unwrap() >= 0.0);
     let (code, scan) = call(&app, "POST", "/v1/collections/a/scan", Some(json!({}))).await;
     assert_eq!(code, StatusCode::OK, "{scan}");
     assert_eq!(scan["ids"], json!([1]));
@@ -375,6 +378,72 @@ async fn concurrent_first_use_opens_once_and_busy_limit_preserves_active_use() {
     ));
     drop((left, right));
     assert!(multi.use_collection("beta").await.unwrap().is_some());
+    multi.shutdown().await.unwrap();
+}
+
+async fn wait_until_closed(multi: &Multi, name: &str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while multi.is_open(name).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("idle collection should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_collection_closes_and_reopens_with_acknowledged_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path(), 4);
+    config.collection_idle = Duration::from_millis(200);
+    let multi = Multi::new(config).unwrap();
+    let app = multi_router(multi.clone(), None);
+    assert_eq!(create(&app, "idle", 2).await.0, StatusCode::CREATED);
+    let (code, body) = call(
+        &app,
+        "POST",
+        "/v1/collections/idle/write",
+        Some(json!({"upsert":[{"id":1,"vector":[1.0,2.0]}]})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert!(multi.is_open("idle").await);
+    wait_until_closed(&multi, "idle").await;
+    assert_eq!(multi.open_count().await, 0);
+    let (code, body) = call(&app, "GET", "/v1/collections/idle/points/1", None).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["vector"], json!([1.0, 2.0]));
+    assert!(multi.is_open("idle").await);
+    multi.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_collection_keeps_in_flight_request_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path(), 4);
+    config.collection_idle = Duration::from_millis(200);
+    let multi = Multi::new(config).unwrap();
+    multi.create(request("busy", 2)).await.unwrap();
+    let use_ = multi.use_collection("busy").await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(multi.is_open("busy").await);
+    assert_eq!(multi.open_count().await, 1);
+    drop(use_);
+    wait_until_closed(&multi, "busy").await;
+    multi.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_idle_duration_disables_closing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path(), 4);
+    config.collection_idle = Duration::ZERO;
+    let multi = Multi::new(config).unwrap();
+    multi.create(request("kept", 2)).await.unwrap();
+    drop(multi.use_collection("kept").await.unwrap().unwrap());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(multi.is_open("kept").await);
+    assert_eq!(multi.open_count().await, 1);
     multi.shutdown().await.unwrap();
 }
 

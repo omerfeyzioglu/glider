@@ -1417,8 +1417,11 @@ At most `GLIDER_MAX_OPEN_COLLECTIONS` (default 64) stay open. A new open
 closes the least recently used collection with no requests in flight, draining
 its service and releasing its lease; a later use reopens it. When every open
 collection is busy, an open fails with `429`. Each open collection has two
-query readers and two scoped scoring threads, and its disposable cache lies
-under `<GLIDER_CACHE_DIR>/<name>-<generation>/` with a budget of
+query readers and two scoped scoring threads. Independently, an open collection
+with no request in flight or started for `GLIDER_COLLECTION_IDLE_SECONDS`
+(default 60; 0 disables) closes through the same drain and lease release path;
+the next request reopens it.
+The disposable cache lies under `<GLIDER_CACHE_DIR>/<name>-<generation>/` with a budget of
 `max(16 MiB, GLIDER_CACHE_BYTES / GLIDER_MAX_OPEN_COLLECTIONS)`. Graceful
 process shutdown drains and releases every open lease. A deposed lease closes
 only its collection. `glider-admin` currently operates on single-collection

@@ -23,7 +23,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 const CONSOLE_HTML: &str = include_str!("console.html");
 const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -216,6 +216,8 @@ struct QueryBody {
     include_vector: bool,
     #[serde(default)]
     exact: bool,
+    #[serde(default)]
+    profile: bool,
 }
 
 fn default_k() -> usize {
@@ -234,6 +236,7 @@ async fn query(
     headers: HeaderMap,
     Json(body): Json<QueryBody>,
 ) -> Result<Json<Value>, ApiError> {
+    let start = Instant::now();
     authorize(&state, &headers)?;
     if body.k == 0 || body.k > 1_000 {
         return Err(bad_request("k must be between 1 and 1000"));
@@ -245,13 +248,13 @@ async fn query(
             include_metadata: body.include_metadata,
             include_vector: body.include_vector,
         };
-        let result = client
+        let timed = client
             .query_with_mode_filter(body.vector, body.k, filter, options, body.exact)?
-            .wait()?
-            .value;
-        Ok(Json(json!({
-            "sequence": result.sequence,
-            "results": result
+            .wait()?;
+        let server_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let mut response = json!({
+            "sequence": timed.value.sequence,
+            "results": timed.value
                 .hits
                 .iter()
                 .map(|hit| {
@@ -265,7 +268,17 @@ async fn query(
                     result
                 })
                 .collect::<Vec<_>>(),
-        })))
+        });
+        if body.profile {
+            response["profile"] = json!({
+                "mode": timed.value.mode.as_str(),
+                "server_ms": server_ms,
+                "queue_ms": timed.queue_wait.as_secs_f64() * 1000.0,
+                "remote_reads": timed.value.remote_reads,
+                "remote_bytes": timed.value.remote_bytes,
+            });
+        }
+        Ok(Json(response))
     })
     .await
 }
