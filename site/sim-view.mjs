@@ -138,6 +138,7 @@ function renderInventory() {
   el('crash').disabled = state.status !== 'running';
   el('restart').disabled = state.status !== 'crashed';
   document.querySelectorAll('[data-query]').forEach(button => { button.disabled = (busy && !queryAnimation) || state.status !== 'running'; });
+  holdTransferCounters();
 }
 function clearQuery() {
   plan = null; results = []; activeClusters = []; recentBlocks = []; queryPoint = null;
@@ -166,12 +167,33 @@ function renderBlocks() {
     blockCards.set(block.id, card); return card;
   }));
 }
-// One transparent, DPR-scaled overlay owns all transfer tracks and tags.
+// One transparent, DPR-scaled overlay owns the tracks, fill and summary label.
 // Geometry is measured only when layout or the query marker changes, never
 // per animation frame. Inventory/model updates do not wait for this illustration.
 const grid = el('grid'), tracks = el('tracks'), rail = tracks.getContext('2d');
 let geometry = {}, trackWidth = 1, trackHeight = 1, transfer = null;
 const flashes = new Map();
+const TRANSFER_SPEED = .6; // CSS pixels per millisecond, including bends.
+const TRANSFER_FADE_MS = 400;
+const tierCounters = {ssd: ['ssd-size', 'ssd-count'], ram: ['ram-size'], s3: ['s3-size']};
+function snapshotCounters() {
+  return Object.fromEntries(Object.values(tierCounters).flat().map(id => [id, el(id).textContent]));
+}
+function holdTransferCounters() {
+  if (!transfer?.counters) return;
+  for (const stop of transfer.route.stops) {
+    for (const id of tierCounters[stop.tier] ?? []) {
+      transfer.finalCounters[id] = el(id).textContent;
+      if (!transfer.arrived.has(stop.tier)) el(id).textContent = transfer.counters[id];
+    }
+  }
+}
+function transferArrival(tier) {
+  if (transfer.arrived.has(tier)) return;
+  transfer.arrived.add(tier);
+  for (const id of tierCounters[tier] ?? []) el(id).textContent = transfer.finalCounters[id];
+  arrival(tier);
+}
 function clearArrivals() {
   for (const animations of flashes.values()) for (const animation of animations) animation.cancel();
   flashes.clear();
@@ -237,18 +259,40 @@ function routeFor(legs) {
   return {segments, stops, length};
 }
 function buildRoutes() {
-  for (const tag of transfer.tags) tag.route = routeFor(tag.legs);
+  transfer.route = routeFor(transfer.legs);
+  transfer.duration = transfer.sealing ? transfer.duration : transfer.route.length / TRANSFER_SPEED;
 }
-function trackLine(points, active = false) {
+function trackLine(points) {
   rail.beginPath(); rail.moveTo(points[0].x, points[0].y);
   for (const p of points.slice(1)) rail.lineTo(p.x, p.y);
   rail.lineJoin = 'miter'; rail.lineCap = 'butt'; rail.setLineDash([]);
-  rail.globalAlpha = active ? 1 : .22;
+  rail.globalAlpha = .22;
   rail.strokeStyle = '#0E1B2C'; rail.lineWidth = 6; rail.stroke();
-  if (active) { rail.strokeStyle = '#F07A1A'; rail.lineWidth = 4; rail.stroke(); }
-  rail.globalAlpha = active ? .6 : .4;
-  rail.strokeStyle = active ? '#0E1B2C' : '#F7F4EE'; rail.lineWidth = 1;
+  rail.globalAlpha = .4;
+  rail.strokeStyle = '#F7F4EE'; rail.lineWidth = 1;
   rail.setLineDash([3, 5]); rail.stroke(); rail.setLineDash([]); rail.globalAlpha = 1;
+}
+function routePoint(distance) {
+  const segments = transfer.route.segments;
+  const segment = segments.find(s => distance < s.start + s.length) ?? segments.at(-1);
+  if (!segment) return null;
+  const fraction = Math.min(1, Math.max(0, (distance - segment.start) / segment.length));
+  return {x: segment.a.x + (segment.b.x - segment.a.x) * fraction,
+    y: segment.a.y + (segment.b.y - segment.a.y) * fraction};
+}
+function paintFill(distance, opacity) {
+  rail.beginPath();
+  let previous = null;
+  for (const segment of transfer.route.segments) {
+    if (distance <= segment.start) break;
+    if (!previous || previous.x !== segment.a.x || previous.y !== segment.a.y) rail.moveTo(segment.a.x, segment.a.y);
+    const fraction = Math.min(1, (distance - segment.start) / segment.length);
+    previous = {x: segment.a.x + (segment.b.x - segment.a.x) * fraction,
+      y: segment.a.y + (segment.b.y - segment.a.y) * fraction};
+    rail.lineTo(previous.x, previous.y);
+  }
+  rail.globalAlpha = opacity; rail.lineJoin = 'miter'; rail.lineCap = 'butt'; rail.setLineDash([]);
+  rail.strokeStyle = transfer.colour; rail.lineWidth = 4; rail.stroke(); rail.globalAlpha = 1;
 }
 // A short acceleration/deceleration at the endpoints, with constant distance
 // per millisecond through the middle and through every right-angle bend.
@@ -293,50 +337,60 @@ function paintTransfers(now) {
   if (!transfer) return;
   const elapsed = now - transfer.started;
   if (transfer.sealing) { if (!motion.matches) paintSeal(Math.min(1, elapsed / transfer.duration)); return; }
-  const moving = [], active = new Set();
-  for (const tag of transfer.tags) {
-    const t = motion.matches ? 1 : Math.max(0, Math.min(1, (elapsed - tag.delay) / tag.duration));
-    const distance = slide(t) * tag.route.length;
-    for (let i = 0; i < tag.route.stops.length; i++) {
-      const stop = tag.route.stops[i];
-      if (distance >= stop.distance && !tag.arrived.has(i)) { tag.arrived.add(i); arrival(stop.tier); }
-    }
-    if (motion.matches || t <= 0 || t >= 1) continue;
-    const segment = tag.route.segments.find(s => distance < s.start + s.length);
-    if (!segment) continue;
-    active.add(segment.track);
-    const fraction = (distance - segment.start) / segment.length;
-    moving.push({point: {x: segment.a.x + (segment.b.x - segment.a.x) * fraction,
-      y: segment.a.y + (segment.b.y - segment.a.y) * fraction}, label: segment.label ?? tag.label});
+  const distance = transfer.fadeStarted !== null || motion.matches ? transfer.route.length
+    : Math.min(transfer.route.length, Math.max(0, elapsed) * TRANSFER_SPEED);
+  for (const stop of transfer.route.stops) if (distance >= stop.distance) transferArrival(stop.tier);
+  if (motion.matches) return;
+  const opacity = transfer.fadeStarted === null ? 1 : Math.max(0, 1 - (now - transfer.fadeStarted) / TRANSFER_FADE_MS);
+  paintFill(distance, opacity);
+  if (distance < transfer.route.length) {
+    const point = routePoint(Math.min(transfer.route.length, distance + 12));
+    if (point) paperTag(point, transfer.label);
   }
-  for (const key of active) trackLine(geometry[key], true);
-  for (const tag of moving) paperTag(tag.point, tag.label);
 }
-function stopTransfers(settle = false) {
+function stopTransfers(settle = false, fade = false) {
   if (!transfer) return;
   if (settle && !transfer.sealing) {
-    for (const tag of transfer.tags) for (let i = 0; i < tag.route.stops.length; i++) {
-      if (!tag.arrived.has(i)) arrival(tag.route.stops[i].tier);
+    for (const stop of transfer.route.stops) transferArrival(stop.tier);
+    if (fade && !motion.matches) {
+      if (transfer.fadeStarted === null) {
+        transfer.fadeStarted = performance.now();
+        clearTimeout(transfer.deadline);
+        if (!transfer.queryFlow) transfer.deadline = setTimeout(() => stopTransfers(), TRANSFER_FADE_MS);
+      }
+      paintTransfers(performance.now());
+      return;
     }
   }
+  if (transfer.counters) for (const [id, value] of Object.entries(transfer.finalCounters)) el(id).textContent = value;
   cancelAnimationFrame(transfer.frame); clearTimeout(transfer.deadline);
   const done = transfer.done; transfer = null; paintTransfers(performance.now()); done?.();
 }
-function startTransfers(tags, {duration = 900, point = queryPoint ?? presets[1], sealing = false} = {}) {
+function startTransfers(flow, {duration = 900, point = queryPoint ?? presets[1], sealing = false, counters = null, queryFlow = false} = {}) {
   stopTransfers(); clearArrivals();
-  transfer = {started: performance.now(), tags: tags.map(tag => ({...tag, arrived: new Set()})),
-    point: {...point}, duration, sealing, frame: 0, deadline: 0};
+  transfer = {started: performance.now(), legs: flow?.legs ?? [], label: flow?.label,
+    colour: flow?.colour ?? '#F07A1A', arrived: new Set(), fadeStarted: null,
+    counters, queryFlow, finalCounters: snapshotCounters(), point: {...point}, duration, sealing, frame: 0, deadline: 0};
   measureTracks();
+  if (counters) for (const stop of transfer.route.stops) {
+    if (!transfer.arrived.has(stop.tier)) for (const id of tierCounters[stop.tier] ?? []) el(id).textContent = counters[id];
+  }
   if (motion.matches) { stopTransfers(true); return Promise.resolve(); }
   return new Promise(resolve => {
     transfer.done = resolve;
     const update = () => {
       if (!transfer) return;
-      paintTransfers(performance.now());
-      if (performance.now() - transfer.started >= duration) { stopTransfers(true); return; }
+      const now = performance.now();
+      paintTransfers(now);
+      if (transfer.fadeStarted !== null) {
+        if (now - transfer.fadeStarted >= TRANSFER_FADE_MS) { stopTransfers(); return; }
+      } else if (now - transfer.started >= transfer.duration && (!transfer.queryFlow || !queryAnimation)) {
+        stopTransfers(true, !transfer.sealing);
+        if (!transfer) return;
+      }
       transfer.frame = requestAnimationFrame(update);
     };
-    transfer.deadline = setTimeout(() => stopTransfers(true), duration);
+    if (!queryFlow) transfer.deadline = setTimeout(() => stopTransfers(true, !sealing), transfer.duration);
     update();
   });
 }
@@ -349,11 +403,13 @@ function stopQueryAnimation() {
   if (!queryAnimation) return;
   cancelAnimationFrame(queryAnimation.frame); clearTimeout(queryAnimation.deadline);
   queryAnimation = null;
-  stopTransfers();
 }
 function finishQueryAnimation() {
   if (!queryAnimation) return;
-  stopTransfers(true); stopQueryAnimation();
+  stopQueryAnimation();
+  // Query execution settles independently of frames; a longer measured route
+  // keeps its constant-speed fill until the illustration reaches the query.
+  if (transfer && (motion.matches || performance.now() - transfer.started >= transfer.duration)) stopTransfers(true, true);
   for (const read of plan.reads) blockCards.get(read.block.id).className = `sim-read ${read.source}`;
   results = plan.results; phase(3); busy = false; glow(null); renderInventory(); invalidate();
   say(plan.sources.s3 ? 'Query complete. Those blocks are now cached — run again to see the difference.' : 'Cache hit. Every selected block was served locally.');
@@ -364,7 +420,9 @@ function runQuery(point) {
   // not depend on any frame, timer, visibility state or animation promise.
   finishQueryAnimation();
   if (busy) return;
+  stopTransfers(true);
   queryPoint = {...point}; results = []; recentBlocks = [];
+  const counters = snapshotCounters();
   plan = query(state, point); activeClusters = plan.clusters;
   recentBlocks = plan.reads.map(read => read.block.id);
   busy = true;
@@ -373,17 +431,15 @@ function runQuery(point) {
   renderQuery(); renderBlocks(); renderInventory(); invalidate();
   const remote = plan.reads.filter(read => read.source === 's3');
   const local = plan.reads.filter(read => read.source !== 's3');
-  // Eight representative tags keep parallel reads legible, including cache
-  // hits. All model reads/stats remain intact and settle at the same deadline.
-  const tags = plan.reads.slice(0, 8).map((read, i, visible) => ({
-    label: `B${read.block.id}`, delay: 280 + i * 24, duration: 720 - (visible.length - 1) * 24,
-    legs: [
-      ...(read.source === 's3' ? [{track: 's3-ssd', to: 'ssd'}] : []),
-      ...(read.source !== 'ram' ? [{track: 'ssd-ram', to: 'ram'}] : []),
-      {track: 'ram-map', to: 'map'},
-    ],
-  }));
-  void startTransfers(tags, {duration: QUERY_ANIMATION_MS});
+  // One aggregate flow starts at the deepest source needed by this plan.
+  const source = remote.length ? 's3' : plan.sources.ssd ? 'ssd' : 'ram';
+  const label = source === 's3' ? `${plan.reads.length} blocks · ${+(plan.bytes / 1024).toFixed(1)} KiB`
+    : `${plan.reads.length} blocks from ${source.toUpperCase()}`;
+  void startTransfers({label, legs: [
+    ...(source === 's3' ? [{track: 's3-ssd', to: 'ssd'}] : []),
+    ...(source !== 'ram' ? [{track: 'ssd-ram', to: 'ram'}] : []),
+    {track: 'ram-map', to: 'map'},
+  ]}, {counters, queryFlow: true});
   let shownStage = -1;
   const update = () => {
     if (!queryAnimation) return;
@@ -412,7 +468,7 @@ async function sealTail() {
   if (busy || state.status !== 'running' || !state.ram.tail.size) return;
   busy = true; const ticket = ++epoch;
   phase(-1); glow(null); say('Seal recent writes into durable data packs.');
-  renderInventory(); await startTransfers([], {duration: 420, sealing: true});
+  renderInventory(); await startTransfers(null, {duration: 420, sealing: true});
   if (ticket !== epoch) return;
   const publication = seal(state); renderInventory(); arrival('s3');
   say(`${number(publication.rows)} recent writes are now sealed in S3.`);
@@ -475,13 +531,14 @@ setInterval(() => {
   if (busy || state.status !== 'running' || document.hidden) return;
   if (state.s3.logs.size >= 32) { void sealTail(); return; }
   if (streaming) {
+    const counters = snapshotCounters();
     const batch = writeBatch(state, queryPoint ?? presets[1]);
     writeDots.push(...batch.rows); writeDots = writeDots.slice(-6400);
     say('100 new writes are durable in S3 and visible in RAM.');
     renderInventory(); invalidate();
-    if (!transfer) void startTransfers([{label: `W${batch.sequence}`, delay: 0, duration: 780,
-      legs: [{track: 'ram-map', reverse: true, to: 'ram'}, {track: 'ram-s3', to: 's3', label: `L${batch.sequence}`}],
-    }], {duration: 800, point: queryPoint ?? presets[1]});
+    if (!transfer) void startTransfers({label: 'batch of 100 · log object', colour: '#16304F',
+      legs: [{track: 'ram-map', reverse: true, to: 'ram'}, {track: 'ram-s3', to: 's3'}],
+    }, {point: queryPoint ?? presets[1], counters});
     if (batch.shouldSeal) void sealTail();
   } else if (el('warm').checked) {
     let added = [];
