@@ -78,6 +78,8 @@ pub struct ServerConfig {
     /// Whether the base is a collection catalog rather than an engine namespace.
     pub multi: bool,
     pub max_open_collections: usize,
+    /// Close an unused collection after this duration in multi mode; zero disables.
+    pub collection_idle: Duration,
 }
 
 #[derive(Clone)]
@@ -116,6 +118,8 @@ impl ServerConfig {
     ///   locally beyond its remote budget, default 24; 0 makes results
     ///   independent of cache contents)
     /// - `GLIDER_LEASE_SECONDS` (default 10): writer lease duration
+    /// - `GLIDER_COLLECTION_IDLE_SECONDS` (default 60): close unused collections
+    ///   in multi mode; 0 disables
     /// - `GLIDER_AUTO_CLUSTER_ROWS` (default 250,000): live sealed rows at
     ///   which a namespace without a clustered view converts to one as idle
     ///   maintenance; 0 disables
@@ -239,6 +243,14 @@ impl ServerConfig {
             },
             multi,
             max_open_collections,
+            collection_idle: match env("GLIDER_COLLECTION_IDLE_SECONDS") {
+                Some(seconds) => seconds
+                    .parse()
+                    .ok()
+                    .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+                    .ok_or_else(|| invalid("GLIDER_COLLECTION_IDLE_SECONDS"))?,
+                None => Duration::from_secs(60),
+            },
         })
     }
 

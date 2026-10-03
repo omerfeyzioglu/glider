@@ -6,8 +6,8 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Glider is a single-node vector database with S3-compatible object storage as
-its durable state. One `glider-server` process serves one collection over
-HTTP/JSON. It supports writes, nearest-neighbor search and metadata filters;
+its durable state. One `glider-server` process serves one collection, or
+many collections created over HTTP, through an HTTP/JSON API. It supports writes, nearest-neighbor search and metadata filters;
 local RAM and SSD accelerate reads but hold no acknowledged data exclusively.
 
 ## Quickstart
@@ -21,7 +21,7 @@ Each release is published as a multi-platform image (`linux/amd64`,
 
 ```sh
 docker run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.0.1
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:latest
 ```
 
 Data in the container is lost when it stops; point it at S3 with the
@@ -97,6 +97,9 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 - **SSD cache.** A local block cache is filled in the background so warm
   queries need no remote reads. Losing it does not lose acknowledged writes;
   it can affect query latency and approximate-search recall until warm again.
+- **Collections.** One server creates, lists, deletes and serves many
+  collections, each with its own dimension and metric in its own prefix;
+  they open on first use and idle ones close beyond a configured limit.
 - **Filters.** Equality, set, existence, numeric and logical filters on string
   metadata; one declared equality is answered exactly, and up to four declared
   keys steer routing. Exhaustive queries and scans accept every filter.
@@ -109,7 +112,7 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 
 ## Status
 
-Glider 1.0 is a single-node, single-writer database. Its scope:
+Glider is a single-node database with one writer per collection. Its scope:
 
 - one or many collections per server process, with one writer and lease per
   open collection;
@@ -167,6 +170,7 @@ multi mode it contains `catalog/` and `data/`, not an engine namespace.
 | `GLIDER_CACHE_DIR` | `glider-cache` | Local block cache directory, relative to the working directory (`/var/lib/glider/cache` in the Docker image). Any local disk works: instance-store NVMe, EBS or a container volume. |
 | `GLIDER_CACHE_BYTES` | `268435456` (256 MiB) | Local cache limit. While idle the server copies the collection into the cache up to this limit; set it above `cache.namespace_bytes` from `/v1/status` to keep everything local. |
 | `GLIDER_MAX_OPEN_COLLECTIONS` | `64` | Maximum open collections in multi mode. Opening another closes the least recently used idle collection. Per-collection cache budget is `max(16 MiB, GLIDER_CACHE_BYTES / GLIDER_MAX_OPEN_COLLECTIONS)` under `<GLIDER_CACHE_DIR>/<name>-<generation>/`. |
+| `GLIDER_COLLECTION_IDLE_SECONDS` | `60` | Close unused collections in multi mode to avoid idle S3 lease renewal requests. Fractions allowed; `0` disables. |
 | `GLIDER_LOCAL_BLOCKS` | `24` | Cached blocks a query may rerank in addition to its remote budget. `0` makes results independent of the cache contents. |
 | `GLIDER_AUTO_CLUSTER_ROWS` | `250000` | Live sealed rows at which a collection without a clustered view is converted to one in the background. `0` disables. |
 | `GLIDER_AUTO_RECLUSTER_FACTOR` | `4` | Rebuild the clustered view with more clusters once the collection holds more than this factor times the rows it was sized for (about 4,000 per cluster). `0` disables. |
@@ -319,7 +323,7 @@ collection, sized for the embedding model, on first use:
 
 ```sh
 docker run -d --name glider -p 8080:8080 -v glider-data:/var/lib/glider \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.1.0
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:latest
 pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"
 claude mcp add glider -e GLIDER_COLLECTION=memory -- glider-mcp
 ```

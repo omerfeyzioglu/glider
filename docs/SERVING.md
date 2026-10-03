@@ -13,7 +13,9 @@ the environment variables.
 With `GLIDER_DIMENSIONS` unset, the base prefix holds a collection catalog.
 Create and delete collections through the [collections API](API.md#collections).
 Collections open on first use; the server evicts the least recently used idle
-one at `GLIDER_MAX_OPEN_COLLECTIONS` and reopens it transparently later. Keep
+one at `GLIDER_MAX_OPEN_COLLECTIONS` and reopens it transparently later.
+Unused collections also close after `GLIDER_COLLECTION_IDLE_SECONDS` (default
+60 seconds), releasing their leases; `0` disables idle closing. Keep
 the base prefix dedicated to one mode. The local cache is divided among open
 collections and can be discarded. `/healthz` and `/metrics` remain global.
 
