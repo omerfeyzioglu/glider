@@ -495,10 +495,15 @@ pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
 
 fn multi_error(error: crate::Error) -> ApiError {
     use crate::Error;
+    // Busy covers both a collection whose lease another process holds and
+    // every open collection being in use; the inner message says which, and
+    // both are worth retrying.
+    if let Error::Busy(message) = error {
+        return ApiError(StatusCode::TOO_MANY_REQUESTS, message);
+    }
     let code = match error {
         Error::Invalid(_) => StatusCode::BAD_REQUEST,
         Error::RequestConflict | Error::Exists(_) => StatusCode::CONFLICT,
-        Error::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
         Error::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::SERVICE_UNAVAILABLE,
     };

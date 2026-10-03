@@ -373,6 +373,10 @@ async fn concurrent_first_use_opens_once_and_busy_limit_preserves_active_use() {
         multi.use_collection("beta").await,
         Err(glider::Error::Busy(_))
     ));
+    let app = multi_router(multi.clone(), None);
+    let (code, body) = call(&app, "GET", "/v1/collections/beta/points/1", None).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"], "all open collections have requests in flight");
     drop((left, right));
     assert!(multi.use_collection("beta").await.unwrap().is_some());
     multi.shutdown().await.unwrap();
