@@ -151,6 +151,7 @@ pattern; [DESIGN.md](DESIGN.md) specifies formats, invariants and recovery.
 | [Benchmarks](BENCHMARKS.md) | Measurements and how to reproduce them |
 | [Changelog](CHANGELOG.md) | Release notes |
 | [Contributing](CONTRIBUTING.md) | Development workflow and checks |
+| [Website](docs/WEBSITE.md) | Previewing the site and regenerating its playground results |
 | [Security](SECURITY.md) | Reporting vulnerabilities and deployment security |
 
 ## Limitations

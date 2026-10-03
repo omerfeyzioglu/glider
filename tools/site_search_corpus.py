@@ -35,8 +35,6 @@ CARDS = [
 ]
 QUESTIONS = [
  'Will I lose my data if the SSD cache disappears?',
- 'How can I search only documents that match my metadata?',
- 'Do queries have to wait for writes to finish?',
 ]
 
 def main():

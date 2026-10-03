@@ -290,39 +290,41 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
 <section id="playground" aria-labelledby="pg-title">
   <div class="wrap">
     <div class="head">
-      <p class="eyebrow">Search playground</p>
-      <h2 id="pg-title">Find answers in your docs.</h2>
-      <p>Pick a question to search Glider&rsquo;s documentation. Run it again to see how the cache saves another trip to object storage.</p>
+      <p class="eyebrow">Playground</p>
+      <h2 id="pg-title">The life of a query.</h2>
+      <p>Your data lives in S3. RAM and SSD only make it fast. Press each step and watch where the data goes, and what survives a crash.</p>
     </div>
-    <div class="sheet pg-shell" id="pg-app" hidden>
-      <div class="pg-top"><span>GLIDER DOCS / SEMANTIC SEARCH</span><span id="pg-dataset"></span></div>
-      <div class="pg-search">
-        <div class="pg-presets" role="group" aria-label="Example questions"><button type="button" data-query="0" aria-pressed="true">Cache loss</button><button type="button" data-query="1" aria-pressed="false">Metadata filters</button><button type="button" data-query="2" aria-pressed="false">Concurrent writes</button></div>
-        <div class="pg-question-line"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="m15 15 6 6" stroke="currentColor" stroke-width="2"/></svg><p id="pg-question" aria-live="polite" aria-atomic="true"></p><button type="button" id="pg-run">Run again &rarr;</button></div>
+    <div class="sheet pg" id="pg-app">
+      <ol class="pg-steps" id="pg-steps" aria-label="Steps"></ol>
+      <div class="pg-stage" id="pg-stage">
+        <div class="pg-node pg-client" data-node="client"><strong>Client</strong><span>Your app</span></div>
+        <div class="pg-machine" id="pg-machine">
+          <p class="pg-machine-label">One server &middot; disposable</p>
+          <div class="pg-node pg-server" data-node="server"><strong>Glider server</strong><span id="pg-server-state">Ready</span></div>
+          <div class="pg-node pg-tier" data-node="ram"><strong>RAM</strong><span>Fastest, in the process</span><i class="pg-fill" aria-hidden="true"></i></div>
+          <div class="pg-node pg-tier" data-node="ssd"><strong>SSD cache</strong><span>Local disk</span><i class="pg-fill" aria-hidden="true"></i></div>
+        </div>
+        <div class="pg-node pg-tier pg-s3" data-node="s3"><strong>S3</strong><span>Durable, source of truth</span><i class="pg-fill" aria-hidden="true"></i></div>
+        <span class="pg-token" id="pg-token" aria-hidden="true" hidden></span>
       </div>
-      <div class="pg-main">
-        <div class="pg-documents"><div class="pg-result-heading"><h3>Relevant documents</h3><span id="pg-result-note"></span></div><ol id="pg-results" class="pg-results" aria-label="Relevant documents"></ol></div>
-        <aside class="pg-read-path" aria-label="How this search was served">
-          <p class="pg-label" id="pg-pass">FIRST SEARCH</p>
-          <div class="pg-source" id="pg-source"><span class="pg-source-icon" aria-hidden="true"></span><strong id="pg-source-name">Object storage</strong></div>
-          <div class="pg-read-meter"><span id="pg-read-fill"></span></div>
-          <dl class="pg-main-stats"><div><dt>Object-store reads</dt><dd id="pg-reads"></dd></div><div><dt>Downloaded</dt><dd id="pg-bytes"></dd></div></dl>
-          <p class="pg-story" id="pg-story" role="status" aria-live="polite"></p>
-          <button type="button" id="pg-reset" class="pg-reset" hidden>Reset to a cold cache</button>
-        </aside>
+      <div class="pg-say">
+        <p class="pg-caption" id="pg-caption" role="status" aria-live="polite"></p>
+        <button type="button" class="pg-reset" id="pg-reset">Start over</button>
       </div>
-      <details class="pg-engine"><summary><span>Recorded with Glider</span>Inside the search <span aria-hidden="true">+</span></summary><div class="pg-engine-content">
-        <div class="pg-engine-controls"><label for="pg-effort">Search breadth <select id="pg-effort"><option value="lean">Lean</option><option value="balanced">Balanced</option><option value="wide" selected>Wide</option></select></label><fieldset><legend>Read from</legend><div class="pg-segments"><button type="button" data-tier="cold" aria-pressed="true">Object storage</button><button type="button" data-tier="ssd" aria-pressed="false">SSD</button><button type="button" data-tier="ram" aria-pressed="false">RAM</button></div></fieldset></div>
-        <div class="pg-engine-grid"><div><h4>Centroid routing <span id="pg-probes"></span></h4><div id="pg-clusters" class="pg-clusters" aria-label="Cluster routing"></div></div><div><h4>Block reads <span id="pg-block-count"></span></h4><div id="pg-blocks" class="pg-blocks" aria-label="Block read sources"></div></div></div>
-        <p class="pg-legend"><span><i class="pg-object"></i>Object storage</span><span><i class="pg-ssd"></i>SSD</span><span><i class="pg-ram"></i>RAM</span><span><i></i>Unread</span></p>
-        <p id="pg-quality"></p>
-        <p>Document and question embeddings come from <a href="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2">all-MiniLM-L6-v2</a>. Glider stores them and returns the nearest documents with cosine distance. Each preset replays recorded queries through the Rust segmented engine, using centroid and five-bit block routing followed by full-precision reranking.</p>
-        <p>The recording backend implements the in-memory ObjectStore contract and uses a filesystem block cache. SSD is prewarmed; RAM repeats that query. Warm-up reads are separate from query counters. This run reports no network latency.</p>
-        <p><a href="explorer-data.json" download>Download query records</a> &middot; <a href="https://github.com/omerfeyzioglu/glider/blob/main/site/README.md">Reproduce this search</a></p>
-      </div></details>
+      <dl class="pg-counters">
+        <div><dt>Where the answer came from</dt><dd id="pg-source"></dd><dd class="pg-note" id="pg-source-note"></dd></div>
+        <div><dt>Typical latency</dt><dd id="pg-latency"></dd><dd class="pg-note" id="pg-latency-note"></dd></div>
+        <div class="pg-lost"><dt>Acknowledged writes lost</dt><dd id="pg-lost">0</dd><dd class="pg-note" id="pg-lost-note"></dd></div>
+      </dl>
+      <div class="pg-answer">
+        <p class="pg-question">Query: <q id="pg-question"></q> <span id="pg-scope"></span></p>
+        <ol class="pg-results" id="pg-results" aria-label="Top 3 results"></ol>
+        <p class="pg-empty" id="pg-empty"></p>
+      </div>
     </div>
-    <p id="pg-error" class="pg-error" role="alert" hidden>Search records could not be loaded. Reload to try again, or <a href="#quickstart">run Glider locally</a>.</p>
-    <noscript><p>Enable JavaScript to try the search, or <a href="#quickstart">run Glider locally</a>.</p></noscript>
+    <p class="pg-footnote">Numbers are measured on AWS S3 with 1M vectors (c7g.2xlarge); the animation illustrates the path, it does not time your clicks. <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#current-main-on-s3">Benchmarks &rarr;</a></p>
+    <p class="pg-cta"><a class="btn sm go" href="#quickstart">Try it on your own data <span aria-hidden="true">&rarr;</span> Quickstart</a></p>
+    <noscript><p>Enable JavaScript to step through the playground, or <a href="#quickstart">run Glider locally</a>.</p></noscript>
   </div>
 </section>
 

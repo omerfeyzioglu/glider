@@ -2194,8 +2194,8 @@ pub(super) fn posting_current(tail: &Tail, latest: &Directory, id: u64, sequence
 }
 
 #[cfg(test)]
-#[path = "explorer_tests.rs"]
-mod explorer_tests;
+#[path = "website_tests.rs"]
+mod website_tests;
 
 #[cfg(test)]
 mod tests {
