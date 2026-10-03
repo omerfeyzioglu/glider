@@ -1410,6 +1410,111 @@ impl<S: ObjectStore> View<S> {
         self.sequence
     }
 
+    /// Exhaustive exact search over this immutable acknowledged view.
+    pub(crate) fn search_exact_with_options(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
+        Ok(self.search_exact_with_reads(query, k, filter, options)?.0)
+    }
+
+    pub(crate) fn search_exact_with_reads(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<(Vec<QueryHit>, RemoteReads)> {
+        let query = self.config.query(query)?;
+        if k == 0 {
+            return Ok((Vec::new(), RemoteReads::default()));
+        }
+        let mut heap = BinaryHeap::new();
+        let mut reads = RemoteReads::default();
+        self.scan_live_with_reads(&mut reads, |id, vector, metadata| {
+            if matches_filter(metadata, filter) {
+                consider_with(&mut heap, k, self.config, &query, id, vector, || {
+                    (
+                        options.include_metadata.then(|| metadata.clone()),
+                        options.include_vector.then(|| vector.to_vec()),
+                    )
+                });
+            }
+            Ok(())
+        })?;
+        let mut results: Vec<_> = heap.into_iter().map(|ranked| ranked.0).collect();
+        results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        Ok((results, reads))
+    }
+
+    /// Visit each live point in this published root and tail once.
+    pub(crate) fn scan_live(
+        &self,
+        visit: impl FnMut(u64, &[f32], &BTreeMap<String, String>) -> Result<()>,
+    ) -> Result<()> {
+        self.scan_live_with_reads(&mut RemoteReads::default(), visit)
+    }
+
+    fn scan_live_with_reads(
+        &self,
+        reads: &mut RemoteReads,
+        mut visit: impl FnMut(u64, &[f32], &BTreeMap<String, String>) -> Result<()>,
+    ) -> Result<()> {
+        let expected = self
+            .latest
+            .iter()
+            .filter(|(id, _)| !self.tail.contains_key(id))
+            .count();
+        let mut seen = 0;
+        for (run_ordinal, run) in self.root.runs.iter().enumerate() {
+            for (block_ordinal, reference) in run.blocks.iter().enumerate() {
+                let block = self.read_data_block(reference, reads)?;
+                for record in block.records {
+                    let id = record.id();
+                    if self.tail.contains_key(&id) {
+                        continue;
+                    }
+                    let Some(location) = self.latest.get(&id) else {
+                        continue;
+                    };
+                    if location.run != run_ordinal
+                        || location.entry.block as usize != block_ordinal
+                        || location.entry.sequence != record.sequence
+                    {
+                        continue;
+                    }
+                    if location.entry.deleted != matches!(record.mutation, Mutation::Delete { .. })
+                    {
+                        return Err(Error::Corrupt(
+                            "segmented directory deletion flag mismatch".into(),
+                        ));
+                    }
+                    seen += 1;
+                    if let Mutation::Put {
+                        vector, metadata, ..
+                    } = record.mutation
+                    {
+                        visit(id, &vector, &metadata)?;
+                    }
+                }
+            }
+        }
+        if seen != expected {
+            return Err(Error::Corrupt(
+                "segmented directory entry missing from blocks".into(),
+            ));
+        }
+        for (&id, (_, document)) in self.tail.iter() {
+            if let Some(document) = document {
+                visit(id, &document.vector, &document.metadata)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Read and authenticate one block through the cache. Corrupt cached
     /// bytes are discarded and read again. The cache lock is never held
     /// across a remote read, so concurrent queries do not wait on it.
@@ -2915,25 +3020,8 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         filter: &[(&str, &str)],
         options: QueryOptions,
     ) -> Result<Vec<QueryHit>> {
-        let query = self.config.query(query)?;
-        if k == 0 {
-            return Ok(Vec::new());
-        }
-        let mut heap = BinaryHeap::new();
-        self.scan_live(|id, vector, metadata| {
-            if matches_filter(metadata, filter) {
-                consider_with(&mut heap, k, self.config, &query, id, vector, || {
-                    (
-                        options.include_metadata.then(|| metadata.clone()),
-                        options.include_vector.then(|| vector.to_vec()),
-                    )
-                });
-            }
-            Ok(())
-        })?;
-        let mut results: Vec<_> = heap.into_iter().map(|ranked| ranked.0).collect();
-        results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
-        Ok(results)
+        self.view()
+            .search_exact_with_options(query, k, filter, options)
     }
 
     /// Visit every live document exactly once: authenticated current records
@@ -2941,59 +3029,9 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// Fails if any directory entry is missing from its block.
     pub fn scan_live(
         &self,
-        mut visit: impl FnMut(u64, &[f32], &BTreeMap<String, String>) -> Result<()>,
+        visit: impl FnMut(u64, &[f32], &BTreeMap<String, String>) -> Result<()>,
     ) -> Result<()> {
-        let expected = self
-            .latest
-            .iter()
-            .filter(|(id, _)| !self.tail.contains_key(id))
-            .count();
-        let mut seen = 0;
-        let view = self.view();
-        for (run_ordinal, run) in self.root.runs.iter().enumerate() {
-            for (block_ordinal, reference) in run.blocks.iter().enumerate() {
-                let block = view.read_data_block(reference, &mut RemoteReads::default())?;
-                for record in block.records {
-                    let id = record.id();
-                    if self.tail.contains_key(&id) {
-                        continue;
-                    }
-                    let Some(location) = self.latest.get(&id) else {
-                        continue;
-                    };
-                    if location.run != run_ordinal
-                        || location.entry.block as usize != block_ordinal
-                        || location.entry.sequence != record.sequence
-                    {
-                        continue;
-                    }
-                    if location.entry.deleted != matches!(record.mutation, Mutation::Delete { .. })
-                    {
-                        return Err(Error::Corrupt(
-                            "segmented directory deletion flag mismatch".into(),
-                        ));
-                    }
-                    seen += 1;
-                    if let Mutation::Put {
-                        vector, metadata, ..
-                    } = record.mutation
-                    {
-                        visit(id, &vector, &metadata)?;
-                    }
-                }
-            }
-        }
-        if seen != expected {
-            return Err(Error::Corrupt(
-                "segmented directory entry missing from blocks".into(),
-            ));
-        }
-        for (&id, (_, document)) in self.tail.iter() {
-            if let Some(document) = document {
-                visit(id, &document.vector, &document.metadata)?;
-            }
-        }
-        Ok(())
+        self.view().scan_live(visit)
     }
 
     /// Freeze an acknowledged prefix for publication. Subsequent writes may
@@ -3874,6 +3912,75 @@ mod tests {
     use super::*;
     use crate::{store::LocalStore, Metric};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn published_view_exact_scan_freezes_root_and_tail() {
+        let config = Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut db =
+            SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config).unwrap();
+        let put = |id, color: &str| Mutation::Put {
+            id,
+            vector: vec![id as f32, 0.],
+            metadata: BTreeMap::from([("color".into(), color.into())]),
+        };
+        db.apply_request(retry::Request {
+            id: retry::RequestId {
+                boundary: 0,
+                nonce: [1; 16],
+            },
+            conditions: Vec::new(),
+            mutations: vec![put(1, "blue"), put(2, "red")],
+        })
+        .unwrap();
+        db.seal_delta().unwrap();
+        db.apply_request(retry::Request {
+            id: retry::RequestId {
+                boundary: db.sequence(),
+                nonce: [2; 16],
+            },
+            conditions: Vec::new(),
+            mutations: vec![put(3, "blue")],
+        })
+        .unwrap();
+        let view = db.view();
+        let expected = db
+            .search_exact_with_options(&[3., 0.], 10, &[("color", "blue")], QueryOptions::default())
+            .unwrap();
+        assert_eq!(
+            view.search_exact_with_options(
+                &[3., 0.],
+                10,
+                &[("color", "blue")],
+                QueryOptions::default()
+            )
+            .unwrap(),
+            expected
+        );
+        db.apply_request(retry::Request {
+            id: retry::RequestId {
+                boundary: db.sequence(),
+                nonce: [3; 16],
+            },
+            conditions: Vec::new(),
+            mutations: vec![Mutation::Delete { id: 1 }, put(4, "blue")],
+        })
+        .unwrap();
+        let mut ids = Vec::new();
+        view.scan_live(|id, _, metadata| {
+            if matches_filter(metadata, &[("color", "blue")]) {
+                ids.push(id);
+            }
+            Ok(())
+        })
+        .unwrap();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(view.sequence(), 2);
+    }
 
     struct PropertyRng(u64);
 

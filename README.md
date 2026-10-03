@@ -175,7 +175,9 @@ not configurable through the environment.
 | Endpoint | Purpose |
 |---|---|
 | [`POST /v1/write`](docs/API.md#post-v1write) | Atomic batch `{"upsert":[...],"delete":[...],"request_id":{...}}` (up to 100 operations); returns `sequence` and `request_id` |
-| [`POST /v1/query`](docs/API.md#post-v1query) | `{"vector":[...],"k":10,"filter":{...},"include_metadata":false,"include_vector":false}` |
+| [`POST /v1/query`](docs/API.md#post-v1query) | `{"vector":[...],"k":10,"filter":{...},"exact":false,"include_metadata":false,"include_vector":false}` |
+| [`POST /v1/points/get`](docs/API.md#post-v1pointsget) | Get 1 to 1000 IDs in one acknowledged view; optional vector and metadata fields |
+| [`POST /v1/scan`](docs/API.md#post-v1scan) | Count and page through live points by equality filter and ascending ID |
 | [`GET /v1/points/{id}`](docs/API.md#get-v1pointsid) | Current vector and metadata, or `404` |
 | [`GET /v1/requests/{boundary}/{nonce}`](docs/API.md#get-v1requestsboundarynonce) | Resolve a write whose response was lost |
 | [`GET /v1/status`](docs/API.md#get-v1status) | Sequence, queue, cache warm-up and clustering state |
@@ -277,6 +279,19 @@ and [benchmarks/](benchmarks/SUMMARY.md).
 The [architecture guide](docs/ARCHITECTURE.md) includes an AWS deployment
 diagram. [DESIGN.md](DESIGN.md) states the formats, invariants, and crash and
 recovery semantics in full.
+
+## Python client and agent memory
+
+[`clients/python`](clients/python/README.md) is a dependency-free Python
+client for the whole HTTP API, with safe write retries, paging scans, count
+and delete-by-filter. Its optional MCP server gives AI agents (Claude Code,
+Claude Desktop, Cursor and other MCP clients) durable `remember`, `recall`
+and `forget` tools backed by Glider:
+
+```sh
+pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"
+claude mcp add glider -- glider-mcp
+```
 
 ## Library
 

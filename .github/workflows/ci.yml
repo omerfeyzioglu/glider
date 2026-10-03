@@ -154,6 +154,11 @@ jobs:
       - name: Run recovery drills
         run: python3 tools/drills.py --seed 29
 
+      - name: Test the Python client against the server
+        env:
+          GLIDER_SERVER_BIN: target/release/glider-server
+        run: python3 -m unittest discover -s clients/python/tests
+
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 30
