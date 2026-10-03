@@ -11,7 +11,7 @@
 <meta property="og:description" content="Single-node, crash-safe vector database in Rust. Durable state lives in S3; local RAM and SSD only accelerate reads. Built to go far on less.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="playground.css">
+<link rel="stylesheet" href="sim.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -287,42 +287,82 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
   </div>
 </div>
 
-<section id="playground" aria-labelledby="pg-title">
+<section id="playground" aria-labelledby="sim-title">
   <div class="wrap">
     <div class="head">
-      <p class="eyebrow">Playground</p>
-      <h2 id="pg-title">The life of a query.</h2>
-      <p>Your data lives in S3. RAM and SSD only make it fast. Press each step and watch where the data goes, and what survives a crash.</p>
+      <p class="eyebrow">Storage playground</p>
+      <h2 id="sim-title">A million vectors. Three places to live.</h2>
+      <p>Pick a spot, follow the blocks, then pull the plug.</p>
     </div>
-    <div class="sheet pg" id="pg-app">
-      <ol class="pg-steps" id="pg-steps" aria-label="Steps"></ol>
-      <div class="pg-stage" id="pg-stage">
-        <div class="pg-node pg-client" data-node="client"><strong>Client</strong><span>Your app</span></div>
-        <div class="pg-machine" id="pg-machine">
-          <p class="pg-machine-label">One server &middot; disposable</p>
-          <div class="pg-node pg-server" data-node="server"><strong>Glider server</strong><span id="pg-server-state">Ready</span></div>
-          <div class="pg-node pg-tier" data-node="ram"><strong>RAM</strong><span>Fastest, in the process</span><i class="pg-fill" aria-hidden="true"></i></div>
-          <div class="pg-node pg-tier" data-node="ssd"><strong>SSD cache</strong><span>Local disk</span><i class="pg-fill" aria-hidden="true"></i></div>
+    <p class="sim-disclaimer">Simulation of Glider's storage layout — illustrative, not a benchmark</p>
+    <div class="sheet sim" id="sim-app">
+      <div class="sim-toolbar">
+        <label class="sim-dataset">Dataset <select id="sim-size"><option value="100000">100K vectors</option><option value="1000000" selected>1M vectors</option><option value="10000000">10M vectors</option></select></label>
+        <button type="button" id="sim-stream" aria-pressed="false">Stream writes</button>
+        <button type="button" id="sim-seal">Seal writes</button>
+        <button type="button" id="sim-crash" class="sim-danger">Crash <code>(kill -9)</code></button>
+        <button type="button" id="sim-restart" disabled>Restart</button>
+        <button type="button" id="sim-reset">Reset</button>
+        <label class="sim-check"><input type="checkbox" id="sim-lose-disk"> Lose the local disk too</label>
+      </div>
+      <div class="sim-layout">
+        <div class="sim-map-panel">
+          <div class="sim-map-heading"><strong id="sim-count">1,000,000 vectors</strong><span id="sim-status">PROCESS ONLINE</span></div>
+          <div class="sim-map-wrap">
+            <canvas id="sim-map" role="img" aria-label="Two-dimensional vector projection; use the three preset query buttons below for keyboard access."></canvas>
+            <span class="sim-map-tip">Click anywhere to query ↗</span>
+            <span class="sim-map-axis">2D projection / fixed seed 0x61de2026</span>
+            <div class="sim-offline" id="sim-offline" hidden><strong>Process killed.</strong><span>The dots are still durable in S3.</span></div>
+          </div>
+          <div class="sim-map-key"><span><i class="sim-dot"></i> Vectors, coloured by cluster</span><span><i class="sim-center"></i> Centroids</span><span><i class="sim-write-dot"></i> Recent writes</span></div>
+          <div class="sim-presets" aria-label="Preset queries"><span>Query a neighbourhood</span><button type="button" data-query="0">Northwest</button><button type="button" data-query="1">Centre</button><button type="button" data-query="2">Southeast</button><button type="button" id="sim-again" disabled>Run again</button></div>
+          <ol class="sim-phases" aria-label="Query stages"><li data-phase="0">01 Route</li><li data-phase="1">02 Select</li><li data-phase="2">03 Fetch</li><li data-phase="3">04 Rerank</li></ol>
+          <p id="sim-caption" class="sim-caption" role="status" aria-live="polite">Click the map to route a query through centroids and cached blocks.</p>
+          <dl id="sim-query-card" class="sim-query-card" aria-label="Current query statistics">
+            <div><dt>Read from S3</dt><dd id="sim-remote">—</dd></div>
+            <div><dt>Served from cache</dt><dd id="sim-cache">—</dd></div>
+            <div><dt>Simulated latency</dt><dd id="sim-latency">—</dd></div>
+          </dl>
+          <p class="sim-loss">Acknowledged writes lost: <strong id="sim-lost">0</strong></p>
+          <details class="sim-details sim-query-details"><summary>Details</summary>
+            <dl class="sim-query-extra"><div><dt>Clusters probed</dt><dd id="sim-probes">—</dd></div><div><dt>Blocks read / candidates</dt><dd id="sim-reads">—</dd></div><div><dt>RAM / SSD / S3 hits</dt><dd id="sim-sources">—</dd></div></dl>
+            <div id="sim-blocks" class="sim-query-blocks" aria-label="Candidate block reads"><span>Up to 12 candidate blocks · 8 range GETs · 1 MiB remote</span></div>
+            <p class="sim-result" id="sim-results">Top-10 neighbours appear as connected points after a query.</p>
+            <p>Latency = 1 ms compute + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 reads. Illustrative, not measured.</p>
+          </details>
         </div>
-        <div class="pg-node pg-tier pg-s3" data-node="s3"><strong>S3</strong><span>Durable, source of truth</span><i class="pg-fill" aria-hidden="true"></i></div>
-        <span class="pg-token" id="pg-token" aria-hidden="true" hidden></span>
+        <div class="sim-tiers">
+          <article class="sim-tier sim-s3" id="sim-s3">
+            <header><h3>S3</h3><strong id="sim-s3-size"></strong></header>
+            <p>Every acknowledged write is durable here.</p>
+            <div class="sim-objects" id="sim-objects"></div>
+            <details class="sim-details"><summary>Details</summary><div id="sim-object-details"></div><p id="sim-s3-note"></p><p>Immutable logs acknowledge writes; a published root selects sealed packs, indexes and manifests.</p></details>
+          </article>
+          <article class="sim-tier" id="sim-ssd">
+            <header><h3>SSD</h3><strong id="sim-ssd-size"></strong></header>
+            <p>Fetched blocks stay here for the next query.</p>
+            <div class="sim-slots" id="sim-ssd-slots" role="img" aria-label="SSD cache occupancy"></div>
+            <strong class="sim-tier-number" id="sim-ssd-count"></strong>
+            <details class="sim-details"><summary>Details</summary>
+              <div class="sim-ssd-controls"><label class="sim-check"><input type="checkbox" id="sim-warm"> Background warm-up</label><label>Capacity <select id="sim-capacity"><option value="256">256 MiB</option><option value="1">1 MiB · see eviction</option></select></label></div>
+              <p id="sim-ssd-note"></p><p>Slots show capacity, not physical blocks. Least recently used blocks are evicted when full; losing this disk loses no acknowledged writes.</p>
+            </details>
+          </article>
+          <article class="sim-tier sim-ram" id="sim-ram">
+            <header><h3>RAM</h3><strong id="sim-ram-size"></strong></header>
+            <p>Routing and recent data live in process memory.</p>
+            <div class="sim-memory" id="sim-memory"></div>
+            <details class="sim-details"><summary>Details</summary><div id="sim-memory-details"></div><p>Full vectors enter RAM only as fetched blocks or unsealed writes. The hot block cache is bounded to 4 MiB; a crash clears all process memory.</p></details>
+          </article>
+          <div class="sim-recovery" id="sim-recovery" hidden><label for="sim-progress">Rebuilding from S3</label><progress id="sim-progress" value="0" max="1"></progress></div>
+        </div>
       </div>
-      <div class="pg-say">
-        <p class="pg-caption" id="pg-caption" role="status" aria-live="polite"></p>
-        <button type="button" class="pg-reset" id="pg-reset">Start over</button>
-      </div>
-      <dl class="pg-counters">
-        <div><dt>Where the answer came from</dt><dd id="pg-source"></dd><dd class="pg-note" id="pg-source-note"></dd></div>
-        <div class="pg-lost"><dt>Acknowledged writes lost</dt><dd id="pg-lost">0</dd><dd class="pg-note" id="pg-lost-note"></dd></div>
-      </dl>
-      <div class="pg-answer">
-        <p class="pg-question">Query: <q id="pg-question"></q> <span id="pg-scope"></span></p>
-        <ol class="pg-results" id="pg-results" aria-label="Top 3 results"></ol>
-        <p class="pg-empty" id="pg-empty"></p>
-      </div>
+      <div id="sim-query-flights" class="sim-flights" aria-hidden="true" hidden></div>
+      <span class="sim-flight" id="sim-flight" aria-hidden="true" hidden>block</span>
+      <details class="sim-model-note"><summary>How the illustration is sized and timed</summary><p>30,000 sampled dots stand for the selected dataset, already sealed and clustered (including the 100K example). Seeded Gaussian-mixture islands with Poisson-disc centres have varied populations averaging about 4,000 vectors per centroid. Projected islands can overlap; cluster membership represents the original embedding. Routing uses the M31 profile's 32 probes, scaled to 4 for 100K. Reranking is exact within selected blocks and the tail; the overall search is approximate. The projection and five-bit scores use two dimensions, while sizes assume 128-dimensional float32 vectors: 24 B per directory slot, 80 B of five-bit codes + 4 B ID offset + 8 B posting sequence per sealed row, 512 B per centroid, and 640 B per tail/log row. Blocks are sized proportionally up to 120 KiB; packs hold up to eight blocks (960 KiB) plus sketches. Compression, allocator overhead, routing cache files and retired objects are omitted. RAM's hot cache is 4 MiB; SSD defaults to 256 MiB. Latency = 1 ms compute + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 range GETs. Each batch adds 100 new IDs; 32 log objects trigger sealing. Restart compresses the real lease wait and recovery into five visual stages.</p></details>
     </div>
-    <p class="pg-cta"><a class="btn sm go" href="#quickstart">Try it on your own data <span aria-hidden="true">&rarr;</span> Quickstart</a></p>
-    <noscript><p>Enable JavaScript to step through the playground, or <a href="#quickstart">run Glider locally</a>.</p></noscript>
+    <p class="sim-cta"><a class="btn sm go" href="#quickstart">Try it on your own data <span aria-hidden="true">→</span> Quickstart</a></p>
+    <noscript><p>Enable JavaScript for the storage simulation, or <a href="#quickstart">run Glider locally</a>.</p></noscript>
   </div>
 </section>
 
@@ -615,6 +655,6 @@ client = Client(<span class="s">"http://localhost:8080"</span>)
   });
 })();
 </script>
-<script type="module" src="playground.mjs"></script>
+<script type="module" src="sim-view.mjs"></script>
 </body>
 </html>
