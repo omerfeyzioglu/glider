@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Website playground explicitly labels synthetic data and estimated sizes and
+  latency, shows computed neighbor IDs and distances, and uses the default
+  multi-collection API in hero examples.
 - Scale multi-collection startup, catalog listing, and graceful shutdown with background cleanup and bounded concurrent reads and closes.
 
 ### Added

@@ -64,7 +64,9 @@ see [installation](docs/INSTALL.md); every setting is listed in
   lease, fences it at the object store and replays the log; no operator step
   is needed after a crash.
 - **Retry-safe writes.** Every write carries a request ID; resending it
-  returns the original outcome instead of applying the write twice.
+  within the retained 128-commit window returns the original outcome
+  instead of applying the write twice. Supply and keep the ID before sending so a lost
+  response can be retried ([retry contract](docs/API.md#request-ids-and-retries)).
 - **Collections.** One server creates and serves many collections, each with
   its own dimension and metric (squared Euclidean, Manhattan or cosine).
 - **Metadata filters.** Equality, set, existence, numeric and logical
@@ -107,16 +109,17 @@ four readers run concurrently:
 | Write p95 | 86.9 ms |
 | Open / reopen | 2.93 / 3.84 s |
 
-The run lost no acknowledged writes and returned equal results after cache
-loss and backup restore. Methodology and raw results are in the
-[benchmark report](benchmarks/M39.md#root-manifests-and-fast-open-on-s3) and
+The run at revision `35f9b46` lost no acknowledged writes and returned equal
+results after cache loss and backup restore. Methodology and raw results are in the
+[benchmark report](benchmarks/M39.md#current-main-on-s3) and
 [BENCHMARKS.md](BENCHMARKS.md).
 
 Many small collections on one server, same instance and S3 Standard:
 10,000 collections of 1,000 vectors (10,000,000 vectors) were created and
 loaded in 22 minutes with the server killed (`SIGKILL`) halfway; every
-tenant was verified with no lost or duplicated write. Warm queries ran at
-2,457 per second with a p95 of 18.5 ms and recall@10 of 1.0; a cold tenant
+tenant was verified with no lost or duplicated write. Warm queries over 64
+active collections ran at 2,457 per second with a p95 of 18.5 ms and
+recall@10 of 1.0; a cold tenant
 opened from S3 and answered its first query in 716 ms (p95). Idle
 collections close, so they cost no S3 requests
 ([details](BENCHMARKS.md#multi-tenant-server-scenario)).
@@ -160,9 +163,12 @@ pattern; [DESIGN.md](DESIGN.md) specifies formats, invariants and recovery.
   server waits for the writer lease (10 s by default) before taking over.
 - Filtered queries are approximate and may return fewer than `k` results
   unless they use `exact: true` or the collection's resident filter.
+- Cache loss can lower approximate recall as well as increase latency;
+  acknowledged data remains durable. Use `exact: true` for exhaustive results.
 - A collection's dimension and metric are fixed when it is created.
 - The server speaks plain HTTP; terminate TLS in a reverse proxy.
-- Opening a very large collection from S3 takes a few seconds.
+- The measured 1M-vector collection opens from S3 in a few seconds;
+  larger collections have no fixed open-time guarantee.
 
 ## Contributing
 
