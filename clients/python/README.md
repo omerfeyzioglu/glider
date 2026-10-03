@@ -57,7 +57,7 @@ that includes them.
 | `write(upsert=(), delete=())` | One atomic batch of at most 100 operations; returns the commit sequence |
 | `upsert(points)`, `delete(ids)` | Shorthands for `write` |
 | `upsert_many(points, batch_size=100)` | Any number of points in batches; returns the count written. **Not atomic across batches**: after an error, earlier batches stay committed. Upserts are idempotent, so repeat the call. |
-| `query(vector, k=10, filter=None, exact=False, include_metadata=False, include_vector=False)` | Nearest neighbors as `Hit` objects. `filter` is an equality conjunction on metadata. Unfiltered and most filtered queries are approximate; `exact=True` searches exhaustively and, with a filter, returns `min(k, matches)`. |
+| `query(vector, k=10, filter=None, exact=False, include_metadata=False, include_vector=False)` | Nearest neighbors as `Hit` objects. `filter` is a metadata filter: equality, `$in`, `$ne`, numeric ranges and `$and`/`$or`/`$not` ([filters](../../docs/API.md#filters)). Unfiltered and most filtered queries are approximate; `exact=True` searches exhaustively and, with a filter, returns `min(k, matches)`. |
 | `get(id)` | `Point`, or `None` when absent |
 | `get_many(ids, include_vector=True, include_metadata=True)` | List aligned with `ids`; `None` for absent points. Chunks of 1000. |
 | `scan(filter=None, include_metadata=False, page_size=1000)` | Generator over matching IDs (or `Point`s with metadata) in ascending ID order, following the server's cursor |
