@@ -48,6 +48,8 @@ jobs:
         run: python3 tools/check_links.py
 
       - name: Test site playground
+        # Results are checked against the engine by
+        # website_search_matches_clustered_engine; see docs/WEBSITE.md.
         run: |
           node --check site/playground.mjs
           node --test site/playground.test.mjs

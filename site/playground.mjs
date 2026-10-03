@@ -1,59 +1,124 @@
-import {recording, blockSources, fetchedBytes} from './playground-model.mjs';
+import {STEPS, initial, advance, view} from './playground-model.mjs';
+import recording from './search-recording.mjs';
+
 const el = id => document.getElementById(id);
-const state = {query: 0, effort: 'balanced', tier: 'cold', fresh: false};
-function element(tag, className, text) {
-  const node = document.createElement(tag);
-  node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
+const stage = el('pg-stage');
+const token = el('pg-token');
+const nodes = Object.fromEntries([...stage.querySelectorAll('[data-node]')].map(n => [n.dataset.node, n]));
+const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+let state = initial();
+let busy = false;
+
+function node(tag, className, text) {
+  const n = document.createElement(tag);
+  if (className) n.className = className;
+  if (text !== undefined) n.textContent = text;
+  return n;
 }
-async function start() {
-  const response = await fetch(new URL('./explorer-data.json', import.meta.url));
-  if (!response.ok) throw new Error('Query records unavailable');
-  const data = await response.json();
-  function render() {
-    const run = recording(data, state);
-    el('pg-probes').textContent = `${run.probed.length} / ${data.centroids} clusters`;
-    el('pg-clusters').replaceChildren(...Array.from({length: data.centroids}, (_, id) => {
-      const node = element('span', `pg-cluster${run.probed.includes(id) ? ' active' : ''}`, String(id).padStart(2, '0'));
-      node.title = `Cluster ${id}: ${run.probed.includes(id) ? 'probed' : 'not probed'}`;
-      return node;
-    }));
-    el('pg-block-count').textContent = `${run.selected.length} / ${data.blocks.length} blocks`;
-    el('pg-blocks').replaceChildren(...blockSources(data, run).map((block, index) => {
-      const node = element('span', `pg-block ${block.source}`);
-      node.style.setProperty('--delay', `${Math.min(index * 10, 350)}ms`);
-      const description = `Block ${block.id} · cluster ${block.cluster} · ${block.rows} rows · ${block.source === 'object' ? 'object storage' : block.source}`;
-      node.title = description;
-      node.setAttribute('aria-label', description);
-      node.setAttribute('role', 'img');
-      return node;
-    }));
-    el('pg-results').replaceChildren(...run.hits.map(hit => {
-      const row = element('li', hit.tail ? 'pg-new' : '');
-      row.append(element('span', 'pg-id', `#${hit.id}`), element('span', 'pg-match', hit.tail ? 'NEW' : hit.exact ? '✓' : ''), element('span', 'pg-distance', hit.distance.toFixed(4)));
-      row.title = hit.tail ? 'Acknowledged vector in the log tail' : hit.exact ? 'Matches an exact top-5 neighbor' : 'Approximate neighbor';
-      return row;
-    }));
-    el('pg-recall').textContent = `${Math.round(run.recall * 100)}%`;
-    el('pg-reads').textContent = run.requests;
-    el('pg-bytes').textContent = fetchedBytes(run.bytes);
-    el('pg-hits').textContent = run.ram_hits + run.ssd_hits;
-    el('pg-story').textContent = state.tier === 'cold'
-      ? `${run.requests} range reads fetch ${run.selected.length} blocks. The remaining blocks stay in object storage.`
-      : `${run.selected.length} blocks read from ${state.tier === 'ssd' ? 'SSD' : 'RAM'}. ${run.requests === 0 ? 'The query makes zero object-store reads.' : `${run.requests} object-store reads remain.`}`;
-    el('pg-fresh').setAttribute('aria-pressed', String(state.fresh));
-    el('pg-fresh').textContent = state.fresh ? '↶ Reset fresh write' : '+ Add a fresh vector';
-    el('pg-tail').textContent = state.fresh
-      ? `Write acknowledged at sequence ${run.sequence}. The new vector is already the nearest neighbor.`
-      : 'New writes join the search from the in-memory log tail. ✓ marks an exact top-5 match; scores are squared L2.';
-    document.querySelectorAll('[data-tier]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.tier === state.tier)));
+
+const buttons = STEPS.map((step, index) => {
+  const button = node('button', 'pg-step');
+  button.type = 'button';
+  button.append(node('span', 'pg-step-num', String(index + 1)), node('strong', '', step.title), node('span', 'pg-step-detail', step.detail));
+  button.addEventListener('click', () => run(index));
+  const item = node('li');
+  item.append(button);
+  el('pg-steps').append(item);
+  return button;
+});
+
+el('pg-question').textContent = recording.question;
+el('pg-scope').textContent = `Top 3 of ${recording.documents} Glider docs pages`;
+el('pg-results').append(...recording.results.map(doc => {
+  const item = node('li');
+  const link = node('a', '', doc.title);
+  link.href = doc.url;
+  item.append(link, node('p', '', doc.text));
+  return item;
+}));
+
+function setTier(name, full) {
+  nodes[name].classList.toggle('full', full);
+}
+
+function render() {
+  const v = view(state);
+  for (const name of ['ram', 'ssd', 's3']) setTier(name, v.tiers[name]);
+  el('pg-machine').classList.toggle('down', v.server === 'Killed');
+  el('pg-server-state').textContent = v.server;
+  el('pg-caption').textContent = v.caption;
+  el('pg-source').textContent = v.source.value;
+  el('pg-source-note').textContent = v.source.note;
+  el('pg-lost').textContent = String(v.lost);
+  el('pg-lost-note').textContent = v.lostNote;
+  el('pg-app').classList.toggle('pg-has-results', v.results);
+  el('pg-empty').textContent = state.done === 4 ? 'The server is down. Restart it to query again.' : 'Results appear after the first query.';
+  buttons.forEach((button, index) => {
+    const next = index === state.done;
+    button.classList.toggle('running', busy && next);
+    button.classList.toggle('next', next && !busy);
+    button.classList.toggle('done', index < state.done);
+    button.setAttribute('aria-disabled', String(busy || !next));
+    if (next) button.setAttribute('aria-current', 'step'); else button.removeAttribute('aria-current');
+  });
+  el('pg-reset').hidden = state.done === 0;
+  el('pg-reset').setAttribute('aria-disabled', String(busy));
+}
+
+function center(name) {
+  const box = nodes[name].getBoundingClientRect();
+  const origin = stage.getBoundingClientRect();
+  return [box.left - origin.left + box.width / 2, box.top - origin.top + box.height / 2];
+}
+
+async function travel(hops, after) {
+  for (const hop of hops) {
+    const [x0, y0] = center(hop.from);
+    const [x1, y1] = center(hop.to);
+    token.textContent = hop.label;
+    token.hidden = false;
+    await token.animate([
+      {transform: `translate(calc(${x0}px - 50%), calc(${y0}px - 50%))`},
+      {transform: `translate(calc(${x1}px - 50%), calc(${y1}px - 50%))`},
+    ], {duration: 560, easing: 'cubic-bezier(.5,0,.3,1)', fill: 'forwards'}).finished;
+    if (hop.to in after.tiers && after.tiers[hop.to]) setTier(hop.to, true);
   }
-  el('pg-query').addEventListener('change', event => { state.query = Number(event.target.value); render(); });
-  el('pg-effort').addEventListener('change', event => { state.effort = event.target.value; render(); });
-  document.querySelectorAll('[data-tier]').forEach(button => button.addEventListener('click', () => { state.tier = button.dataset.tier; render(); }));
-  el('pg-fresh').addEventListener('click', () => { state.fresh = !state.fresh; render(); });
-  render();
-  el('pg-app').hidden = false;
+  token.hidden = true;
 }
-start().catch(() => { el('pg-error').hidden = false; });
+
+async function run(index) {
+  if (busy || index !== state.done) return;
+  const hadFocus = document.activeElement === buttons[index];
+  const next = advance(state);
+  const after = view(next);
+  busy = true;
+  render();
+  stage.scrollIntoView({block: 'nearest', behavior: motion.matches ? 'auto' : 'smooth'});
+  if (!motion.matches) {
+    if (STEPS[index].id === 'crash') {
+      el('pg-machine').classList.add('crashing');
+      await new Promise(resolve => setTimeout(resolve, 650));
+      el('pg-machine').classList.remove('crashing');
+    } else {
+      if (STEPS[index].id === 'restart') {
+        el('pg-machine').classList.remove('down');
+        el('pg-server-state').textContent = 'Taking over';
+      }
+      el('pg-caption').textContent = after.caption;
+      await travel(after.hops, after);
+    }
+  }
+  busy = false;
+  state = next;
+  render();
+  if (hadFocus) (buttons[state.done] ?? el('pg-reset')).focus();
+}
+
+el('pg-reset').addEventListener('click', () => {
+  if (busy) return;
+  state = initial();
+  render();
+  buttons[0].focus();
+});
+
+render();
