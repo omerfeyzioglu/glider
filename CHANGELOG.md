@@ -6,6 +6,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Scale multi-collection startup, catalog listing, and graceful shutdown with background cleanup and bounded concurrent reads and closes.
+
 ### Added
 
 - Built-in web console at `/console` for server status, collection management,
