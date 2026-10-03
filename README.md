@@ -175,7 +175,9 @@ not configurable through the environment.
 | Endpoint | Purpose |
 |---|---|
 | [`POST /v1/write`](docs/API.md#post-v1write) | Atomic batch `{"upsert":[...],"delete":[...],"request_id":{...}}` (up to 100 operations); returns `sequence` and `request_id` |
-| [`POST /v1/query`](docs/API.md#post-v1query) | `{"vector":[...],"k":10,"filter":{...},"include_metadata":false,"include_vector":false}` |
+| [`POST /v1/query`](docs/API.md#post-v1query) | `{"vector":[...],"k":10,"filter":{...},"exact":false,"include_metadata":false,"include_vector":false}` |
+| [`POST /v1/points/get`](docs/API.md#post-v1pointsget) | Get 1 to 1000 IDs in one acknowledged view; optional vector and metadata fields |
+| [`POST /v1/scan`](docs/API.md#post-v1scan) | Count and page through live points by equality filter and ascending ID |
 | [`GET /v1/points/{id}`](docs/API.md#get-v1pointsid) | Current vector and metadata, or `404` |
 | [`GET /v1/requests/{boundary}/{nonce}`](docs/API.md#get-v1requestsboundarynonce) | Resolve a write whose response was lost |
 | [`GET /v1/status`](docs/API.md#get-v1status) | Sequence, queue, cache warm-up and clustering state |
