@@ -93,15 +93,16 @@ class Vectors:
             if len(self.data) % stride:
                 raise ValueError(f"{path}: invalid fvecs byte length")
             self.count = len(self.data) // stride
-            if self.count < count:
-                raise ValueError(f"{path}: need {count} vectors, found {self.count}")
+            # More tenant rows than the file holds wrap around: tenants are
+            # isolated collections, so a repeated vector only repeats data
+            # across tenants. The report records the reuse.
 
     def vector(self, row):
         if self.data is None:
             generator = random.Random(self.seed + self.synthetic_offset + row)
             return [generator.uniform(-1, 1) for _ in range(DIMENSIONS)]
         stride = 4 + DIMENSIONS * 4
-        start = row * stride
+        start = (row % self.count) * stride
         if struct.unpack_from("<i", self.data, start)[0] != DIMENSIONS:
             raise ValueError(f"{self.path}: row {row} is not {DIMENSIONS}-dimensional")
         return list(struct.unpack_from(f"<{DIMENSIONS}f", self.data, start + 4))
@@ -252,7 +253,9 @@ def run(args):
     rng = random.Random(args.seed)
     crash_enabled = args.crash if args.crash is not None else not args.smoke
     dataset = {"base": {"path": str(args.base) if args.base else None,
-                        "sha256": base.fingerprint(), "rows_used": args.tenants * args.per_tenant},
+                        "sha256": base.fingerprint(), "rows_used": args.tenants * args.per_tenant,
+                        "rows_available": base.count,
+                        "rows_reused_across_tenants": args.tenants * args.per_tenant > base.count},
                "query": {"path": str(args.query) if args.query else None,
                          "sha256": query.fingerprint(), "rows_available": query.count},
                "format": "fvecs" if args.base else "synthetic-random-uniform-f32",
