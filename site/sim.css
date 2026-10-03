@@ -29,6 +29,8 @@
 .sim-map-key span{display:flex;align-items:center;gap:6px}
 .sim-map-key i{display:inline-block;width:7px;height:7px;background:#257b83;border-radius:50%}
 .sim-map-key .sim-center{width:10px;height:10px;background:none;border:2px solid var(--navy)}
+.sim-map-key .sim-selected{width:8px;height:8px;background:#FFD08A;border:1px solid #8B531F;box-shadow:0 0 0 3px #F4A26128}
+.sim-map-key .sim-neighbor{width:10px;height:10px;background:var(--orange);border:2px solid var(--paper);box-shadow:0 0 0 1px var(--navy)}
 .sim-map-key .sim-write-dot{background:var(--orange)}
 .sim-presets{display:flex;gap:8px;flex-wrap:wrap;padding:4px 18px 18px;align-items:center}
 .sim-presets>span{flex-basis:100%;font:600 .8rem var(--mono);color:var(--muted)}

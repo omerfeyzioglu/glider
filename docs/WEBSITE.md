@@ -22,6 +22,8 @@ and “Run again” repeats the last point. Query execution fills the caches and
 publishes statistics immediately; the interruptible 1.2-second animation
 only illustrates that completed plan. Each panel keeps technical details
 in a collapsed disclosure.
+Queries highlight sampled members of the selected clusters and mark their
+centres with small dots; the map legend reports the number of clusters searched.
 
 The illustration uses the segmented structures and budgets in
 [DESIGN.md](../DESIGN.md#segmented-serving): 12 candidates, at most 8 remote

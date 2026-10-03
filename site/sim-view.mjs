@@ -81,12 +81,21 @@ function drawBase() {
 function draw() {
   frame = 0;
   ctx.clearRect(0, 0, width, height);
+  ctx.globalAlpha = activeClusters.length ? .48 : 1;
   ctx.drawImage(layer, 0, 0, layer.width, layer.height, 0, 0, width, height);
+  ctx.globalAlpha = 1;
+  // Highlight actual sampled members, rather than implying an ellipse is a
+  // cluster boundary. Small circular centre markers stay round at any aspect.
+  const selected = new Set(activeClusters);
+  ctx.fillStyle = '#F4A261';
+  for (const p of sample) if (selected.has(p.cluster)) ctx.fillRect(p.x * width - .2, p.y * height - .2, 1.8, 1.8);
   for (const id of activeClusters) {
     const c = state.dataset.centroids[id];
-    ctx.fillStyle = '#F07A1A20'; ctx.strokeStyle = '#F4A261'; ctx.lineWidth = 1.4;
-    ctx.beginPath(); ctx.ellipse(c.x * width, c.y * height, c.radius * width + 5, c.radius * height + 5, 0, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
-    ctx.strokeRect(c.x * width - 4, c.y * height - 4, 8, 8);
+    const x = c.x * width, y = c.y * height;
+    ctx.fillStyle = '#F4A26128';
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = '#FFD08A'; ctx.strokeStyle = '#16304F'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
   }
   ctx.fillStyle = '#F07A1A';
   // At most 6,400 visible recent writes; all acknowledged IDs remain in S3.
@@ -179,6 +188,7 @@ function renderInventory() {
 }
 function clearQuery() {
   plan = null; results = []; activeClusters = []; recentBlocks = []; queryPoint = null;
+  el('selected-label').textContent = 'Selected clusters';
   for (const name of ['probes', 'reads', 'sources', 'remote', 'cache', 'latency']) el(name).textContent = '—';
   el('results').textContent = 'Top-10 neighbours appear as connected points after a query.';
   el('result-table').hidden = true;
@@ -189,6 +199,7 @@ function clearQuery() {
   phase(-1); glow(null); invalidate();
 }
 function renderQuery() {
+  el('selected-label').textContent = `${number(plan.clusters.length)} clusters searched`;
   el('probes').textContent = number(plan.clusters.length);
   el('reads').textContent = `${plan.reads.length} / ${plan.candidates.length}`;
   el('sources').textContent = `${plan.sources.ram} / ${plan.sources.ssd} / ${plan.sources.s3}`;
