@@ -11,7 +11,7 @@ use crate::{
     admission::Client,
     retry::{Lookup, Outcome, Request, RequestId},
     segmented::QueryOptions,
-    Mutation,
+    Filter, Mutation,
 };
 use axum::{
     extract::{Extension, FromRef, OriginalUri, Path, Request as HttpRequest, State},
@@ -175,8 +175,8 @@ struct QueryBody {
     vector: Vec<f32>,
     #[serde(default = "default_k")]
     k: usize,
-    #[serde(default)]
-    filter: BTreeMap<String, String>,
+    #[serde(default = "empty_filter")]
+    filter: Value,
     #[serde(default)]
     include_metadata: bool,
     #[serde(default)]
@@ -187,6 +187,10 @@ struct QueryBody {
 
 fn default_k() -> usize {
     10
+}
+
+fn empty_filter() -> Value {
+    json!({})
 }
 
 /// `POST /v1/query`: unfiltered approximate search within the read budget,
@@ -201,6 +205,7 @@ async fn query(
     if body.k == 0 || body.k > 1_000 {
         return Err(bad_request("k must be between 1 and 1000"));
     }
+    let filter = Filter::parse(&body.filter).map_err(bad_request)?;
     let client = client.clone();
     blocking(move || {
         let options = QueryOptions {
@@ -208,13 +213,7 @@ async fn query(
             include_vector: body.include_vector,
         };
         let result = client
-            .query_with_mode(
-                body.vector,
-                body.k,
-                body.filter.into_iter().collect(),
-                options,
-                body.exact,
-            )?
+            .query_with_mode_filter(body.vector, body.k, filter, options, body.exact)?
             .wait()?
             .value;
         Ok(Json(json!({
@@ -292,8 +291,8 @@ async fn batch_get(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScanBody {
-    #[serde(default)]
-    filter: BTreeMap<String, String>,
+    #[serde(default = "empty_filter")]
+    filter: Value,
     after: Option<u64>,
     #[serde(default = "default_scan_limit")]
     limit: usize,
@@ -315,15 +314,11 @@ async fn scan(
     if body.limit == 0 || body.limit > 10_000 {
         return Err(bad_request("limit must be between 1 and 10000"));
     }
+    let filter = Filter::parse(&body.filter).map_err(bad_request)?;
     let client = client.clone();
     blocking(move || {
         let result = client
-            .scan(
-                body.filter.into_iter().collect(),
-                body.after,
-                body.limit,
-                body.include_metadata,
-            )?
+            .scan_filter(filter, body.after, body.limit, body.include_metadata)?
             .wait()?
             .value;
         let mut response =

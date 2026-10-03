@@ -65,10 +65,13 @@ async fn exact_batch_get_and_scan_use_published_view() {
                 .map(|id| Mutation::Put {
                     id,
                     vector: vec![id as f32, 1.0, 0.0],
-                    metadata: BTreeMap::from([(
-                        "color".into(),
-                        if id % 3 == 0 { "blue" } else { "red" }.into(),
-                    )]),
+                    metadata: BTreeMap::from([
+                        (
+                            "color".into(),
+                            if id % 3 == 0 { "blue" } else { "red" }.into(),
+                        ),
+                        ("score".into(), id.to_string()),
+                    ]),
                 })
                 .collect(),
         })
@@ -98,6 +101,60 @@ async fn exact_batch_get_and_scan_use_published_view() {
     assert_eq!(exact["sequence"], sequence);
     assert_eq!(exact["results"].as_array().unwrap().len(), 41);
     assert!(approximate["results"].as_array().unwrap().len() < 41);
+
+    let rich = json!({"$and":[{"color":{"$in":["red","blue"]}},{"score":{"$gt":10,"$lte":20}},{"$not":{"color":{"$eq":"green"}}}]});
+    let (status, rich_exact) = call(
+        &app,
+        "/v1/query",
+        json!({"vector":[15.0,1.0,0.0],"k":20,"filter":rich,"exact":true,"include_metadata":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rich_exact}");
+    assert_eq!(rich_exact["results"].as_array().unwrap().len(), 10);
+    for hit in rich_exact["results"].as_array().unwrap() {
+        let id = hit["id"].as_u64().unwrap();
+        assert!((11..=20).contains(&id));
+        assert_eq!(hit["metadata"]["score"], id.to_string());
+    }
+    let (status, rich_approx) = call(
+        &app,
+        "/v1/query",
+        json!({"vector":[15.0,1.0,0.0],"k":20,"filter":rich}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rich_approx}");
+    for hit in rich_approx["results"].as_array().unwrap() {
+        assert!((11..=20).contains(&hit["id"].as_u64().unwrap()));
+    }
+    let (status, rich_scan) = call(&app, "/v1/scan", json!({"filter":rich,"limit":20})).await;
+    assert_eq!(status, StatusCode::OK, "{rich_scan}");
+    assert_eq!(rich_scan["matched"], 10);
+    assert_eq!(rich_scan["ids"], json!((11..=20).collect::<Vec<_>>()));
+    let mut too_deep = json!({});
+    for _ in 0..9 {
+        too_deep = json!({"$not":too_deep});
+    }
+    let too_many = Value::Object((0..65).map(|n| (n.to_string(), json!("v"))).collect());
+    for bad in [
+        json!(null),
+        json!([]),
+        json!({"$wat":[]}),
+        json!({"x":{"$wat":1}}),
+        json!({"x":{"$gt":"1"}}),
+        json!({"$and":{}}),
+        json!({"x":{"$in":vec!["a";1025]}}),
+        too_deep,
+        too_many,
+    ] {
+        for (path, body) in [
+            ("/v1/query", json!({"vector":[1.,1.,1.],"filter":bad})),
+            ("/v1/scan", json!({"filter":bad})),
+        ] {
+            let (status, error) = call(&app, path, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+            assert!(error["error"].is_string());
+        }
+    }
 
     let (status, got) = call(
         &app,

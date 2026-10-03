@@ -337,6 +337,14 @@ index budget: at M21's 1% cohort it adds about 1.3 MB. Filter-specific
 grouped block copies were rejected because each overwrite would publish a
 second copy and the exact resident posting already meets the query gates.
 
+Query-time rich metadata predicates use the same string-to-string stored metadata
+and do not change persisted formats. Only equality leaves required by the outer
+conjunction may constrain routed sketch keys. Candidate and exact scans evaluate
+the full predicate against authenticated metadata. Resident vectors contain no
+general metadata, so the resident path claims exactness only when the predicate
+consists solely of its declared equality; all other bounded selective searches
+remain approximate, while exhaustive exact search remains the oracle.
+
 Reclamation freezes, together, the mostly dead packs with the most garbage
 whose estimated live bytes fit 7/8 of one pack (the margin covers estimation
 error) and whose live rows fit 12 blocks (decoded records are held until the

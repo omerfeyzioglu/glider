@@ -7,7 +7,7 @@
 
 Glider is a single-node vector database with S3-compatible object storage as
 its durable state. One `glider-server` process serves one collection over
-HTTP/JSON. It supports writes, nearest-neighbor search and equality filters;
+HTTP/JSON. It supports writes, nearest-neighbor search and metadata filters;
 local RAM and SSD accelerate reads but hold no acknowledged data exclusively.
 
 ## Quickstart
@@ -97,8 +97,9 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 - **SSD cache.** A local block cache is filled in the background so warm
   queries need no remote reads. Losing it does not lose acknowledged writes;
   it can affect query latency and approximate-search recall until warm again.
-- **Filters.** Equality filters on string metadata; one declared predicate
-  is answered exactly, and up to four declared keys steer routing.
+- **Filters.** Equality, set, existence, numeric and logical filters on string
+  metadata; one declared equality is answered exactly, and up to four declared
+  keys steer routing. Exhaustive queries and scans accept every filter.
 - **Metadata in results.** Queries can return each hit's metadata and
   vector.
 - **Safe retries.** Every write carries a request ID; resending it returns
@@ -113,7 +114,7 @@ Glider 1.0 is a single-node, single-writer database. Its scope:
 - one or many collections per server process, with one writer and lease per
   open collection;
 - upsert, delete, get and k-NN query (squared Euclidean, Manhattan or
-  cosine) with equality filters, over HTTP or as a Rust library;
+  cosine) with metadata filters, over HTTP or as a Rust library;
 - validated up to 1,000,000 128-dimensional vectors on MinIO and on AWS S3
   ([performance](#performance)).
 
@@ -121,9 +122,9 @@ Known limitations:
 
 - No replication, sharding, read replicas or standby; availability during a
   restart depends on the lease (default 10 s) and the open time.
-- Filters are equality conjunctions only. Only the declared resident
-  predicate is exact; other filters are applied to the routed blocks and
-  may return fewer than `k` results.
+- Default queries with filters other than the declared resident equality
+  are approximate and may return fewer than `k` results. Use `exact:true`
+  for an exhaustive answer.
 - Peak memory at 1,000,000 vectors (235.6 MiB on MinIO, 257.9 MiB on AWS)
   is above the 192 MiB target.
 - Opening a large collection on S3 takes seconds (3.15 s, and 4.00 s for a
@@ -202,7 +203,7 @@ selection for admin commands is a follow-up.
 | [`POST /v1/write`](docs/API.md#post-v1write) | Atomic batch `{"upsert":[...],"delete":[...],"request_id":{...}}` (up to 100 operations); returns `sequence` and `request_id` |
 | [`POST /v1/query`](docs/API.md#post-v1query) | `{"vector":[...],"k":10,"filter":{...},"exact":false,"include_metadata":false,"include_vector":false}` |
 | [`POST /v1/points/get`](docs/API.md#post-v1pointsget) | Get 1 to 1000 IDs in one acknowledged view; optional vector and metadata fields |
-| [`POST /v1/scan`](docs/API.md#post-v1scan) | Count and page through live points by equality filter and ascending ID |
+| [`POST /v1/scan`](docs/API.md#post-v1scan) | Count and page through live points by [metadata filter](docs/API.md#filters) and ascending ID |
 | [`GET /v1/points/{id}`](docs/API.md#get-v1pointsid) | Current vector and metadata, or `404` |
 | [`GET /v1/requests/{boundary}/{nonce}`](docs/API.md#get-v1requestsboundarynonce) | Resolve a write whose response was lost |
 | [`GET /v1/status`](docs/API.md#get-v1status) | Sequence, queue, cache warm-up and clustering state |
@@ -304,6 +305,19 @@ and [benchmarks/](benchmarks/SUMMARY.md).
 The [architecture guide](docs/ARCHITECTURE.md) includes an AWS deployment
 diagram. [DESIGN.md](DESIGN.md) states the formats, invariants, and crash and
 recovery semantics in full.
+
+## Python client and agent memory
+
+[`clients/python`](clients/python/README.md) is a dependency-free Python
+client for the whole HTTP API, with safe write retries, paging scans, count
+and delete-by-filter. Its optional MCP server gives AI agents (Claude Code,
+Claude Desktop, Cursor and other MCP clients) durable `remember`, `recall`
+and `forget` tools backed by Glider:
+
+```sh
+pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"
+claude mcp add glider -- glider-mcp
+```
 
 ## Library
 

@@ -6,7 +6,7 @@ use crate::{
     serving::{SearchMode, SingleMachine},
     store::ObjectStore,
     streaming::OwnedDocument,
-    Config, Neighbor,
+    Config, Filter, Neighbor,
 };
 use std::collections::BTreeMap;
 
@@ -26,6 +26,18 @@ pub trait Snapshot: Send + Sync {
         filter: &[(&str, &str)],
         options: QueryOptions,
     ) -> crate::Result<QueryResult>;
+    fn query_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> crate::Result<QueryResult> {
+        let pairs = filter.equality_pairs().ok_or_else(|| {
+            crate::Error::Invalid("rich filters unavailable for this engine".into())
+        })?;
+        self.query(query, k, &pairs, options)
+    }
     fn query_exact(
         &self,
         _query: &[f32],
@@ -37,6 +49,18 @@ pub trait Snapshot: Send + Sync {
             "exact query unavailable for this engine".into(),
         ))
     }
+    fn query_exact_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> crate::Result<QueryResult> {
+        let pairs = filter.equality_pairs().ok_or_else(|| {
+            crate::Error::Invalid("rich filters unavailable for this engine".into())
+        })?;
+        self.query_exact(query, k, &pairs, options)
+    }
     fn scan(
         &self,
         _filter: &[(&str, &str)],
@@ -47,6 +71,18 @@ pub trait Snapshot: Send + Sync {
         Err(crate::Error::Invalid(
             "scan unavailable for this engine".into(),
         ))
+    }
+    fn scan_filter(
+        &self,
+        filter: &Filter,
+        after: Option<u64>,
+        limit: usize,
+        include_metadata: bool,
+    ) -> crate::Result<ScanResult> {
+        let pairs = filter.equality_pairs().ok_or_else(|| {
+            crate::Error::Invalid("rich filters unavailable for this engine".into())
+        })?;
+        self.scan(&pairs, after, limit, include_metadata)
     }
 }
 
@@ -99,6 +135,18 @@ pub trait Engine: Send + 'static {
             })
             .collect()
     }
+    fn query_with_options_filter(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> crate::Result<Vec<QueryHit>> {
+        let pairs = filter.equality_pairs().ok_or_else(|| {
+            crate::Error::Invalid("rich filters unavailable for this engine".into())
+        })?;
+        self.query_with_options(query, k, &pairs, options)
+    }
     fn query_exact_with_options(
         &mut self,
         _query: &[f32],
@@ -110,6 +158,18 @@ pub trait Engine: Send + 'static {
             "exact query unavailable for this engine".into(),
         ))
     }
+    fn query_exact_with_options_filter(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> crate::Result<Vec<QueryHit>> {
+        let pairs = filter.equality_pairs().ok_or_else(|| {
+            crate::Error::Invalid("rich filters unavailable for this engine".into())
+        })?;
+        self.query_exact_with_options(query, k, &pairs, options)
+    }
     fn scan(
         &self,
         _filter: &[(&str, &str)],
@@ -120,6 +180,18 @@ pub trait Engine: Send + 'static {
         Err(crate::Error::Invalid(
             "scan unavailable for this engine".into(),
         ))
+    }
+    fn scan_filter(
+        &self,
+        filter: &Filter,
+        after: Option<u64>,
+        limit: usize,
+        include_metadata: bool,
+    ) -> crate::Result<ScanResult> {
+        let pairs = filter.equality_pairs().ok_or_else(|| {
+            crate::Error::Invalid("rich filters unavailable for this engine".into())
+        })?;
+        self.scan(&pairs, after, limit, include_metadata)
     }
     /// Run at most one bounded maintenance unit while no command is queued.
     /// Returns whether work was performed.
@@ -206,6 +278,48 @@ impl<S: ObjectStore + Send + 'static> Engine for SingleMachine<S> {
         options: QueryOptions,
     ) -> crate::Result<Vec<QueryHit>> {
         self.query_with_options(query, k, filter, options)
+    }
+    fn query_with_options_filter(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> crate::Result<Vec<QueryHit>> {
+        self.query_filter(query, k, filter)?
+            .into_iter()
+            .map(|neighbor| {
+                let document = if options.include_metadata || options.include_vector {
+                    Some(
+                        self.get(neighbor.id)
+                            .map(|(vector, metadata)| OwnedDocument {
+                                vector: vector.to_vec(),
+                                metadata: metadata.clone(),
+                            })
+                            .ok_or_else(|| crate::Error::Corrupt("query hit missing".into()))?,
+                    )
+                } else {
+                    None
+                };
+                Ok(QueryHit {
+                    id: neighbor.id,
+                    distance: neighbor.distance,
+                    metadata: document
+                        .as_ref()
+                        .and_then(|d| options.include_metadata.then(|| d.metadata.clone())),
+                    vector: document.and_then(|d| options.include_vector.then_some(d.vector)),
+                })
+            })
+            .collect()
+    }
+    fn query_exact_with_options_filter(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> crate::Result<Vec<QueryHit>> {
+        self.query_with_options_filter(query, k, filter, options)
     }
     fn close(self) -> crate::Result<()> {
         SingleMachine::close(self)
@@ -401,7 +515,7 @@ enum Read {
     Query {
         query: Vec<f32>,
         k: usize,
-        filter: Vec<(String, String)>,
+        filter: Filter,
         options: QueryOptions,
         exact: bool,
         reply: Reply<QueryResult>,
@@ -415,7 +529,7 @@ enum Read {
         reply: Reply<BatchGetResult>,
     },
     Scan {
-        filter: Vec<(String, String)>,
+        filter: Filter,
         after: Option<u64>,
         limit: usize,
         include_metadata: bool,
@@ -454,24 +568,20 @@ impl Read {
                 exact,
                 reply,
             } => {
-                let filter: Vec<_> = filter
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
                 let result = match target {
                     Target::Snapshot(snapshot) => {
                         if exact {
-                            snapshot.query_exact(&query, k, &filter, options)
+                            snapshot.query_exact_filter(&query, k, &filter, options)
                         } else {
-                            snapshot.query(&query, k, &filter, options)
+                            snapshot.query_filter(&query, k, &filter, options)
                         }
                     }
                     Target::Committer(db) => {
                         let (reads, bytes) = db.remote_reads();
                         (if exact {
-                            db.query_exact_with_options(&query, k, &filter, options)
+                            db.query_exact_with_options_filter(&query, k, &filter, options)
                         } else {
-                            db.query_with_options(&query, k, &filter, options)
+                            db.query_with_options_filter(&query, k, &filter, options)
                         })
                         .map(|hits| {
                             let (reads_after, bytes_after) = db.remote_reads();
@@ -522,15 +632,13 @@ impl Read {
                 include_metadata,
                 reply,
             } => {
-                let filter: Vec<_> = filter
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
                 let result = match target {
                     Target::Snapshot(snapshot) => {
-                        snapshot.scan(&filter, after, limit, include_metadata)
+                        snapshot.scan_filter(&filter, after, limit, include_metadata)
                     }
-                    Target::Committer(db) => db.scan(&filter, after, limit, include_metadata),
+                    Target::Committer(db) => {
+                        db.scan_filter(&filter, after, limit, include_metadata)
+                    }
                 };
                 finish(reply, result, queue_wait, start)
             }
@@ -759,11 +867,21 @@ impl<E: Engine> Client<E> {
         limit: usize,
         include_metadata: bool,
     ) -> Result<Ticket<ScanResult>> {
-        if limit == 0 || limit > 10_000 || filter.len() > 100 {
-            return Err(crate::Error::Invalid(
-                "scan limit must be 1 to 10000 and filter at most 100 predicates".into(),
-            )
-            .into());
+        let pairs: Vec<_> = filter
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        self.scan_filter(Filter::equality(&pairs), after, limit, include_metadata)
+    }
+    pub fn scan_filter(
+        &self,
+        filter: Filter,
+        after: Option<u64>,
+        limit: usize,
+        include_metadata: bool,
+    ) -> Result<Ticket<ScanResult>> {
+        if limit == 0 || limit > 10_000 {
+            return Err(crate::Error::Invalid("scan limit must be 1 to 10000".into()).into());
         }
         let charge = crate::encoded_len(&(&filter, after, limit))?;
         if charge > crate::retry::MAX_REQUEST_BYTES {
@@ -813,10 +931,21 @@ impl<E: Engine> Client<E> {
         options: QueryOptions,
         exact: bool,
     ) -> Result<Ticket<QueryResult>> {
+        let pairs: Vec<_> = filter
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        self.query_with_mode_filter(query, k, Filter::equality(&pairs), options, exact)
+    }
+    pub fn query_with_mode_filter(
+        &self,
+        query: Vec<f32>,
+        k: usize,
+        filter: Filter,
+        options: QueryOptions,
+        exact: bool,
+    ) -> Result<Ticket<QueryResult>> {
         self.config.vector(&query)?;
-        if filter.len() > 100 {
-            return Err(crate::Error::Invalid("at most 100 equality predicates".into()).into());
-        }
         let charge = crate::encoded_len(&(&query, k, &filter))?;
         if charge > crate::retry::MAX_REQUEST_BYTES {
             // No retry can succeed, so this is a client error, not overload.

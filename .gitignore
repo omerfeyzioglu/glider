@@ -34,3 +34,7 @@ __pycache__/
 # Rebuildable detailed benchmark views; immutable raw history remains tracked
 /benchmarks/index.json
 /benchmarks/HISTORY.md
+
+# Python client packaging
+*.egg-info/
+/clients/python/build/

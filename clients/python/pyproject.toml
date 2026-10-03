@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glider-client"
+version = "1.1.0.dev0"
+description = "Python client and MCP memory server for the Glider vector database"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+]
+
+[project.optional-dependencies]
+# The MCP server needs Python >= 3.10 (a requirement of the `mcp` package).
+mcp = ["mcp>=1.0", "fastembed>=0.3"]
+
+[project.scripts]
+glider-mcp = "glider_client.mcp_server:main"
+
+[tool.setuptools]
+packages = ["glider_client"]

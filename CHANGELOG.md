@@ -8,11 +8,17 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Multi-collection HTTP mode with a versioned object-store catalog, lazy
-  per-collection serving, bounded open collections and generation-isolated deletion.
+- Collections: without `GLIDER_DIMENSIONS`, one server creates, lists,
+  deletes and serves many collections over HTTP (`/v1/collections`), each
+  in its own namespace under a versioned catalog; collections open lazily
+  and the least recently used close beyond `GLIDER_MAX_OPEN_COLLECTIONS`.
+- Metadata filters with equality, inequality, set membership, existence,
+  numeric ranges and nested logic for queries and scans.
 - `exact: true` on `POST /v1/query` for exhaustive exact search, so filtered
   queries return every match; `POST /v1/points/get` for up to 1000 points per
   request; `POST /v1/scan` to count, list and page matching points by id.
+- Python client (`clients/python`) and an MCP memory server (`glider-mcp`)
+  with `remember`, `recall`, `forget` and `memory_count` tools.
 
 ## [1.0.1] - 2026-10-03
 
