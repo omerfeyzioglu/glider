@@ -7,6 +7,8 @@
 [![CI](https://github.com/omerfeyzioglu/glider/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/omerfeyzioglu/glider/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
+**[Website and interactive storage simulation](https://glider.oomerfeyzioglu.workers.dev/)**
+
 Glider is a single-node vector database. Every acknowledged write is durable
 in S3-compatible object storage before the server answers; local RAM and SSD
 only speed up reads and never hold the only copy. It serves nearest-neighbor
