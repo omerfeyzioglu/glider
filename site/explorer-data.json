@@ -1,0 +1,4887 @@
+{
+  "backend": "In-memory ObjectStore; filesystem SSD cache; no network timing",
+  "blocks": [
+    {
+      "bytes": 10302,
+      "cluster": 0,
+      "id": 0,
+      "rows": 170
+    },
+    {
+      "bytes": 10420,
+      "cluster": 0,
+      "id": 1,
+      "rows": 170
+    },
+    {
+      "bytes": 732,
+      "cluster": 0,
+      "id": 2,
+      "rows": 10
+    },
+    {
+      "bytes": 10340,
+      "cluster": 1,
+      "id": 3,
+      "rows": 170
+    },
+    {
+      "bytes": 5960,
+      "cluster": 1,
+      "id": 4,
+      "rows": 97
+    },
+    {
+      "bytes": 10382,
+      "cluster": 2,
+      "id": 5,
+      "rows": 170
+    },
+    {
+      "bytes": 4625,
+      "cluster": 2,
+      "id": 6,
+      "rows": 75
+    },
+    {
+      "bytes": 10328,
+      "cluster": 3,
+      "id": 7,
+      "rows": 170
+    },
+    {
+      "bytes": 6867,
+      "cluster": 3,
+      "id": 8,
+      "rows": 112
+    },
+    {
+      "bytes": 10374,
+      "cluster": 4,
+      "id": 9,
+      "rows": 170
+    },
+    {
+      "bytes": 6567,
+      "cluster": 4,
+      "id": 10,
+      "rows": 107
+    },
+    {
+      "bytes": 9327,
+      "cluster": 5,
+      "id": 11,
+      "rows": 152
+    },
+    {
+      "bytes": 10284,
+      "cluster": 6,
+      "id": 12,
+      "rows": 170
+    },
+    {
+      "bytes": 5421,
+      "cluster": 6,
+      "id": 13,
+      "rows": 89
+    },
+    {
+      "bytes": 10335,
+      "cluster": 7,
+      "id": 14,
+      "rows": 170
+    },
+    {
+      "bytes": 2989,
+      "cluster": 7,
+      "id": 15,
+      "rows": 48
+    },
+    {
+      "bytes": 10295,
+      "cluster": 8,
+      "id": 16,
+      "rows": 170
+    },
+    {
+      "bytes": 4350,
+      "cluster": 8,
+      "id": 17,
+      "rows": 71
+    },
+    {
+      "bytes": 10484,
+      "cluster": 9,
+      "id": 18,
+      "rows": 170
+    },
+    {
+      "bytes": 5102,
+      "cluster": 9,
+      "id": 19,
+      "rows": 84
+    },
+    {
+      "bytes": 10389,
+      "cluster": 10,
+      "id": 20,
+      "rows": 170
+    },
+    {
+      "bytes": 4853,
+      "cluster": 10,
+      "id": 21,
+      "rows": 79
+    },
+    {
+      "bytes": 10411,
+      "cluster": 11,
+      "id": 22,
+      "rows": 170
+    },
+    {
+      "bytes": 4308,
+      "cluster": 11,
+      "id": 23,
+      "rows": 70
+    },
+    {
+      "bytes": 10305,
+      "cluster": 12,
+      "id": 24,
+      "rows": 170
+    },
+    {
+      "bytes": 7890,
+      "cluster": 12,
+      "id": 25,
+      "rows": 129
+    },
+    {
+      "bytes": 10418,
+      "cluster": 13,
+      "id": 26,
+      "rows": 170
+    },
+    {
+      "bytes": 4415,
+      "cluster": 13,
+      "id": 27,
+      "rows": 72
+    },
+    {
+      "bytes": 10334,
+      "cluster": 14,
+      "id": 28,
+      "rows": 170
+    },
+    {
+      "bytes": 3348,
+      "cluster": 14,
+      "id": 29,
+      "rows": 54
+    },
+    {
+      "bytes": 10341,
+      "cluster": 15,
+      "id": 30,
+      "rows": 170
+    },
+    {
+      "bytes": 7694,
+      "cluster": 15,
+      "id": 31,
+      "rows": 127
+    }
+  ],
+  "centroids": 16,
+  "dimensions": 16,
+  "metric": "squared_euclidean",
+  "queries": [
+    [
+      0.8124092221260071,
+      0.9300578832626343,
+      0.7610878944396973,
+      0.46301183104515076,
+      0.49296846985816956,
+      0.6814188361167908,
+      0.9256249666213989,
+      0.11015458405017853,
+      0.05545051768422127,
+      0.9385923743247986,
+      0.7068743705749512,
+      0.9049811959266663,
+      0.27502599358558655,
+      0.11006839573383331,
+      0.2229040414094925,
+      0.9119773507118225
+    ],
+    [
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5
+    ]
+  ],
+  "records": [
+    {
+      "bytes": 15705,
+      "effort": "lean",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        },
+        {
+          "distance": 0.9276565626090739,
+          "exact": false,
+          "id": 590,
+          "tail": false
+        },
+        {
+          "distance": 0.9532562685909066,
+          "exact": false,
+          "id": 3270,
+          "tail": false
+        },
+        {
+          "distance": 0.9686885229546381,
+          "exact": false,
+          "id": 3041,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 0.4,
+      "requests": 1,
+      "selected": [
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        },
+        {
+          "distance": 0.9276565626090739,
+          "exact": false,
+          "id": 590,
+          "tail": false
+        },
+        {
+          "distance": 0.9532562685909066,
+          "exact": false,
+          "id": 3270,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 0.6,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 4,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        },
+        {
+          "distance": 0.9276565626090739,
+          "exact": false,
+          "id": 590,
+          "tail": false
+        },
+        {
+          "distance": 0.9532562685909066,
+          "exact": false,
+          "id": 3270,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4
+      ],
+      "query": 0,
+      "ram_hits": 4,
+      "recall": 0.6,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 49841,
+      "effort": "balanced",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 2,
+      "selected": [
+        {
+          "id": 7,
+          "source": "object"
+        },
+        {
+          "id": 8,
+          "source": "object"
+        },
+        {
+          "id": 9,
+          "source": "object"
+        },
+        {
+          "id": 10,
+          "source": "object"
+        },
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 22,
+          "source": "ssd"
+        },
+        {
+          "id": 23,
+          "source": "ssd"
+        },
+        {
+          "id": 28,
+          "source": "ssd"
+        },
+        {
+          "id": 29,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 16,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9
+      ],
+      "query": 0,
+      "ram_hits": 16,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 22,
+          "source": "ram"
+        },
+        {
+          "id": 23,
+          "source": "ram"
+        },
+        {
+          "id": 28,
+          "source": "ram"
+        },
+        {
+          "id": 29,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 250190,
+      "effort": "wide",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9,
+        12,
+        8,
+        2,
+        1,
+        13,
+        0,
+        7,
+        5
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 3,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        },
+        {
+          "id": 4,
+          "source": "object"
+        },
+        {
+          "id": 5,
+          "source": "object"
+        },
+        {
+          "id": 6,
+          "source": "object"
+        },
+        {
+          "id": 7,
+          "source": "object"
+        },
+        {
+          "id": 8,
+          "source": "object"
+        },
+        {
+          "id": 9,
+          "source": "object"
+        },
+        {
+          "id": 10,
+          "source": "object"
+        },
+        {
+          "id": 11,
+          "source": "object"
+        },
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        },
+        {
+          "id": 14,
+          "source": "object"
+        },
+        {
+          "id": 15,
+          "source": "object"
+        },
+        {
+          "id": 16,
+          "source": "object"
+        },
+        {
+          "id": 17,
+          "source": "object"
+        },
+        {
+          "id": 18,
+          "source": "object"
+        },
+        {
+          "id": 19,
+          "source": "object"
+        },
+        {
+          "id": 20,
+          "source": "object"
+        },
+        {
+          "id": 21,
+          "source": "object"
+        },
+        {
+          "id": 22,
+          "source": "object"
+        },
+        {
+          "id": 23,
+          "source": "object"
+        },
+        {
+          "id": 24,
+          "source": "object"
+        },
+        {
+          "id": 25,
+          "source": "object"
+        },
+        {
+          "id": 26,
+          "source": "object"
+        },
+        {
+          "id": 27,
+          "source": "object"
+        },
+        {
+          "id": 28,
+          "source": "object"
+        },
+        {
+          "id": 29,
+          "source": "object"
+        },
+        {
+          "id": 30,
+          "source": "object"
+        },
+        {
+          "id": 31,
+          "source": "object"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9,
+        12,
+        8,
+        2,
+        1,
+        13,
+        0,
+        7,
+        5
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        },
+        {
+          "id": 4,
+          "source": "ssd"
+        },
+        {
+          "id": 5,
+          "source": "ssd"
+        },
+        {
+          "id": 6,
+          "source": "ssd"
+        },
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 11,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        },
+        {
+          "id": 14,
+          "source": "ssd"
+        },
+        {
+          "id": 15,
+          "source": "ssd"
+        },
+        {
+          "id": 16,
+          "source": "ssd"
+        },
+        {
+          "id": 17,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 22,
+          "source": "ssd"
+        },
+        {
+          "id": 23,
+          "source": "ssd"
+        },
+        {
+          "id": 24,
+          "source": "ssd"
+        },
+        {
+          "id": 25,
+          "source": "ssd"
+        },
+        {
+          "id": 26,
+          "source": "ssd"
+        },
+        {
+          "id": 27,
+          "source": "ssd"
+        },
+        {
+          "id": 28,
+          "source": "ssd"
+        },
+        {
+          "id": 29,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 32,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": true,
+          "id": 905,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        731,
+        3920,
+        2517,
+        184,
+        905
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9,
+        12,
+        8,
+        2,
+        1,
+        13,
+        0,
+        7,
+        5
+      ],
+      "query": 0,
+      "ram_hits": 32,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        },
+        {
+          "id": 4,
+          "source": "ram"
+        },
+        {
+          "id": 5,
+          "source": "ram"
+        },
+        {
+          "id": 6,
+          "source": "ram"
+        },
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 11,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        },
+        {
+          "id": 14,
+          "source": "ram"
+        },
+        {
+          "id": 15,
+          "source": "ram"
+        },
+        {
+          "id": 16,
+          "source": "ram"
+        },
+        {
+          "id": 17,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 22,
+          "source": "ram"
+        },
+        {
+          "id": 23,
+          "source": "ram"
+        },
+        {
+          "id": 24,
+          "source": "ram"
+        },
+        {
+          "id": 25,
+          "source": "ram"
+        },
+        {
+          "id": 26,
+          "source": "ram"
+        },
+        {
+          "id": 27,
+          "source": "ram"
+        },
+        {
+          "id": 28,
+          "source": "ram"
+        },
+        {
+          "id": 29,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 11152,
+      "effort": "lean",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.6285027749554182,
+          "exact": false,
+          "id": 3180,
+          "tail": false
+        },
+        {
+          "distance": 0.6980911584952807,
+          "exact": false,
+          "id": 3716,
+          "tail": false
+        },
+        {
+          "distance": 0.7058821152171575,
+          "exact": false,
+          "id": 2433,
+          "tail": false
+        },
+        {
+          "distance": 0.7181725318404304,
+          "exact": false,
+          "id": 2420,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 0.2,
+      "requests": 1,
+      "selected": [
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5300412681990387,
+          "exact": false,
+          "id": 1379,
+          "tail": false
+        },
+        {
+          "distance": 0.6046726332989358,
+          "exact": false,
+          "id": 1590,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 0.6,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 5,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5300412681990387,
+          "exact": false,
+          "id": 1379,
+          "tail": false
+        },
+        {
+          "distance": 0.6046726332989358,
+          "exact": false,
+          "id": 1590,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15
+      ],
+      "query": 1,
+      "ram_hits": 5,
+      "recall": 0.6,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 62622,
+      "effort": "balanced",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.5235830105433088,
+          "exact": false,
+          "id": 3484,
+          "tail": false
+        },
+        {
+          "distance": 0.5300412681990387,
+          "exact": false,
+          "id": 1379,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 0.6,
+      "requests": 2,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        },
+        {
+          "id": 18,
+          "source": "object"
+        },
+        {
+          "id": 19,
+          "source": "object"
+        },
+        {
+          "id": 20,
+          "source": "object"
+        },
+        {
+          "id": 21,
+          "source": "object"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5017747471943892,
+          "exact": true,
+          "id": 834,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        },
+        {
+          "id": 4,
+          "source": "ssd"
+        },
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 24,
+          "source": "ssd"
+        },
+        {
+          "id": 25,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 17,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5017747471943892,
+          "exact": true,
+          "id": 834,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10
+      ],
+      "query": 1,
+      "ram_hits": 17,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        },
+        {
+          "id": 4,
+          "source": "ram"
+        },
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 24,
+          "source": "ram"
+        },
+        {
+          "id": 25,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 250190,
+      "effort": "wide",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5017747471943892,
+          "exact": true,
+          "id": 834,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10,
+        6,
+        7,
+        8,
+        11,
+        2,
+        14,
+        13,
+        5
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 3,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        },
+        {
+          "id": 4,
+          "source": "object"
+        },
+        {
+          "id": 5,
+          "source": "object"
+        },
+        {
+          "id": 6,
+          "source": "object"
+        },
+        {
+          "id": 7,
+          "source": "object"
+        },
+        {
+          "id": 8,
+          "source": "object"
+        },
+        {
+          "id": 9,
+          "source": "object"
+        },
+        {
+          "id": 10,
+          "source": "object"
+        },
+        {
+          "id": 11,
+          "source": "object"
+        },
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        },
+        {
+          "id": 14,
+          "source": "object"
+        },
+        {
+          "id": 15,
+          "source": "object"
+        },
+        {
+          "id": 16,
+          "source": "object"
+        },
+        {
+          "id": 17,
+          "source": "object"
+        },
+        {
+          "id": 18,
+          "source": "object"
+        },
+        {
+          "id": 19,
+          "source": "object"
+        },
+        {
+          "id": 20,
+          "source": "object"
+        },
+        {
+          "id": 21,
+          "source": "object"
+        },
+        {
+          "id": 22,
+          "source": "object"
+        },
+        {
+          "id": 23,
+          "source": "object"
+        },
+        {
+          "id": 24,
+          "source": "object"
+        },
+        {
+          "id": 25,
+          "source": "object"
+        },
+        {
+          "id": 26,
+          "source": "object"
+        },
+        {
+          "id": 27,
+          "source": "object"
+        },
+        {
+          "id": 28,
+          "source": "object"
+        },
+        {
+          "id": 29,
+          "source": "object"
+        },
+        {
+          "id": 30,
+          "source": "object"
+        },
+        {
+          "id": 31,
+          "source": "object"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5017747471943892,
+          "exact": true,
+          "id": 834,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10,
+        6,
+        7,
+        8,
+        11,
+        2,
+        14,
+        13,
+        5
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        },
+        {
+          "id": 4,
+          "source": "ssd"
+        },
+        {
+          "id": 5,
+          "source": "ssd"
+        },
+        {
+          "id": 6,
+          "source": "ssd"
+        },
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 11,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        },
+        {
+          "id": 14,
+          "source": "ssd"
+        },
+        {
+          "id": 15,
+          "source": "ssd"
+        },
+        {
+          "id": 16,
+          "source": "ssd"
+        },
+        {
+          "id": 17,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 22,
+          "source": "ssd"
+        },
+        {
+          "id": 23,
+          "source": "ssd"
+        },
+        {
+          "id": 24,
+          "source": "ssd"
+        },
+        {
+          "id": 25,
+          "source": "ssd"
+        },
+        {
+          "id": 26,
+          "source": "ssd"
+        },
+        {
+          "id": 27,
+          "source": "ssd"
+        },
+        {
+          "id": 28,
+          "source": "ssd"
+        },
+        {
+          "id": 29,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 32,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": false,
+      "hits": [
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5017747471943892,
+          "exact": true,
+          "id": 834,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        2600,
+        2053,
+        1316,
+        869,
+        834
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10,
+        6,
+        7,
+        8,
+        11,
+        2,
+        14,
+        13,
+        5
+      ],
+      "query": 1,
+      "ram_hits": 32,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        },
+        {
+          "id": 4,
+          "source": "ram"
+        },
+        {
+          "id": 5,
+          "source": "ram"
+        },
+        {
+          "id": 6,
+          "source": "ram"
+        },
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 11,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        },
+        {
+          "id": 14,
+          "source": "ram"
+        },
+        {
+          "id": 15,
+          "source": "ram"
+        },
+        {
+          "id": 16,
+          "source": "ram"
+        },
+        {
+          "id": 17,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 22,
+          "source": "ram"
+        },
+        {
+          "id": 23,
+          "source": "ram"
+        },
+        {
+          "id": 24,
+          "source": "ram"
+        },
+        {
+          "id": 25,
+          "source": "ram"
+        },
+        {
+          "id": 26,
+          "source": "ram"
+        },
+        {
+          "id": 27,
+          "source": "ram"
+        },
+        {
+          "id": 28,
+          "source": "ram"
+        },
+        {
+          "id": 29,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 41,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 15705,
+      "effort": "lean",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": false,
+          "id": 905,
+          "tail": false
+        },
+        {
+          "distance": 0.9276565626090739,
+          "exact": false,
+          "id": 590,
+          "tail": false
+        },
+        {
+          "distance": 0.9532562685909066,
+          "exact": false,
+          "id": 3270,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 0.4,
+      "requests": 1,
+      "selected": [
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": false,
+          "id": 905,
+          "tail": false
+        },
+        {
+          "distance": 0.9276565626090739,
+          "exact": false,
+          "id": 590,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 0.6,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 4,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8405070569598571,
+          "exact": false,
+          "id": 905,
+          "tail": false
+        },
+        {
+          "distance": 0.9276565626090739,
+          "exact": false,
+          "id": 590,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4
+      ],
+      "query": 0,
+      "ram_hits": 4,
+      "recall": 0.6,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 49841,
+      "effort": "balanced",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 2,
+      "selected": [
+        {
+          "id": 7,
+          "source": "object"
+        },
+        {
+          "id": 8,
+          "source": "object"
+        },
+        {
+          "id": 9,
+          "source": "object"
+        },
+        {
+          "id": 10,
+          "source": "object"
+        },
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 22,
+          "source": "ssd"
+        },
+        {
+          "id": 23,
+          "source": "ssd"
+        },
+        {
+          "id": 28,
+          "source": "ssd"
+        },
+        {
+          "id": 29,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 16,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9
+      ],
+      "query": 0,
+      "ram_hits": 16,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 22,
+          "source": "ram"
+        },
+        {
+          "id": 23,
+          "source": "ram"
+        },
+        {
+          "id": 28,
+          "source": "ram"
+        },
+        {
+          "id": 29,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 250190,
+      "effort": "wide",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9,
+        12,
+        8,
+        2,
+        1,
+        13,
+        0,
+        7,
+        5
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 3,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        },
+        {
+          "id": 4,
+          "source": "object"
+        },
+        {
+          "id": 5,
+          "source": "object"
+        },
+        {
+          "id": 6,
+          "source": "object"
+        },
+        {
+          "id": 7,
+          "source": "object"
+        },
+        {
+          "id": 8,
+          "source": "object"
+        },
+        {
+          "id": 9,
+          "source": "object"
+        },
+        {
+          "id": 10,
+          "source": "object"
+        },
+        {
+          "id": 11,
+          "source": "object"
+        },
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        },
+        {
+          "id": 14,
+          "source": "object"
+        },
+        {
+          "id": 15,
+          "source": "object"
+        },
+        {
+          "id": 16,
+          "source": "object"
+        },
+        {
+          "id": 17,
+          "source": "object"
+        },
+        {
+          "id": 18,
+          "source": "object"
+        },
+        {
+          "id": 19,
+          "source": "object"
+        },
+        {
+          "id": 20,
+          "source": "object"
+        },
+        {
+          "id": 21,
+          "source": "object"
+        },
+        {
+          "id": 22,
+          "source": "object"
+        },
+        {
+          "id": 23,
+          "source": "object"
+        },
+        {
+          "id": 24,
+          "source": "object"
+        },
+        {
+          "id": 25,
+          "source": "object"
+        },
+        {
+          "id": 26,
+          "source": "object"
+        },
+        {
+          "id": 27,
+          "source": "object"
+        },
+        {
+          "id": 28,
+          "source": "object"
+        },
+        {
+          "id": 29,
+          "source": "object"
+        },
+        {
+          "id": 30,
+          "source": "object"
+        },
+        {
+          "id": 31,
+          "source": "object"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9,
+        12,
+        8,
+        2,
+        1,
+        13,
+        0,
+        7,
+        5
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        },
+        {
+          "id": 4,
+          "source": "ssd"
+        },
+        {
+          "id": 5,
+          "source": "ssd"
+        },
+        {
+          "id": 6,
+          "source": "ssd"
+        },
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 11,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        },
+        {
+          "id": 14,
+          "source": "ssd"
+        },
+        {
+          "id": 15,
+          "source": "ssd"
+        },
+        {
+          "id": 16,
+          "source": "ssd"
+        },
+        {
+          "id": 17,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 22,
+          "source": "ssd"
+        },
+        {
+          "id": 23,
+          "source": "ssd"
+        },
+        {
+          "id": 24,
+          "source": "ssd"
+        },
+        {
+          "id": 25,
+          "source": "ssd"
+        },
+        {
+          "id": 26,
+          "source": "ssd"
+        },
+        {
+          "id": 27,
+          "source": "ssd"
+        },
+        {
+          "id": 28,
+          "source": "ssd"
+        },
+        {
+          "id": 29,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 32,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9000,
+          "tail": true
+        },
+        {
+          "distance": 0.006399993902448511,
+          "exact": true,
+          "id": 731,
+          "tail": false
+        },
+        {
+          "distance": 0.5254169261292497,
+          "exact": true,
+          "id": 3920,
+          "tail": false
+        },
+        {
+          "distance": 0.7919444054771968,
+          "exact": true,
+          "id": 2517,
+          "tail": false
+        },
+        {
+          "distance": 0.8017192319552892,
+          "exact": true,
+          "id": 184,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9000,
+        731,
+        3920,
+        2517,
+        184
+      ],
+      "probed": [
+        6,
+        4,
+        3,
+        10,
+        14,
+        15,
+        11,
+        9,
+        12,
+        8,
+        2,
+        1,
+        13,
+        0,
+        7,
+        5
+      ],
+      "query": 0,
+      "ram_hits": 32,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        },
+        {
+          "id": 4,
+          "source": "ram"
+        },
+        {
+          "id": 5,
+          "source": "ram"
+        },
+        {
+          "id": 6,
+          "source": "ram"
+        },
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 11,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        },
+        {
+          "id": 14,
+          "source": "ram"
+        },
+        {
+          "id": 15,
+          "source": "ram"
+        },
+        {
+          "id": 16,
+          "source": "ram"
+        },
+        {
+          "id": 17,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 22,
+          "source": "ram"
+        },
+        {
+          "id": 23,
+          "source": "ram"
+        },
+        {
+          "id": 24,
+          "source": "ram"
+        },
+        {
+          "id": 25,
+          "source": "ram"
+        },
+        {
+          "id": 26,
+          "source": "ram"
+        },
+        {
+          "id": 27,
+          "source": "ram"
+        },
+        {
+          "id": 28,
+          "source": "ram"
+        },
+        {
+          "id": 29,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 11152,
+      "effort": "lean",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.6285027749554182,
+          "exact": false,
+          "id": 3180,
+          "tail": false
+        },
+        {
+          "distance": 0.6980911584952807,
+          "exact": false,
+          "id": 3716,
+          "tail": false
+        },
+        {
+          "distance": 0.7058821152171575,
+          "exact": false,
+          "id": 2433,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 0.4,
+      "requests": 1,
+      "selected": [
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5300412681990387,
+          "exact": false,
+          "id": 1379,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 0.8,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 5,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        },
+        {
+          "distance": 0.5300412681990387,
+          "exact": false,
+          "id": 1379,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15
+      ],
+      "query": 1,
+      "ram_hits": 5,
+      "recall": 0.8,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 62622,
+      "effort": "balanced",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.5235830105433088,
+          "exact": false,
+          "id": 3484,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 0.8,
+      "requests": 2,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        },
+        {
+          "id": 18,
+          "source": "object"
+        },
+        {
+          "id": 19,
+          "source": "object"
+        },
+        {
+          "id": 20,
+          "source": "object"
+        },
+        {
+          "id": 21,
+          "source": "object"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        },
+        {
+          "id": 4,
+          "source": "ssd"
+        },
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 24,
+          "source": "ssd"
+        },
+        {
+          "id": 25,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 17,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10
+      ],
+      "query": 1,
+      "ram_hits": 17,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        },
+        {
+          "id": 4,
+          "source": "ram"
+        },
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 24,
+          "source": "ram"
+        },
+        {
+          "id": 25,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 250190,
+      "effort": "wide",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10,
+        6,
+        7,
+        8,
+        11,
+        2,
+        14,
+        13,
+        5
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 3,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        },
+        {
+          "id": 4,
+          "source": "object"
+        },
+        {
+          "id": 5,
+          "source": "object"
+        },
+        {
+          "id": 6,
+          "source": "object"
+        },
+        {
+          "id": 7,
+          "source": "object"
+        },
+        {
+          "id": 8,
+          "source": "object"
+        },
+        {
+          "id": 9,
+          "source": "object"
+        },
+        {
+          "id": 10,
+          "source": "object"
+        },
+        {
+          "id": 11,
+          "source": "object"
+        },
+        {
+          "id": 12,
+          "source": "object"
+        },
+        {
+          "id": 13,
+          "source": "object"
+        },
+        {
+          "id": 14,
+          "source": "object"
+        },
+        {
+          "id": 15,
+          "source": "object"
+        },
+        {
+          "id": 16,
+          "source": "object"
+        },
+        {
+          "id": 17,
+          "source": "object"
+        },
+        {
+          "id": 18,
+          "source": "object"
+        },
+        {
+          "id": 19,
+          "source": "object"
+        },
+        {
+          "id": 20,
+          "source": "object"
+        },
+        {
+          "id": 21,
+          "source": "object"
+        },
+        {
+          "id": 22,
+          "source": "object"
+        },
+        {
+          "id": 23,
+          "source": "object"
+        },
+        {
+          "id": 24,
+          "source": "object"
+        },
+        {
+          "id": 25,
+          "source": "object"
+        },
+        {
+          "id": 26,
+          "source": "object"
+        },
+        {
+          "id": 27,
+          "source": "object"
+        },
+        {
+          "id": 28,
+          "source": "object"
+        },
+        {
+          "id": 29,
+          "source": "object"
+        },
+        {
+          "id": 30,
+          "source": "object"
+        },
+        {
+          "id": 31,
+          "source": "object"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10,
+        6,
+        7,
+        8,
+        11,
+        2,
+        14,
+        13,
+        5
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        },
+        {
+          "id": 4,
+          "source": "ssd"
+        },
+        {
+          "id": 5,
+          "source": "ssd"
+        },
+        {
+          "id": 6,
+          "source": "ssd"
+        },
+        {
+          "id": 7,
+          "source": "ssd"
+        },
+        {
+          "id": 8,
+          "source": "ssd"
+        },
+        {
+          "id": 9,
+          "source": "ssd"
+        },
+        {
+          "id": 10,
+          "source": "ssd"
+        },
+        {
+          "id": 11,
+          "source": "ssd"
+        },
+        {
+          "id": 12,
+          "source": "ssd"
+        },
+        {
+          "id": 13,
+          "source": "ssd"
+        },
+        {
+          "id": 14,
+          "source": "ssd"
+        },
+        {
+          "id": 15,
+          "source": "ssd"
+        },
+        {
+          "id": 16,
+          "source": "ssd"
+        },
+        {
+          "id": 17,
+          "source": "ssd"
+        },
+        {
+          "id": 18,
+          "source": "ssd"
+        },
+        {
+          "id": 19,
+          "source": "ssd"
+        },
+        {
+          "id": 20,
+          "source": "ssd"
+        },
+        {
+          "id": 21,
+          "source": "ssd"
+        },
+        {
+          "id": 22,
+          "source": "ssd"
+        },
+        {
+          "id": 23,
+          "source": "ssd"
+        },
+        {
+          "id": 24,
+          "source": "ssd"
+        },
+        {
+          "id": 25,
+          "source": "ssd"
+        },
+        {
+          "id": 26,
+          "source": "ssd"
+        },
+        {
+          "id": 27,
+          "source": "ssd"
+        },
+        {
+          "id": 28,
+          "source": "ssd"
+        },
+        {
+          "id": 29,
+          "source": "ssd"
+        },
+        {
+          "id": 30,
+          "source": "ssd"
+        },
+        {
+          "id": 31,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 32,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "fresh": true,
+      "hits": [
+        {
+          "distance": 0.0,
+          "exact": true,
+          "id": 9001,
+          "tail": true
+        },
+        {
+          "distance": 0.4179684108521009,
+          "exact": true,
+          "id": 2600,
+          "tail": false
+        },
+        {
+          "distance": 0.4190656749433046,
+          "exact": true,
+          "id": 2053,
+          "tail": false
+        },
+        {
+          "distance": 0.4347874818405515,
+          "exact": true,
+          "id": 1316,
+          "tail": false
+        },
+        {
+          "distance": 0.49241590832491866,
+          "exact": true,
+          "id": 869,
+          "tail": false
+        }
+      ],
+      "oracle": [
+        9001,
+        2600,
+        2053,
+        1316,
+        869
+      ],
+      "probed": [
+        0,
+        15,
+        3,
+        12,
+        1,
+        4,
+        9,
+        10,
+        6,
+        7,
+        8,
+        11,
+        2,
+        14,
+        13,
+        5
+      ],
+      "query": 1,
+      "ram_hits": 32,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        },
+        {
+          "id": 4,
+          "source": "ram"
+        },
+        {
+          "id": 5,
+          "source": "ram"
+        },
+        {
+          "id": 6,
+          "source": "ram"
+        },
+        {
+          "id": 7,
+          "source": "ram"
+        },
+        {
+          "id": 8,
+          "source": "ram"
+        },
+        {
+          "id": 9,
+          "source": "ram"
+        },
+        {
+          "id": 10,
+          "source": "ram"
+        },
+        {
+          "id": 11,
+          "source": "ram"
+        },
+        {
+          "id": 12,
+          "source": "ram"
+        },
+        {
+          "id": 13,
+          "source": "ram"
+        },
+        {
+          "id": 14,
+          "source": "ram"
+        },
+        {
+          "id": 15,
+          "source": "ram"
+        },
+        {
+          "id": 16,
+          "source": "ram"
+        },
+        {
+          "id": 17,
+          "source": "ram"
+        },
+        {
+          "id": 18,
+          "source": "ram"
+        },
+        {
+          "id": 19,
+          "source": "ram"
+        },
+        {
+          "id": 20,
+          "source": "ram"
+        },
+        {
+          "id": 21,
+          "source": "ram"
+        },
+        {
+          "id": 22,
+          "source": "ram"
+        },
+        {
+          "id": 23,
+          "source": "ram"
+        },
+        {
+          "id": 24,
+          "source": "ram"
+        },
+        {
+          "id": 25,
+          "source": "ram"
+        },
+        {
+          "id": 26,
+          "source": "ram"
+        },
+        {
+          "id": 27,
+          "source": "ram"
+        },
+        {
+          "id": 28,
+          "source": "ram"
+        },
+        {
+          "id": 29,
+          "source": "ram"
+        },
+        {
+          "id": 30,
+          "source": "ram"
+        },
+        {
+          "id": 31,
+          "source": "ram"
+        }
+      ],
+      "sequence": 42,
+      "ssd_hits": 0,
+      "tier": "ram"
+    }
+  ],
+  "rows": 4096,
+  "seed": 42,
+  "version": 1
+}
