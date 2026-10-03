@@ -7,14 +7,18 @@
 //! only after durable publication; every write carries a request ID
 //! (supplied by the client for safe retries, otherwise issued by the server
 //! and returned).
+mod catalog;
 mod config;
 mod error;
 mod http;
 mod metrics;
+mod multi;
 mod recovery;
 
+pub use catalog::{Catalog, Collection, CreateCollection};
 pub use config::{ServerConfig, Store, StoreConfig};
-pub use http::router;
+pub use http::{multi_router, router};
+pub use multi::Multi;
 pub use recovery::stage_segmented_namespace;
 
 use crate::{
@@ -177,6 +181,43 @@ impl Running {
 /// (only possible after this process failed to renew for a full lease).
 pub async fn run(config: ServerConfig) -> crate::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    if config.multi {
+        let setup = config.clone();
+        let multi = tokio::task::spawn_blocking(move || Multi::new(setup))
+            .await
+            .map_err(|error| Error::Invalid(error.to_string()))??;
+        let app = multi_router(multi.clone(), config.token.clone());
+        let sweeper = multi.clone();
+        let sweep_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // Startup already swept the base.
+            loop {
+                interval.tick().await;
+                if let Err(error) = sweeper.sweep().await {
+                    eprintln!("collection orphan sweep failed: {error}");
+                }
+            }
+        });
+        let served = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let interrupt = tokio::signal::ctrl_c();
+                #[cfg(unix)]
+                {
+                    let mut terminate =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .expect("install SIGTERM handler");
+                    tokio::select! { _ = interrupt => {}, _ = terminate.recv() => {} }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = interrupt.await;
+                }
+            })
+            .await;
+        sweep_task.abort();
+        served?;
+        return multi.shutdown().await;
+    }
     let running = tokio::task::block_in_place(|| config.start())?;
     let app = router(running.client(), config.token.clone());
     let deposed = running.deposed();

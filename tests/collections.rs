@@ -1,0 +1,449 @@
+#![cfg(feature = "server")]
+use axum::{
+    body::{to_bytes, Body},
+    http::{Request, StatusCode},
+    Router,
+};
+use glider::{
+    admission::Limits,
+    segmented::SegmentedServingOptions,
+    server::{multi_router, router, Catalog, CreateCollection, Multi, ServerConfig, StoreConfig},
+    store::ObjectStore,
+    Config, Metric,
+};
+use serde_json::{json, Value};
+use std::{
+    path::Path,
+    sync::{Arc, Barrier},
+    time::Duration,
+};
+use tower::ServiceExt;
+
+fn config(path: &Path, max: usize) -> ServerConfig {
+    let mut serving = SegmentedServingOptions::m21(path.join("cache"));
+    serving.cache = None;
+    serving.warm_unit_bytes = 0;
+    serving.auto_cluster_rows = 0;
+    ServerConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        store: StoreConfig::Local(path.join("base")),
+        collection: Config {
+            dimensions: 2,
+            metric: Metric::SquaredEuclidean,
+        },
+        options: Default::default(),
+        serving,
+        limits: Limits::default(),
+        token: None,
+        lease: Duration::from_millis(100),
+        multi: true,
+        max_open_collections: max,
+    }
+}
+fn request(name: &str, dimensions: usize) -> CreateCollection {
+    serde_json::from_value(json!({"name":name,"dimensions":dimensions})).unwrap()
+}
+async fn call(app: &Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut request = Request::builder().method(method).uri(path);
+    if body.is_some() {
+        request = request.header("content-type", "application/json");
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, value)
+}
+async fn create(app: &Router, name: &str, dims: usize) -> (StatusCode, Value) {
+    call(
+        app,
+        "POST",
+        "/v1/collections",
+        Some(json!({"name":name,"dimensions":dims})),
+    )
+    .await
+}
+
+#[test]
+fn catalog_create_list_conflict_and_concurrent_create() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = StoreConfig::Local(temp.path().to_path_buf());
+    let catalog = Catalog::new(base.clone());
+    assert!(catalog.list().unwrap().is_empty());
+    let (first, created) = catalog.create(request("alpha", 2)).unwrap();
+    assert!(created);
+    assert_eq!(first.version, 1);
+    assert_eq!(first.generation.len(), 32);
+    assert!(!catalog.create(request("alpha", 2)).unwrap().1);
+    assert_eq!(
+        catalog.get("alpha").unwrap().unwrap().generation,
+        first.generation
+    );
+    assert!(matches!(
+        catalog.create(request("alpha", 3)),
+        Err(glider::Error::RequestConflict)
+    ));
+    catalog.create(request("beta", 3)).unwrap();
+    assert_eq!(
+        catalog
+            .list()
+            .unwrap()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+
+    let barrier = Arc::new(Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let base = base.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                Catalog::new(base).create(request("race", 2)).unwrap()
+            })
+        })
+        .collect();
+    let winners: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(winners.iter().filter(|(_, created)| *created).count(), 1);
+    assert!(winners
+        .iter()
+        .all(|(record, _)| record.generation == winners[0].0.generation));
+}
+
+#[test]
+fn catalog_delete_crash_window_and_recreate() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = StoreConfig::Local(temp.path().to_path_buf());
+    let catalog = Catalog::new(base.clone());
+    let (old, _) = catalog.create(request("alpha", 2)).unwrap();
+    let old_data = catalog.data_store(&old).open().unwrap();
+    old_data.create("orphan", b"old generation").unwrap();
+    // Crash after the authoritative catalog delete but before data removal.
+    catalog.delete(&old).unwrap();
+    assert!(catalog.get("alpha").unwrap().is_none());
+    let (new, _) = catalog.create(request("alpha", 2)).unwrap();
+    assert_ne!(new.generation, old.generation);
+    assert!(matches!(
+        catalog.delete(&old),
+        Err(glider::Error::RequestConflict)
+    ));
+    assert!(catalog
+        .data_store(&new)
+        .open()
+        .unwrap()
+        .list()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        old_data.get("orphan").unwrap(),
+        Some(b"old generation".to_vec())
+    );
+    Catalog::new(base).sweep().unwrap();
+    assert!(old_data.list().unwrap().is_empty());
+    assert_eq!(
+        catalog.get("alpha").unwrap().unwrap().generation,
+        new.generation
+    );
+    catalog.delete(&new).unwrap();
+    assert!(catalog.get("alpha").unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn collections_lifecycle_isolation_and_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(temp.path(), 1);
+    let multi = Multi::new(config.clone()).unwrap();
+    let app = multi_router(multi.clone(), None);
+    assert_eq!(create(&app, "a", 2).await.0, StatusCode::CREATED);
+    assert_eq!(create(&app, "a", 2).await.0, StatusCode::OK);
+    assert_eq!(create(&app, "a", 3).await.0, StatusCode::CONFLICT);
+    assert_eq!(create(&app, "b", 3).await.0, StatusCode::CREATED);
+    assert_eq!(create(&app, "Bad", 2).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        call(&app, "GET", "/v1/collections/missing", None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&app, "DELETE", "/v1/collections/missing", None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (code, listed) = call(&app, "GET", "/v1/collections", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(listed["collections"][0]["name"], "a");
+    assert_eq!(listed["collections"][1]["name"], "b");
+    assert_eq!(listed["collections"][0]["open"], false);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let metrics = to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8(metrics.to_vec())
+        .unwrap()
+        .contains("glider_open_collections 0"));
+    let (code, legacy) = call(&app, "POST", "/v1/write", Some(json!({}))).await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert!(legacy["error"]
+        .as_str()
+        .unwrap()
+        .contains("/v1/collections/{name}"));
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/v1/collections/a/write",
+            Some(json!({"upsert":[{"id":1,"vector":[1.0,2.0]}]}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/v1/collections/b/write",
+            Some(json!({"upsert":[{"id":1,"vector":[1.0,2.0,3.0]}]}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(!multi.is_open("a").await);
+    assert!(multi.is_open("b").await);
+    let (code, point) = call(&app, "GET", "/v1/collections/a/points/1", None).await;
+    assert_eq!(code, StatusCode::OK, "{point}");
+    assert_eq!(point["vector"], json!([1.0, 2.0]));
+    let (code, result) = call(
+        &app,
+        "POST",
+        "/v1/collections/b/query",
+        Some(json!({"vector":[1.0,2.0,3.0],"exact":true})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{result}");
+    assert_eq!(result["results"][0]["id"], 1);
+    let (code, scan) = call(&app, "POST", "/v1/collections/a/scan", Some(json!({}))).await;
+    assert_eq!(code, StatusCode::OK, "{scan}");
+    assert_eq!(scan["ids"], json!([1]));
+    let (code, batch) = call(
+        &app,
+        "POST",
+        "/v1/collections/a/points/get",
+        Some(json!({"ids":[1]})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{batch}");
+    let (code, description) = call(&app, "GET", "/v1/collections/a", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(description["status"]["closed"], false);
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/v1/collections/a/write",
+            Some(json!({"upsert":[{"id":2,"vector":[1.0]}]}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    multi.shutdown().await.unwrap();
+    drop(app);
+    drop(multi);
+    let restarted = Multi::new(config).unwrap();
+    let app = multi_router(restarted.clone(), None);
+    let (code, listed) = call(&app, "GET", "/v1/collections", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(listed["collections"][0]["open"], false);
+    let (code, point) = call(&app, "GET", "/v1/collections/b/points/1", None).await;
+    assert_eq!(code, StatusCode::OK, "{point}");
+    assert_eq!(point["vector"], json!([1.0, 2.0, 3.0]));
+    assert_eq!(
+        call(&app, "DELETE", "/v1/collections/b", None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&app, "GET", "/v1/collections/b/points/1", None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(create(&app, "b", 3).await.0, StatusCode::CREATED);
+    assert_eq!(
+        call(&app, "GET", "/v1/collections/b/points/1", None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_collection_routes_remain_unchanged() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path(), 1);
+    config.multi = false;
+    let running = tokio::task::spawn_blocking(move || config.start())
+        .await
+        .unwrap()
+        .unwrap();
+    let app = router(running.client(), None);
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/v1/write",
+            Some(json!({"upsert":[{"id":7,"vector":[3.0,4.0]}]}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, "GET", "/v1/points/7", None).await.1["vector"],
+        json!([3.0, 4.0])
+    );
+    assert_eq!(
+        call(&app, "GET", "/v1/status", None).await.0,
+        StatusCode::OK
+    );
+    tokio::task::spawn_blocking(move || running.shutdown(glider::admission::Shutdown::Drain))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_first_use_opens_once_and_busy_limit_preserves_active_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(temp.path(), 1);
+    let multi = Multi::new(config).unwrap();
+    let (record, _) = multi.create(request("alpha", 2)).await.unwrap();
+    multi.create(request("beta", 2)).await.unwrap();
+    let (left, right) = tokio::join!(multi.use_collection("alpha"), multi.use_collection("alpha"));
+    let left = left.unwrap().unwrap();
+    let right = right.unwrap().unwrap();
+    assert_eq!(multi.open_count().await, 1);
+    let objects = multi
+        .catalog()
+        .data_store(&record)
+        .open()
+        .unwrap()
+        .list()
+        .unwrap();
+    assert_eq!(
+        objects
+            .iter()
+            .filter(|key| key.starts_with("sglog-"))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        multi.use_collection("beta").await,
+        Err(glider::Error::Busy(_))
+    ));
+    drop((left, right));
+    assert!(multi.use_collection("beta").await.unwrap().is_some());
+    multi.shutdown().await.unwrap();
+}
+
+#[test]
+#[ignore = "requires isolated MinIO; run with GLIDER_S3_BUCKET and GLIDER_S3_ENDPOINT"]
+fn minio_catalog_conditional_create_and_sweep() {
+    let mut bytes = [0_u8; 16];
+    getrandom::getrandom(&mut bytes).unwrap();
+    let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let base = StoreConfig::S3 {
+        bucket: std::env::var("GLIDER_S3_BUCKET").unwrap(),
+        namespace: format!("glider-collections-test/{suffix}"),
+        region: std::env::var("GLIDER_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
+        endpoint: Some(std::env::var("GLIDER_S3_ENDPOINT").unwrap()),
+    };
+    let catalog = Catalog::new(base);
+    let (first, _) = catalog.create(request("alpha", 2)).unwrap();
+    assert!(!catalog.create(request("alpha", 2)).unwrap().1);
+    assert!(matches!(
+        catalog.create(request("alpha", 3)),
+        Err(glider::Error::RequestConflict)
+    ));
+    catalog
+        .data_store(&first)
+        .open()
+        .unwrap()
+        .create("orphan", b"orphan")
+        .unwrap();
+    catalog.delete(&first).unwrap();
+    let (second, _) = catalog.create(request("alpha", 2)).unwrap();
+    assert_ne!(first.generation, second.generation);
+    catalog.sweep().unwrap();
+    assert!(catalog
+        .data_store(&first)
+        .open()
+        .unwrap()
+        .list()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_collection_removes_its_local_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path(), 4);
+    config.serving.cache = Some((temp.path().join("cache"), 64, 64 * 1024 * 1024));
+    let multi = Multi::new(config).unwrap();
+    let app = multi_router(multi.clone(), None);
+    assert_eq!(create(&app, "cached", 2).await.0, StatusCode::CREATED);
+    let (code, body) = call(
+        &app,
+        "POST",
+        "/v1/collections/cached/write",
+        Some(json!({"upsert":[{"id":1,"vector":[1.0, 2.0]}]})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let generation = multi.get("cached").await.unwrap().unwrap().generation;
+    let cache = temp
+        .path()
+        .join("cache")
+        .join(format!("cached-{generation}"));
+    assert!(
+        cache.exists(),
+        "the open collection uses its cache directory"
+    );
+    assert_eq!(
+        call(&app, "DELETE", "/v1/collections/cached", None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(!cache.exists(), "delete removes the collection's cache");
+    multi.shutdown().await.unwrap();
+}

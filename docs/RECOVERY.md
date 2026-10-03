@@ -5,6 +5,21 @@ and conditional-create contract in `DESIGN.md`.
 
 ## Segmented collections (`glider-server`)
 
+For multi-collection mode, restart with `GLIDER_DIMENSIONS` unset and the same
+base prefix. The catalog is the existence authority. A create that lost its
+response is resolved by `GET /v1/collections/{name}` or by retrying the same
+configuration. If deletion stopped before catalog removal, the collection
+still exists; after removal it is absent even if its old generation has not
+been cleaned. A fresh create uses another generation. Startup and later
+background sweeps reclaim orphaned generations. Data request IDs are scoped
+to a collection generation. `glider-admin` currently requires a
+single-collection prefix.
+
+An uncertain catalog DELETE needs extra care: the catalog key is reused, and
+an old delayed DELETE could remove a newly created entry. Do not retry that
+DELETE or recreate the name until the old request is known to have settled.
+The storage interface does not yet provide conditional catalog deletion.
+
 A crash, kill, host loss or uncertain write needs no operator step. Start
 `glider-server` (or any `glider-admin` command) again on the same prefix with
 the same `GLIDER_DIMENSIONS`, `GLIDER_METRIC`, `GLIDER_RESIDENT_FILTER` and

@@ -2,12 +2,20 @@
 
 ## HTTP server
 
-`glider-server` owns one collection and one object-store prefix. Use the same
+With `GLIDER_DIMENSIONS` set, `glider-server` owns one collection and one
+object-store prefix. Use the same
 dimensions, metric, resident filter and routed keys every time that prefix is
 opened. The server exposes [`/v1/status`](API.md#get-v1status) for its committed
 sequence, queue, cache and clustering state, and [`/metrics`](API.md#get-metrics)
 for Prometheus. The [configuration table](../README.md#configuration) lists
 the environment variables.
+
+With `GLIDER_DIMENSIONS` unset, the base prefix holds a collection catalog.
+Create and delete collections through the [collections API](API.md#collections).
+Collections open on first use; the server evicts the least recently used idle
+one at `GLIDER_MAX_OPEN_COLLECTIONS` and reopens it transparently later. Keep
+the base prefix dedicated to one mode. The local cache is divided among open
+collections and can be discarded. `/healthz` and `/metrics` remain global.
 
 ### Restart and recovery
 
@@ -17,6 +25,9 @@ crash, restart the server on the same prefix; it waits at most
 replays the log tail. A write whose response was lost may or may not have
 committed: use its `request_id` to look up the outcome before issuing a new
 write. See the [recovery procedure](RECOVERY.md#segmented-collections-glider-server).
+In multi mode, shutdown drains all open collections and releases each lease.
+If one lease is deposed, only that collection closes. Startup sweeps orphaned
+generations left by interrupted deletes.
 
 ### Backup and restore
 
@@ -25,6 +36,8 @@ writer lease. Stop the server before running it; while the server runs, use
 the HTTP status endpoint instead. Each admin invocation takes over the
 namespace and can advance its sequence, including `status`. The Compose
 image includes both binaries.
+It currently requires single-collection mode. For a collection in a multi
+base, use its HTTP status; collection-aware admin commands are a follow-up.
 For example, back up the local demo to an **empty, nonoverlapping** MinIO
 prefix:
 

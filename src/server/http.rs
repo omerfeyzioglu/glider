@@ -1,16 +1,20 @@
 use super::{
+    catalog::CreateCollection,
     error::{bad_request, json_errors, ApiError},
-    metrics::{cache_status, clustering_status, record_metrics, render_metrics, HttpMetrics},
-    Engine0,
+    metrics::{
+        cache_status, clustering_status, record_metrics, render_http_metrics, render_metrics,
+        HttpMetrics,
+    },
+    Engine0, Multi,
 };
 use crate::{
     admission::Client,
     retry::{Lookup, Outcome, Request, RequestId},
     segmented::QueryOptions,
-    Mutation,
+    Filter, Mutation,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, FromRef, OriginalUri, Path, Request as HttpRequest, State},
     http::{header, HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
@@ -23,7 +27,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone)]
 struct AppState {
-    client: Client<Engine0>,
+    client: Option<Client<Engine0>>,
     token: Option<Arc<str>>,
     metrics: Arc<HttpMetrics>,
 }
@@ -123,6 +127,7 @@ fn outcome_json(outcome: Outcome, id: RequestId) -> Result<Value, ApiError> {
 /// `POST /v1/write`: one atomic batch of upserts then deletes.
 async fn write(
     State(state): State<AppState>,
+    Extension(client): Extension<Client<Engine0>>,
     headers: HeaderMap,
     Json(body): Json<WriteBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -145,7 +150,7 @@ async fn write(
         .as_ref()
         .map(RequestIdJson::to_id)
         .transpose()?;
-    let client = state.client.clone();
+    let client = client.clone();
     blocking(move || {
         let id = match supplied {
             Some(id) => id,
@@ -170,8 +175,8 @@ struct QueryBody {
     vector: Vec<f32>,
     #[serde(default = "default_k")]
     k: usize,
-    #[serde(default)]
-    filter: BTreeMap<String, String>,
+    #[serde(default = "empty_filter")]
+    filter: Value,
     #[serde(default)]
     include_metadata: bool,
     #[serde(default)]
@@ -184,10 +189,15 @@ fn default_k() -> usize {
     10
 }
 
+fn empty_filter() -> Value {
+    json!({})
+}
+
 /// `POST /v1/query`: unfiltered approximate search within the read budget,
 /// or exact search of the declared resident filter.
 async fn query(
     State(state): State<AppState>,
+    Extension(client): Extension<Client<Engine0>>,
     headers: HeaderMap,
     Json(body): Json<QueryBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -195,20 +205,15 @@ async fn query(
     if body.k == 0 || body.k > 1_000 {
         return Err(bad_request("k must be between 1 and 1000"));
     }
-    let client = state.client.clone();
+    let filter = Filter::parse(&body.filter).map_err(bad_request)?;
+    let client = client.clone();
     blocking(move || {
         let options = QueryOptions {
             include_metadata: body.include_metadata,
             include_vector: body.include_vector,
         };
         let result = client
-            .query_with_mode(
-                body.vector,
-                body.k,
-                body.filter.into_iter().collect(),
-                options,
-                body.exact,
-            )?
+            .query_with_mode_filter(body.vector, body.k, filter, options, body.exact)?
             .wait()?
             .value;
         Ok(Json(json!({
@@ -248,6 +253,7 @@ fn default_true() -> bool {
 
 async fn batch_get(
     State(state): State<AppState>,
+    Extension(client): Extension<Client<Engine0>>,
     headers: HeaderMap,
     Json(body): Json<BatchGetBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -255,7 +261,7 @@ async fn batch_get(
     if body.ids.is_empty() || body.ids.len() > 1_000 {
         return Err(bad_request("ids must contain 1 to 1000 entries"));
     }
-    let client = state.client.clone();
+    let client = client.clone();
     blocking(move || {
         let ids = body.ids;
         let result = client.batch_get(ids.clone())?.wait()?.value;
@@ -285,8 +291,8 @@ async fn batch_get(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScanBody {
-    #[serde(default)]
-    filter: BTreeMap<String, String>,
+    #[serde(default = "empty_filter")]
+    filter: Value,
     after: Option<u64>,
     #[serde(default = "default_scan_limit")]
     limit: usize,
@@ -300,6 +306,7 @@ fn default_scan_limit() -> usize {
 
 async fn scan(
     State(state): State<AppState>,
+    Extension(client): Extension<Client<Engine0>>,
     headers: HeaderMap,
     Json(body): Json<ScanBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -307,15 +314,11 @@ async fn scan(
     if body.limit == 0 || body.limit > 10_000 {
         return Err(bad_request("limit must be between 1 and 10000"));
     }
-    let client = state.client.clone();
+    let filter = Filter::parse(&body.filter).map_err(bad_request)?;
+    let client = client.clone();
     blocking(move || {
         let result = client
-            .scan(
-                body.filter.into_iter().collect(),
-                body.after,
-                body.limit,
-                body.include_metadata,
-            )?
+            .scan_filter(filter, body.after, body.limit, body.include_metadata)?
             .wait()?
             .value;
         let mut response =
@@ -337,11 +340,16 @@ async fn scan(
 /// `GET /v1/points/{id}`.
 async fn point(
     State(state): State<AppState>,
+    Extension(client): Extension<Client<Engine0>>,
     headers: HeaderMap,
-    Path(id): Path<u64>,
+    Path(path): Path<BTreeMap<String, String>>,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers)?;
-    let client = state.client.clone();
+    let id = path
+        .get("id")
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| bad_request("invalid point id"))?;
+    let client = client.clone();
     blocking(move || {
         Ok(match client.get(id)?.wait()?.value {
             Some(document) => Json(json!({
@@ -359,12 +367,21 @@ async fn point(
 /// `GET /v1/requests/{boundary}/{nonce}`: resolve an uncertain write.
 async fn request(
     State(state): State<AppState>,
+    Extension(client): Extension<Client<Engine0>>,
     headers: HeaderMap,
-    Path((boundary, nonce)): Path<(u64, String)>,
+    Path(path): Path<BTreeMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers)?;
+    let boundary = path
+        .get("boundary")
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| bad_request("invalid request boundary"))?;
+    let nonce = path
+        .get("nonce")
+        .cloned()
+        .ok_or_else(|| bad_request("invalid request nonce"))?;
     let id = RequestIdJson { boundary, nonce }.to_id()?;
-    let client = state.client.clone();
+    let client = client.clone();
     blocking(move || {
         Ok(Json(match client.lookup(id)?.wait()?.value {
             Lookup::Retained(outcome) => {
@@ -381,10 +398,11 @@ async fn request(
 /// `GET /v1/status`.
 async fn status(
     State(state): State<AppState>,
+    Extension(client): Extension<Client<Engine0>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers)?;
-    let client = state.client.clone();
+    let client = client.clone();
     blocking(move || {
         let engine = client.metrics()?.wait()?.value;
         let queue = client.status();
@@ -403,7 +421,10 @@ async fn status(
 }
 
 async fn health(State(state): State<AppState>) -> StatusCode {
-    let queue = state.client.status();
+    let Some(client) = &state.client else {
+        return StatusCode::OK;
+    };
+    let queue = client.status();
     if queue.failed || queue.closed {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
@@ -413,7 +434,13 @@ async fn health(State(state): State<AppState>) -> StatusCode {
 
 /// `GET /metrics`: unauthenticated Prometheus text exposition.
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let client = state.client.clone();
+    let Some(client) = state.client.clone() else {
+        return Ok((
+            [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+            "# glider multi-collection mode\n",
+        )
+            .into_response());
+    };
     let http = state.metrics.clone();
     blocking(move || {
         let engine = client.metrics()?.wait()?.value;
@@ -424,24 +451,251 @@ async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
     .await
 }
 
+fn data_routes() -> Router<AppState> {
+    Router::new()
+        .route("/status", get(status))
+        .route("/write", post(write))
+        .route("/query", post(query))
+        .route("/points/get", post(batch_get))
+        .route("/scan", post(scan))
+        .route("/points/{id}", get(point))
+        .route("/requests/{boundary}/{nonce}", get(request))
+}
+
+async fn single_client(
+    State(state): State<AppState>,
+    mut request: HttpRequest,
+    next: middleware::Next,
+) -> Response {
+    request
+        .extensions_mut()
+        .insert(state.client.as_ref().unwrap().clone());
+    next.run(request).await
+}
+
 /// Routes for one collection served by `client`.
 pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
     let http_metrics = Arc::new(HttpMetrics::new());
+    let state = AppState {
+        client: Some(client),
+        token: token.map(Arc::from),
+        metrics: http_metrics.clone(),
+    };
     Router::new()
         .route("/healthz", get(health))
         .route("/metrics", get(metrics))
-        .route("/v1/status", get(status))
-        .route("/v1/write", post(write))
-        .route("/v1/query", post(query))
-        .route("/v1/points/get", post(batch_get))
-        .route("/v1/scan", post(scan))
-        .route("/v1/points/{id}", get(point))
-        .route("/v1/requests/{boundary}/{nonce}", get(request))
-        .with_state(AppState {
-            client,
-            token: token.map(Arc::from),
-            metrics: http_metrics.clone(),
-        })
+        .nest(
+            "/v1",
+            data_routes().layer(middleware::from_fn_with_state(state.clone(), single_client)),
+        )
+        .with_state(state)
+        .layer(middleware::from_fn(json_errors))
+        .layer(middleware::from_fn_with_state(http_metrics, record_metrics))
+}
+
+fn multi_error(error: crate::Error) -> ApiError {
+    use crate::Error;
+    let code = match error {
+        Error::Invalid(_) => StatusCode::BAD_REQUEST,
+        Error::RequestConflict | Error::Exists(_) => StatusCode::CONFLICT,
+        Error::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
+        Error::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    ApiError(code, error.to_string())
+}
+
+#[derive(Clone)]
+struct MultiState {
+    manager: Multi,
+    token: Option<Arc<str>>,
+    metrics: Arc<HttpMetrics>,
+}
+impl FromRef<MultiState> for AppState {
+    fn from_ref(state: &MultiState) -> Self {
+        Self {
+            client: None,
+            token: state.token.clone(),
+            metrics: state.metrics.clone(),
+        }
+    }
+}
+fn authorize_multi(state: &MultiState, headers: &HeaderMap) -> Result<(), ApiError> {
+    authorize(
+        &AppState {
+            client: None,
+            token: state.token.clone(),
+            metrics: state.metrics.clone(),
+        },
+        headers,
+    )
+}
+async fn create_collection(
+    State(state): State<MultiState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateCollection>,
+) -> Result<Response, ApiError> {
+    authorize_multi(&state, &headers)?;
+    let (record, created) = state.manager.create(body).await.map_err(multi_error)?;
+    Ok((
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(record.description(state.manager.is_open(&record.name).await)),
+    )
+        .into_response())
+}
+async fn list_collections(
+    State(state): State<MultiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_multi(&state, &headers)?;
+    let records = state.manager.list().await.map_err(multi_error)?;
+    let mut descriptions = Vec::new();
+    for record in records {
+        descriptions.push(record.description(state.manager.is_open(&record.name).await));
+    }
+    Ok(Json(json!({"collections":descriptions})))
+}
+async fn get_collection(
+    State(state): State<MultiState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_multi(&state, &headers)?;
+    let Some(record) = state.manager.get(&name).await.map_err(multi_error)? else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "collection not found".into(),
+        ));
+    };
+    let Some(usage) = state
+        .manager
+        .use_collection(&name)
+        .await
+        .map_err(multi_error)?
+    else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "collection not found".into(),
+        ));
+    };
+    let client = usage.client();
+    let status = blocking(move || {
+        let engine = client.metrics()?.wait()?.value;
+        let queue = client.status();
+        Ok::<_, ApiError>(
+            json!({"sequence":engine.sequence,"queued_commands":queue.commands,
+            "queued_bytes":queue.bytes,"closed":queue.closed,"failed":queue.failed,
+            "maintenance_errors":queue.maintenance_errors,"cache":cache_status(&engine),
+            "clustering":clustering_status(&engine)}),
+        )
+    })
+    .await?;
+    let mut description = record.description(true);
+    description
+        .as_object_mut()
+        .unwrap()
+        .insert("status".into(), status);
+    Ok(Json(description))
+}
+async fn delete_collection(
+    State(state): State<MultiState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    authorize_multi(&state, &headers)?;
+    if state.manager.delete(&name).await.map_err(multi_error)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "collection not found".into(),
+        ))
+    }
+}
+async fn multi_client(
+    State(state): State<MultiState>,
+    OriginalUri(uri): OriginalUri,
+    mut request: HttpRequest,
+    next: middleware::Next,
+) -> Response {
+    if let Err(error) = authorize_multi(&state, request.headers()) {
+        return error.into_response();
+    }
+    let Some(name) = uri.path().split('/').nth(3) else {
+        return ApiError(StatusCode::BAD_REQUEST, "missing collection name".into()).into_response();
+    };
+    let usage = match state.manager.use_collection(name).await {
+        Ok(Some(usage)) => usage,
+        Ok(None) => {
+            return ApiError(StatusCode::NOT_FOUND, "collection not found".into()).into_response()
+        }
+        Err(error) => return multi_error(error).into_response(),
+    };
+    request.extensions_mut().insert(usage.client());
+    let result = next.run(request).await;
+    drop(usage);
+    result
+}
+async fn legacy_route() -> ApiError {
+    ApiError(
+        StatusCode::NOT_FOUND,
+        "use /v1/collections/{name}/...".into(),
+    )
+}
+
+async fn multi_metrics(State(state): State<MultiState>) -> Response {
+    let mut body = render_http_metrics(&state.metrics);
+    body.push_str(&format!(
+        "# TYPE glider_open_collections gauge\nglider_open_collections {}\n",
+        state.manager.open_count().await
+    ));
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
+}
+
+pub fn multi_router(manager: Multi, token: Option<String>) -> Router {
+    let http_metrics = Arc::new(HttpMetrics::new());
+    let token = token.map(Arc::from);
+    let state = AppState {
+        client: None,
+        token: token.clone(),
+        metrics: http_metrics.clone(),
+    };
+    let multi_state = MultiState {
+        manager,
+        token,
+        metrics: http_metrics.clone(),
+    };
+    let collection_routes =
+        data_routes()
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(
+                multi_state.clone(),
+                multi_client,
+            ));
+    Router::new()
+        .route("/healthz", get(health))
+        .route("/metrics", get(multi_metrics))
+        .route("/v1/write", post(legacy_route))
+        .route("/v1/query", post(legacy_route))
+        .route("/v1/points/get", post(legacy_route))
+        .route("/v1/scan", post(legacy_route))
+        .route("/v1/points/{id}", get(legacy_route))
+        .route("/v1/requests/{boundary}/{nonce}", get(legacy_route))
+        .route("/v1/status", get(legacy_route))
+        .nest("/v1/collections/{name}", collection_routes)
+        .route(
+            "/v1/collections",
+            post(create_collection).get(list_collections),
+        )
+        .route(
+            "/v1/collections/{name}",
+            get(get_collection).delete(delete_collection),
+        )
+        .with_state(multi_state)
         .layer(middleware::from_fn(json_errors))
         .layer(middleware::from_fn_with_state(http_metrics, record_metrics))
 }

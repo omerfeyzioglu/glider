@@ -17,6 +17,8 @@
 //! # Ok::<(), glider::Error>(())
 //! ```
 pub mod admission;
+pub mod filter;
+pub use filter::Filter;
 pub mod ivf;
 pub mod lease;
 pub mod ownership;
@@ -1402,6 +1404,10 @@ impl<S: ObjectStore> Database<S> {
         k: usize,
         filter: &[(&str, &str)],
     ) -> Result<Vec<Neighbor>> {
+        self.search_filter(query, k, &Filter::equality(filter))
+    }
+
+    pub fn search_filter(&self, query: &[f32], k: usize, filter: &Filter) -> Result<Vec<Neighbor>> {
         let query = self.config.query(query)?;
         if k == 0 {
             return Ok(Vec::new());
@@ -1409,7 +1415,7 @@ impl<S: ObjectStore> Database<S> {
         let mut results: Vec<_> = self
             .documents
             .iter()
-            .filter(|(_, document)| matches_filter(&document.metadata, filter))
+            .filter(|(_, document)| filter.matches(&document.metadata))
             .map(|(&id, document)| Neighbor {
                 id,
                 distance: self.config.metric.score(&query, &document.vector),

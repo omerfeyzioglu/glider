@@ -1,6 +1,6 @@
 # HTTP API reference
 
-`glider-server` serves one collection over HTTP/JSON. This page describes
+`glider-server` serves one collection or many collections over HTTP/JSON. This page describes
 every route the router (`src/server/http.rs`) registers. Configuration is in
 the [README](../README.md#configuration); durability and recovery semantics
 are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
@@ -8,7 +8,7 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 | Method and path | Auth | Purpose |
 |---|---|---|
 | [`POST /v1/write`](#post-v1write) | bearer | Atomic batch of upserts and deletes |
-| [`POST /v1/query`](#post-v1query) | bearer | k-nearest-neighbor query with optional equality filter |
+| [`POST /v1/query`](#post-v1query) | bearer | k-nearest-neighbor query with optional metadata filter |
 | [`POST /v1/points/get`](#post-v1pointsget) | bearer | Get up to 1000 points in one consistent read |
 | [`POST /v1/scan`](#post-v1scan) | bearer | Count and page through live points matching a filter |
 | [`GET /v1/points/{id}`](#get-v1pointsid) | bearer | Current vector and metadata of one point |
@@ -16,6 +16,29 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 | [`GET /v1/status`](#get-v1status) | bearer | Sequence, queue, cache and clustering state |
 | [`GET /healthz`](#get-healthz) | none | Liveness |
 | [`GET /metrics`](#get-metrics) | none | Prometheus text metrics |
+
+## Collections
+
+When `GLIDER_DIMENSIONS` is unset, the base storage prefix is a collection
+catalog. All seven data endpoints above use the prefix
+`/v1/collections/{name}` (for example,
+`POST /v1/collections/demo/write` and `GET /v1/collections/demo/status`).
+Request and response schemas, request IDs and durability are unchanged.
+Unprefixed data endpoints return JSON `404` directing clients to the prefix.
+`/healthz` and `/metrics` remain global. Names match
+`^[a-z0-9][a-z0-9-]{0,62}$`.
+
+| Method and path | Body and result |
+|---|---|
+| `POST /v1/collections` | JSON `{"name":"demo","dimensions":3,"metric":"squared_euclidean","resident_filter":{"key":"value"},"routed_keys":["key"]}`. `metric` defaults to `squared_euclidean`; filter and routed keys are optional. Returns a description with `open` and `201` on create, `200` for identical configuration, `409` for a conflict. |
+| `GET /v1/collections` | `{"collections":[...]}` sorted by name; descriptions include `name`, `dimensions`, `metric`, `resident_filter`, `routed_keys` and `open`. Listing does not open collections. |
+| `GET /v1/collections/{name}` | Description plus `status` containing the same body as that collection's `/status`; opens it if needed. `404` if absent. |
+| `DELETE /v1/collections/{name}` | `204` after the catalog deletion, `404` if absent. A later create uses a new generation and starts empty. |
+
+Opening is lazy. At the configured open limit, the least recently used
+collection without requests in flight drains and closes; a later request
+reopens it transparently. When every open collection is busy, opening another
+returns `429`. `glider-admin` currently supports only single-collection mode.
 
 ## Conventions
 
@@ -29,7 +52,8 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
   `413`). Unknown fields are rejected.
 - **IDs and values.** Point IDs are unsigned 64-bit integers. Vectors are
   arrays of finite numbers (stored as `f32`) whose length equals
-  `GLIDER_DIMENSIONS`. With `GLIDER_METRIC=cosine` a vector must not be all
+  the collection's dimensions (or `GLIDER_DIMENSIONS` in single mode). With
+  cosine distance a vector must not be all
   zeros; it is stored normalized to unit length. Metadata is a flat object
   of string keys to string values.
 - **Distances.** `squared_euclidean`, `manhattan`, or `cosine` (`1 - dot`
@@ -112,13 +136,13 @@ Response `200`:
 
 ## `POST /v1/query`
 
-Return the `k` nearest current points to `vector`.
+Return the `k` nearest current points to `vector`. See [Filters](#filters).
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `vector` | array of numbers | required | Same dimension and validity rules as writes |
 | `k` | integer | `10` | 1 to 1000 |
-| `filter` | object of strings | `{}` | Equality conjunction: every key must be present with exactly that value |
+| `filter` | object | `{}` | Metadata predicate; see [Filters](#filters) |
 | `include_metadata` | bool | `false` | Add each hit's `metadata` |
 | `include_vector` | bool | `false` | Add each hit's stored `vector` |
 | `exact` | bool | `false` | Exhaustive exact search of the acknowledged view |
@@ -139,12 +163,12 @@ With `"exact":false` (the default):
   budget (12 candidate blocks, 8 remote range requests and 1 MiB per query,
   plus up to `GLIDER_LOCAL_BLOCKS` cached blocks), then reranked exactly.
   Unsealed recent writes are always scanned exactly.
-- **Exactly the declared `GLIDER_RESIDENT_FILTER` pair:** exact, from
-  full-precision vectors held in memory.
+- **Only the declared `GLIDER_RESIDENT_FILTER` equality:** exact, from
+  full-precision vectors held in memory. Repeating it is equivalent.
 - **Any other filter:** approximate post-filtering over the same routed
-  blocks; keys listed in `GLIDER_ROUTED_KEYS` first restrict which rows
-  are routed. May return fewer than `k` results, or none, even when matches
-  exist.
+  blocks; required equality leaves on `GLIDER_ROUTED_KEYS` first restrict
+  which rows are routed. May return fewer than `k` results, or none, even
+  when matches exist.
 
 ```sh
 curl -XPOST localhost:8080/v1/query -H 'content-type: application/json' \
@@ -205,7 +229,7 @@ Response `200`:
 
 ## `POST /v1/scan`
 
-Exhaustively scan live points with an equality conjunction. `filter` defaults
+Exhaustively scan live points with a [filter](#filters). `filter` defaults
 to `{}`; `after` excludes IDs at or below it. `limit` defaults to 1000 and
 must be 1 to 10000. `include_metadata` defaults to `false`. Results are in
 ascending ID order. `matched` counts all matches before `after` and `limit`;
@@ -228,6 +252,42 @@ Response `200`:
 To delete by filter, scan pages, collect their IDs, then submit ordinary
 `/v1/write` delete batches of at most 100 operations. Concurrent writes can
 change which IDs match while paging.
+
+## Filters
+
+Metadata remains a map of strings to strings. A filter is a JSON object;
+several members in one object are ANDed. `{}` matches every point. A bare
+string value means equality, as before. A key can instead contain operators:
+
+```json
+{"color":"red","price":{"$gt":1.5,"$lte":10},"tag":{"$in":["a","b"]}}
+```
+
+| Operator | Argument | Meaning |
+|---|---|---|
+| `$eq`, `$ne` | string | Equal or unequal |
+| `$in`, `$nin` | array of strings | Member or not a member |
+| `$exists` | boolean | Key present or absent |
+| `$gt`, `$gte`, `$lt`, `$lte` | JSON number | Numeric comparison |
+
+Several operators for one key are ANDed. Numeric operators parse the stored
+string as a finite `f64`; missing, invalid and nonfinite stored values never
+match a numeric comparison. `$ne` and `$nin` **do** match a missing key.
+`$in` and `$nin` accept empty arrays. For example, `$in:[]` matches nothing
+and `$nin:[]` matches every point.
+
+`{"$and":[filter,...]}`, `{"$or":[filter,...]}` and `{"$not":filter}`
+work at the top level or inside other logical filters. Empty AND matches all;
+empty OR matches none. Keys beginning with `$` are reserved. Unknown operators
+and wrong argument types return HTTP 400. Maximum nesting depth is 8,
+maximum leaf conditions is 64, and each `$in` or `$nin` array has at most
+1024 values; exceeding a limit returns HTTP 400.
+
+`exact:true` queries and `/v1/scan` evaluate the full filter exhaustively.
+Default queries are approximate except when the filter consists only of the
+declared resident equality. Approximate routing uses only equality conditions
+that every match must satisfy; the full filter is checked after reading
+candidates. A bounded approximate query may omit matching points.
 
 ## `GET /v1/requests/{boundary}/{nonce}`
 
@@ -293,6 +353,12 @@ HTTP metrics, labelled by `endpoint` (`/healthz`, `/metrics`, `/v1/status`,
 
 - `glider_http_requests_total{endpoint, status_class="1xx".."5xx"}` (counter)
 - `glider_http_request_duration_seconds` (histogram; buckets 5 ms to 10 s)
+
+In multi mode these HTTP metrics are process wide, including collection
+routes (counted under `unmatched`), and `glider_open_collections` reports the
+number of open collection services. Admission and engine metrics below are
+exposed in single-collection mode; use each collection's `/status` in multi
+mode for its engine state.
 
 Admission and engine:
 

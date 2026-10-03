@@ -168,6 +168,8 @@ def main():
             "--test", "segmented_crash", "minio_", "--", "--ignored", env=env)
         run("cargo", "test", "--locked", "--release", "--features", "s3",
             "--test", "takeover", "minio_", "--", "--ignored", env=env)
+        run("cargo", "test", "--locked", "--release", "--features", "server",
+            "--test", "collections", "minio_", "--", "--ignored", env=env)
         run(*test_args, "store::s3::tests::minio_", "--", "--ignored", "--nocapture", env=env)
         run(*test_args, "store::s3::tests::server_restart_prepare", "--", "--ignored", env=env)
         run("docker", "kill", "--signal", "KILL", name, capture=True)

@@ -1,7 +1,7 @@
 //! Versioned segmented layout: immutable logs, packs, run indexes and roots.
 use crate::{
-    decode, encode, lease::is_lease_key, matches_filter, ownership, retry, store::ObjectStore,
-    streaming::OwnedDocument, Config, Document, Error, Mutation, Neighbor, Result,
+    decode, encode, lease::is_lease_key, ownership, retry, store::ObjectStore,
+    streaming::OwnedDocument, Config, Document, Error, Filter, Mutation, Neighbor, Result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1421,11 +1421,11 @@ impl<S: ObjectStore> View<S> {
         Ok(self.search_exact_with_reads(query, k, filter, options)?.0)
     }
 
-    pub(crate) fn search_exact_with_reads(
+    pub(crate) fn search_exact_with_reads_filter(
         &self,
         query: &[f32],
         k: usize,
-        filter: &[(&str, &str)],
+        filter: &Filter,
         options: QueryOptions,
     ) -> Result<(Vec<QueryHit>, RemoteReads)> {
         let query = self.config.query(query)?;
@@ -1435,7 +1435,7 @@ impl<S: ObjectStore> View<S> {
         let mut heap = BinaryHeap::new();
         let mut reads = RemoteReads::default();
         self.scan_live_with_reads(&mut reads, |id, vector, metadata| {
-            if matches_filter(metadata, filter) {
+            if filter.matches(metadata) {
                 consider_with(&mut heap, k, self.config, &query, id, vector, || {
                     (
                         options.include_metadata.then(|| metadata.clone()),
@@ -1448,6 +1448,16 @@ impl<S: ObjectStore> View<S> {
         let mut results: Vec<_> = heap.into_iter().map(|ranked| ranked.0).collect();
         results.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
         Ok((results, reads))
+    }
+
+    pub(crate) fn search_exact_with_reads(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &[(&str, &str)],
+        options: QueryOptions,
+    ) -> Result<(Vec<QueryHit>, RemoteReads)> {
+        self.search_exact_with_reads_filter(query, k, &Filter::equality(filter), options)
     }
 
     /// Visit each live point in this published root and tail once.
@@ -3024,6 +3034,32 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .search_exact_with_options(query, k, filter, options)
     }
 
+    pub fn search_exact_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+    ) -> Result<Vec<Neighbor>> {
+        Ok(self
+            .search_exact_with_options_filter(query, k, filter, QueryOptions::default())?
+            .iter()
+            .map(QueryHit::neighbor)
+            .collect())
+    }
+
+    pub fn search_exact_with_options_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &Filter,
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
+        Ok(self
+            .view()
+            .search_exact_with_reads_filter(query, k, filter, options)?
+            .0)
+    }
+
     /// Visit every live document exactly once: authenticated current records
     /// of the selected root in physical order, then the acknowledged log tail.
     /// Fails if any directory entry is missing from its block.
@@ -3910,7 +3946,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{store::LocalStore, Metric};
+    use crate::{matches_filter, store::LocalStore, Metric};
     use std::collections::BTreeMap;
 
     #[test]

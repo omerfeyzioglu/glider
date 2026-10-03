@@ -1498,6 +1498,40 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
             .search_selective_within(query, k, budget, filter, options)
             .map(|(hits, _)| hits)
     }
+
+    pub fn search_selective_within_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        budget: ReadBudget,
+        filter: &crate::Filter,
+    ) -> Result<Vec<Neighbor>> {
+        Ok(self
+            .search_selective_within_options_filter(
+                query,
+                k,
+                budget,
+                filter,
+                QueryOptions::default(),
+            )?
+            .iter()
+            .map(QueryHit::neighbor)
+            .collect())
+    }
+
+    pub fn search_selective_within_options_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        budget: ReadBudget,
+        filter: &crate::Filter,
+        options: QueryOptions,
+    ) -> Result<Vec<QueryHit>> {
+        Ok(self
+            .view()
+            .search_selective_within_filter(query, k, budget, filter, options)?
+            .0)
+    }
 }
 
 impl<S: ObjectStore> View<S> {
@@ -1511,6 +1545,23 @@ impl<S: ObjectStore> View<S> {
         filter: &[(&str, &str)],
         options: QueryOptions,
     ) -> Result<(Vec<QueryHit>, RemoteReads)> {
+        self.search_selective_within_filter(
+            query,
+            k,
+            budget,
+            &crate::Filter::equality(filter),
+            options,
+        )
+    }
+
+    pub(crate) fn search_selective_within_filter(
+        &self,
+        query: &[f32],
+        k: usize,
+        budget: ReadBudget,
+        filter: &crate::Filter,
+        options: QueryOptions,
+    ) -> Result<(Vec<QueryHit>, RemoteReads)> {
         let query = self.config.query(query)?;
         if k == 0 {
             return Ok((Vec::new(), RemoteReads::default()));
@@ -1522,14 +1573,11 @@ impl<S: ObjectStore> View<S> {
         }
         let mut heap = BinaryHeap::new();
         let mut resident = false;
-        let mut reads = match filter {
-            [] => self.route_and_rerank(&query, k, budget, &[], options, &mut heap)?,
-            [(key, value)]
-                if self
-                    .options
-                    .resident_filter
-                    .as_ref()
-                    .is_some_and(|(k, v)| k == key && v == value) =>
+        let required = filter.required_equalities();
+        let mut reads = match self.options.resident_filter.as_ref() {
+            Some((key, value))
+                if required.contains(&(key.as_str(), value.as_str()))
+                    && filter.only_equality(key, value) =>
             {
                 resident = true;
                 let dimensions = self.config.dimensions;
@@ -1555,11 +1603,13 @@ impl<S: ObjectStore> View<S> {
             }
             // Other predicates: read the same routed blocks and keep only
             // matching records. Approximate, and may return fewer than k.
-            _ => self.route_and_rerank(&query, k, budget, filter, options, &mut heap)?,
+            _ => {
+                self.route_and_rerank(&query, k, budget, (&required, filter, options), &mut heap)?
+            }
         };
         for (&id, (_, document)) in self.tail.iter() {
             if let Some(document) = document {
-                if crate::matches_filter(&document.metadata, filter) {
+                if filter.matches(&document.metadata) {
                     consider_with(
                         &mut heap,
                         k,
@@ -1630,10 +1680,10 @@ impl<S: ObjectStore> View<S> {
         query: &[f32],
         k: usize,
         budget: ReadBudget,
-        filter: &[(&str, &str)],
-        options: QueryOptions,
+        selection: (&[(&str, &str)], &crate::Filter, QueryOptions),
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<RemoteReads> {
+        let (required, filter, options) = selection;
         if budget.blocks == 0 || budget.requests == 0 {
             return Err(Error::Invalid(
                 "selective search needs a block budget".into(),
@@ -1657,13 +1707,17 @@ impl<S: ObjectStore> View<S> {
                     .flat_map(|posting| &posting.clusters)
                     .filter(|cluster| probed.contains(cluster))
                     .count();
-                let ranked =
-                    self.route_within(query, postings.saturating_add(candidates), filter, &probed);
+                let ranked = self.route_within(
+                    query,
+                    postings.saturating_add(candidates),
+                    required,
+                    &probed,
+                );
                 let remote = ranked.len();
                 (ranked, remote)
             }
             None => (
-                self.route_within(query, candidates, filter, &[]),
+                self.route_within(query, candidates, required, &[]),
                 budget.blocks,
             ),
         };
@@ -1855,7 +1909,7 @@ impl<S: ObjectStore> View<S> {
         k: usize,
         ranked: &[(f64, usize, usize)],
         (budget, remote_candidates): (ReadBudget, usize),
-        selection: (&[(&str, &str)], QueryOptions),
+        selection: (&crate::Filter, QueryOptions),
         heap: &mut BinaryHeap<Ranked>,
     ) -> Result<RemoteReads> {
         let (filter, options) = selection;
@@ -1992,7 +2046,7 @@ impl<S: ObjectStore> View<S> {
                     vector, metadata, ..
                 } = record.mutation
                 {
-                    if crate::matches_filter(&metadata, filter) {
+                    if filter.matches(&metadata) {
                         consider_with(&mut local, k, config, query, id, &vector, || {
                             (
                                 options.include_metadata.then(|| metadata.clone()),
@@ -2011,6 +2065,7 @@ impl<S: ObjectStore> View<S> {
         };
         // Version 2 blocks stream records from a reused buffer; version 1
         // blocks decode to a `Block` first.
+        let equality_pairs = filter.equality_pairs();
         let stream = |index: usize, bytes: &[u8]| -> Result<Vec<Ranked>> {
             let (_, _, live) = targets[index];
             let reference = references[index];
@@ -2025,13 +2080,24 @@ impl<S: ObjectStore> View<S> {
                 }
                 seen += 1;
                 let (components, entries, metadata) = view.put.expect("current puts");
-                if codec::metadata_matches(entries, metadata, filter) {
+                let decoded = equality_pairs
+                    .is_none()
+                    .then(|| codec::metadata(entries, metadata));
+                let matches = match &decoded {
+                    Some(map) => filter.matches(map),
+                    None => {
+                        codec::metadata_matches(entries, metadata, equality_pairs.as_ref().unwrap())
+                    }
+                };
+                if matches {
                     codec::components(components, &mut vector);
                     consider_with(&mut local, k, config, query, view.id, &vector, || {
                         (
-                            options
-                                .include_metadata
-                                .then(|| codec::metadata(entries, metadata)),
+                            options.include_metadata.then(|| {
+                                decoded
+                                    .clone()
+                                    .unwrap_or_else(|| codec::metadata(entries, metadata))
+                            }),
                             options.include_vector.then(|| vector.clone()),
                         )
                     });
