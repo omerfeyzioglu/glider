@@ -35,6 +35,7 @@ fn config(path: &Path, max: usize) -> ServerConfig {
         serving,
         limits: Limits::default(),
         token: None,
+        console: true,
         lease: Duration::from_millis(100),
         multi: true,
         max_open_collections: max,
@@ -385,11 +386,13 @@ async fn collections_lifecycle_isolation_and_restart() {
         &app,
         "POST",
         "/v1/collections/b/query",
-        Some(json!({"vector":[1.0,2.0,3.0],"exact":true})),
+        Some(json!({"vector":[1.0,2.0,3.0],"exact":true,"profile":true})),
     )
     .await;
     assert_eq!(code, StatusCode::OK, "{result}");
     assert_eq!(result["results"][0]["id"], 1);
+    assert_eq!(result["profile"]["mode"], "exact_scan");
+    assert!(result["profile"]["server_ms"].as_f64().unwrap() >= 0.0);
     let (code, scan) = call(&app, "POST", "/v1/collections/a/scan", Some(json!({}))).await;
     assert_eq!(code, StatusCode::OK, "{scan}");
     assert_eq!(scan["ids"], json!([1]));

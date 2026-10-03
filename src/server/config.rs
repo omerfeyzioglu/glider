@@ -72,6 +72,8 @@ pub struct ServerConfig {
     pub limits: Limits,
     /// Required `Authorization: Bearer` token, if set.
     pub token: Option<String>,
+    /// Serve the built-in browser console on `/console` and redirect `/` to it.
+    pub console: bool,
     /// Writer lease duration: a restart after a crash waits at most this
     /// long before taking over. It never affects correctness.
     pub lease: Duration,
@@ -105,6 +107,7 @@ impl ServerConfig {
     /// Read the configuration from environment variables:
     ///
     /// - `GLIDER_LISTEN` (default `127.0.0.1:8080`), `GLIDER_API_TOKEN`
+    /// - `GLIDER_CONSOLE` (default `1`; `0` disables the browser console)
     /// - `GLIDER_DIMENSIONS`, `GLIDER_METRIC` (`squared_euclidean`,
     ///   `manhattan` or `cosine`), optional `GLIDER_RESIDENT_FILTER=key=value`,
     ///   `GLIDER_ROUTED_KEYS=key1,key2` (at most four)
@@ -128,6 +131,11 @@ impl ServerConfig {
     ///   the rows its centroid count was sized for; 0 disables
     pub fn from_env() -> crate::Result<Self> {
         let invalid = |name: &str| Error::Invalid(format!("invalid {name}"));
+        let console = match env("GLIDER_CONSOLE").as_deref() {
+            None | Some("1") => true,
+            Some("0") => false,
+            _ => return Err(invalid("GLIDER_CONSOLE")),
+        };
         let multi = std::env::var_os("GLIDER_DIMENSIONS").is_none();
         if multi
             && [
@@ -233,6 +241,7 @@ impl ServerConfig {
                 ..Limits::default()
             },
             token: env("GLIDER_API_TOKEN"),
+            console,
             lease: match env("GLIDER_LEASE_SECONDS") {
                 Some(seconds) => seconds
                     .parse()

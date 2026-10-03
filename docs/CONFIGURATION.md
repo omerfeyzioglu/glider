@@ -35,6 +35,7 @@ single-collection mode.
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | unset | Credentials, read by the `object_store` S3 client (`AmazonS3Builder::from_env`). |
 | `GLIDER_LISTEN` | `127.0.0.1:8080` | Listen address (`0.0.0.0:8080` in the Docker image). |
 | `GLIDER_API_TOKEN` | unset | If set, required as `Authorization: Bearer <token>` on every endpoint except `/healthz` and `/metrics`. |
+| `GLIDER_CONSOLE` | `1` | Serve the built-in web console at `/console`, with `/` redirecting there. Set `0` to disable both routes. The page is public; its API calls use the token entered in the page. |
 | `GLIDER_LEASE_SECONDS` | `10` | Writer lease duration (fractions allowed). After a crash, the next start waits at most this long before taking over. |
 | `GLIDER_CACHE_DIR` | `glider-cache` | Local block cache directory, relative to the working directory (`/var/lib/glider/cache` in the Docker image). Any local disk works: instance-store NVMe, EBS or a container volume. |
 | `GLIDER_CACHE_BYTES` | `268435456` (256 MiB) | Local cache limit. While idle the server copies the collection into the cache up to this limit; set it above `cache.namespace_bytes` from `/v1/status` to keep everything local. |

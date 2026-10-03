@@ -49,6 +49,9 @@ docs.upsert([{"id": 1, "vector": [0, 0, 1], "metadata": {"lang": "en"}}])
 print(docs.query([0, 0, 1], k=1, include_metadata=True))
 ```
 
+Open <http://localhost:8080/console> to browse collections and run queries
+in the browser.
+
 For S3 or MinIO storage, the Docker Compose demo and building from source,
 see [installation](docs/INSTALL.md); every setting is listed in
 [configuration](docs/CONFIGURATION.md).

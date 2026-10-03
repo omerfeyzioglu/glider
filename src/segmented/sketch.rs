@@ -1535,6 +1535,18 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
 }
 
 impl<S: ObjectStore> View<S> {
+    pub(crate) fn uses_resident_filter(&self, filter: &crate::Filter) -> bool {
+        self.options
+            .resident_filter
+            .as_ref()
+            .is_some_and(|(key, value)| {
+                filter
+                    .required_equalities()
+                    .contains(&(key.as_str(), value.as_str()))
+                    && filter.only_equality(key, value)
+            })
+    }
+
     /// `SegmentedDatabase::search_selective_within_options` on this view,
     /// with the remote reads the query caused.
     pub(crate) fn search_selective_within(
@@ -1574,38 +1586,32 @@ impl<S: ObjectStore> View<S> {
         let mut heap = BinaryHeap::new();
         let mut resident = false;
         let required = filter.required_equalities();
-        let mut reads = match self.options.resident_filter.as_ref() {
-            Some((key, value))
-                if required.contains(&(key.as_str(), value.as_str()))
-                    && filter.only_equality(key, value) =>
-            {
-                resident = true;
-                let dimensions = self.config.dimensions;
-                for loaded in &self.sketches.packs {
-                    let sketch = &loaded.sketch;
-                    for (index, &row) in sketch.resident_rows.iter().enumerate() {
-                        let row = row as usize;
-                        if self.row_current(loaded, row) {
-                            let vector = &sketch.resident_vectors
-                                [index * dimensions..(index + 1) * dimensions];
-                            consider(
-                                &mut heap,
-                                k,
-                                self.config,
-                                &query,
-                                sketch.ids.get(row),
-                                vector,
-                            );
-                        }
+        let mut reads = if self.uses_resident_filter(filter) {
+            resident = true;
+            let dimensions = self.config.dimensions;
+            for loaded in &self.sketches.packs {
+                let sketch = &loaded.sketch;
+                for (index, &row) in sketch.resident_rows.iter().enumerate() {
+                    let row = row as usize;
+                    if self.row_current(loaded, row) {
+                        let vector =
+                            &sketch.resident_vectors[index * dimensions..(index + 1) * dimensions];
+                        consider(
+                            &mut heap,
+                            k,
+                            self.config,
+                            &query,
+                            sketch.ids.get(row),
+                            vector,
+                        );
                     }
                 }
-                RemoteReads::default()
             }
+            RemoteReads::default()
+        } else {
             // Other predicates: read the same routed blocks and keep only
             // matching records. Approximate, and may return fewer than k.
-            _ => {
-                self.route_and_rerank(&query, k, budget, (&required, filter, options), &mut heap)?
-            }
+            self.route_and_rerank(&query, k, budget, (&required, filter, options), &mut heap)?
         };
         for (&id, (_, document)) in self.tail.iter() {
             if let Some(document) = document {

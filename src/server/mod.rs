@@ -17,7 +17,7 @@ mod recovery;
 
 pub use catalog::{Catalog, Collection, CreateCollection};
 pub use config::{ServerConfig, Store, StoreConfig};
-pub use http::{multi_router, router};
+pub use http::{multi_router, multi_router_with_console, router, router_with_console};
 pub use multi::Multi;
 pub use recovery::stage_segmented_namespace;
 
@@ -186,7 +186,18 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
         let multi = tokio::task::spawn_blocking(move || Multi::new(setup))
             .await
             .map_err(|error| Error::Invalid(error.to_string()))??;
-        let app = multi_router(multi.clone(), config.token.clone());
+        let app = multi_router_with_console(multi.clone(), config.token.clone(), config.console);
+        let sweeper = multi.clone();
+        let sweep_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // Multi::new starts the first sweep.
+            loop {
+                interval.tick().await;
+                if let Err(error) = sweeper.sweep().await {
+                    eprintln!("collection orphan sweep failed: {error}");
+                }
+            }
+        });
         let served = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let interrupt = tokio::signal::ctrl_c();
@@ -203,12 +214,13 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
                 }
             })
             .await;
+        sweep_task.abort();
         let stopped = multi.shutdown().await;
         served?;
         return stopped;
     }
     let running = tokio::task::block_in_place(|| config.start())?;
-    let app = router(running.client(), config.token.clone());
+    let app = router_with_console(running.client(), config.token.clone(), config.console);
     let deposed = running.deposed();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
