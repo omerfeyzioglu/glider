@@ -64,7 +64,7 @@ class FakeServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-            do_GET = do_POST = _handle
+            do_GET = do_POST = do_DELETE = _handle
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._httpd.daemon_threads = True
@@ -106,19 +106,23 @@ requires_server = unittest.skipUnless(
 
 
 class RealServer:
-    """A glider-server process on a local data directory."""
+    """A glider-server process on a local data directory.
 
-    def __init__(self, dimensions, metric=None, token=None):
+    ``dimensions=None`` starts it in multi-collection mode (no GLIDER_DIMENSIONS).
+    """
+
+    def __init__(self, dimensions=None, metric=None, token=None):
         self.dir = tempfile.mkdtemp(prefix="glider-py-test-")
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         env = {
             "PATH": os.environ.get("PATH", ""),
             "GLIDER_DATA_DIR": os.path.join(self.dir, "data"),
-            "GLIDER_DIMENSIONS": str(dimensions),
             "GLIDER_LISTEN": f"127.0.0.1:{self.port}",
             "GLIDER_CACHE_DIR": os.path.join(self.dir, "cache"),
         }
+        if dimensions is not None:
+            env["GLIDER_DIMENSIONS"] = str(dimensions)
         if metric:
             env["GLIDER_METRIC"] = metric
         if token:

@@ -18,7 +18,12 @@ uses [Semantic Versioning](https://semver.org/).
   queries return every match; `POST /v1/points/get` for up to 1000 points per
   request; `POST /v1/scan` to count, list and page matching points by id.
 - Python client (`clients/python`) and an MCP memory server (`glider-mcp`)
-  with `remember`, `recall`, `forget` and `memory_count` tools.
+  with `remember`, `recall`, `forget` and `memory_count` tools. The client
+  binds to a collection (`Client(collection=...)`, `client.collection(name)`)
+  and manages them (`create_collection`, `list_collections`,
+  `get_collection`, `delete_collection`); with `GLIDER_COLLECTION` the MCP
+  server creates its cosine collection on first use, so the server no longer
+  needs `GLIDER_DIMENSIONS`.
 
 ## [1.0.1] - 2026-10-03
 

@@ -7,7 +7,7 @@ import unittest
 import support
 from support import DIMS, DROP, FakeServer, RealServer, fake_embed, fast_client, requires_server, supports
 
-from glider_client import Client, Point
+from glider_client import Client, GliderError, Point
 from glider_client.mcp_server import ConfigError, Memory, memory_id
 
 try:
@@ -154,6 +154,86 @@ class MemoryUnitTests(unittest.TestCase):
         self.assertEqual(self.server.calls("POST", "/v1/scan")[0][3]["filter"], {"scope": "work"})
 
 
+class MemoryCollectionTests(unittest.TestCase):
+    """GLIDER_COLLECTION mode: the collection is created on first use."""
+
+    P = "/v1/collections/memory"
+
+    def setUp(self):
+        self.server = FakeServer()
+        self.addCleanup(self.server.close)
+        s, p = self.server, self.P
+        s.script("GET", f"{p}/status", (200, {"sequence": 3}))
+        s.script("POST", f"{p}/query", (200, {"results": [], "sequence": 3}))
+        s.script("POST", f"{p}/write", (200, {"sequence": 4}))
+        s.script("POST", f"{p}/scan", (200, {"ids": [], "next": None, "matched": 2, "sequence": 3}))
+        self.memory = Memory(fast_client(self.server.url), fake_embed, collection="memory")
+
+    def creates(self):
+        return [r[3] for r in self.server.calls("POST", "/v1/collections")]
+
+    def test_created_on_first_use_with_embedder_dimension_and_cosine(self):
+        self.server.script("POST", "/v1/collections", (201, {"name": "memory"}))
+        self.memory.remember("hello world", scope="s")
+        self.assertEqual(self.creates(), [{"name": "memory", "dimensions": DIMS, "metric": "cosine"}])
+        (write,) = [r[3] for r in self.server.calls("POST", f"{self.P}/write")]
+        self.assertEqual(write["upsert"][0]["vector"], fake_embed(["hello world"])[0])
+        # Data calls go to the collection only; nothing on the un-prefixed routes.
+        self.assertEqual(self.server.calls("POST", "/v1/write"), [])
+        self.assertEqual(self.server.calls("POST", "/v1/query"), [])
+
+    def test_existing_collection_with_same_config_is_reused(self):
+        self.server.script("POST", "/v1/collections", (200, {"name": "memory"}))
+        self.assertEqual(self.memory.memory_count("s"), 2)
+        self.assertEqual(len(self.creates()), 1)
+
+    def test_create_runs_once_per_memory(self):
+        self.server.script("POST", "/v1/collections", (201, {"name": "memory"}))
+        self.memory.remember("a")
+        self.memory.remember("b")
+        self.memory.recall("a")
+        self.assertEqual(len(self.creates()), 1)
+
+    def test_other_config_gives_clear_config_error(self):
+        self.server.script("POST", "/v1/collections", (409, {"error": "collection memory exists with dimensions 3"}))
+        for call in (
+            lambda: self.memory.remember("hello"),
+            lambda: self.memory.recall("hello"),
+            lambda: self.memory.forget(scope="s"),
+            lambda: self.memory.memory_count(),
+        ):
+            with self.assertRaises(ConfigError) as ctx:
+                call()
+            message = str(ctx.exception)
+            self.assertIn("'memory'", message)
+            self.assertIn("different configuration", message)
+            self.assertIn(f"{DIMS} dimensions", message)
+            self.assertIn("cosine", message)
+        self.assertEqual(self.server.calls("POST", f"{self.P}/write"), [])
+
+    def test_single_collection_server_gives_clear_config_error(self):
+        self.server.script("POST", "/v1/collections", (404, {"error": "not found"}))
+        with self.assertRaises(ConfigError) as ctx:
+            self.memory.remember("hello")
+        self.assertIn("multi-collection", str(ctx.exception))
+
+    def test_other_errors_propagate_and_are_retried_on_next_use(self):
+        from glider_client import GliderError
+
+        self.server.script("POST", "/v1/collections", (500, {"error": "boom"}), (201, {"name": "memory"}))
+        with self.assertRaises(GliderError):
+            self.memory.remember("hello")
+        self.memory.remember("hello")
+        self.assertEqual(len(self.creates()), 2)
+
+    def test_without_collection_nothing_is_created(self):
+        self.server.script("GET", "/v1/status", (200, {"sequence": 3}))
+        self.server.script("POST", "/v1/query", (200, {"results": [], "sequence": 3}))
+        self.server.script("POST", "/v1/write", (200, {"sequence": 4}))
+        Memory(fast_client(self.server.url), fake_embed).remember("x")
+        self.assertEqual(self.creates(), [])
+
+
 @requires_server
 class MemoryIntegrationTests(unittest.TestCase):
     @classmethod
@@ -208,6 +288,51 @@ class MemoryIntegrationTests(unittest.TestCase):
         self.assertIn("GLIDER_DIMENSIONS=3", str(ctx.exception))
 
 
+@requires_server
+class MemoryCollectionIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = RealServer()  # multi-collection mode
+        cls.client = Client(cls.server.url, timeout=10)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def setUp(self):
+        try:
+            self.client.list_collections()
+        except GliderError:
+            self.skipTest("server lacks collections")
+
+    def test_auto_created_cosine_collection_roundtrip(self):
+        memory = Memory(self.client, fake_embed, collection="mcp-memory")
+        a = memory.remember("alpha beta gamma", scope="s1")
+        memory.remember("delta epsilon", scope="s1")
+        memory.remember("alpha beta gamma", scope="s2")
+        self.assertEqual(memory.memory_count("s1"), 2)
+        hits = memory.recall("alpha beta", k=5, scope="s1")
+        self.assertEqual(hits[0]["id"], a)
+        self.assertGreater(hits[0]["score"], hits[1]["score"])
+        description = self.client.get_collection("mcp-memory")
+        self.assertEqual((description["dimensions"], description["metric"]), (DIMS, "cosine"))
+        # A second Memory (a restarted MCP server) reuses it and sees the data.
+        again = Memory(self.client, fake_embed, collection="mcp-memory")
+        self.assertEqual(again.memory_count("s1"), 2)
+        self.assertEqual(again.forget(scope="s1"), 2)
+        self.assertEqual(again.memory_count("s1"), 0)
+        self.assertEqual(again.memory_count("s2"), 1)
+
+    def test_mismatched_existing_collection_is_a_config_error(self):
+        self.client.create_collection("mcp-other", 3, metric="cosine")
+        with self.assertRaises(ConfigError) as ctx:
+            Memory(self.client, fake_embed, collection="mcp-other").remember("hello")
+        self.assertIn("different configuration", str(ctx.exception))
+        self.client.create_collection("mcp-euclid", DIMS)  # right dimension, wrong metric
+        with self.assertRaises(ConfigError):
+            Memory(self.client, fake_embed, collection="mcp-euclid").memory_count()
+
+
 @unittest.skipUnless(HAVE_MCP, "the 'mcp' package is not installed")
 class McpServerTests(unittest.TestCase):
     def setUp(self):
@@ -218,7 +343,27 @@ class McpServerTests(unittest.TestCase):
         self.server.script("POST", "/v1/write", (200, {"sequence": 4}))
         self.server.script("POST", "/v1/scan", (200, {"ids": [1], "next": None, "matched": 5, "sequence": 3}))
 
+    def test_tools_over_stdio_with_collection(self):
+        server = self.server
+        server.script("POST", "/v1/collections", (201, {"name": "memory"}))
+        for method, path, item in (
+            ("GET", "/v1/collections/memory/status", (200, {"sequence": 3})),
+            ("POST", "/v1/collections/memory/write", (200, {"sequence": 4})),
+            ("POST", "/v1/collections/memory/scan", (200, {"ids": [1], "next": None, "matched": 5, "sequence": 3})),
+        ):
+            server.script(method, path, item)
+        self.run_tools({"GLIDER_COLLECTION": "memory"})
+        self.assertEqual(
+            [r[3] for r in server.calls("POST", "/v1/collections")],
+            [{"name": "memory", "dimensions": DIMS, "metric": "cosine"}],
+        )
+        self.assertEqual(len(server.calls("POST", "/v1/collections/memory/write")), 1)
+        self.assertEqual(server.calls("POST", "/v1/write"), [])
+
     def test_tools_over_stdio(self):
+        self.run_tools({})
+
+    def run_tools(self, extra_env):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
@@ -226,7 +371,7 @@ class McpServerTests(unittest.TestCase):
         params = StdioServerParameters(
             command=sys.executable,
             args=[os.path.join(here, "stdio_server.py")],
-            env={**os.environ, "GLIDER_URL": self.server.url},
+            env={**os.environ, "GLIDER_URL": self.server.url, **extra_env},
         )
 
         async def run():

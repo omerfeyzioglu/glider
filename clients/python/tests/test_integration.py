@@ -146,6 +146,91 @@ class IntegrationTests(unittest.TestCase):
 
 
 @requires_server
+class CollectionIntegrationTests(unittest.TestCase):
+    """A server started without GLIDER_DIMENSIONS serves many collections."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = RealServer()
+        cls.client = Client(cls.server.url, timeout=10)
+        try:
+            cls.client.list_collections()
+        except GliderError:
+            cls.server.stop()
+            raise unittest.SkipTest("server lacks collections")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_lifecycle_isolation_and_data_calls(self):
+        c = self.client
+        self.assertEqual(c.list_collections(), [])
+        self.assertIsNone(c.get_collection("docs"))
+        created = c.create_collection("docs", 3)
+        self.assertEqual((created["name"], created["dimensions"], created["metric"]),
+                         ("docs", 3, "squared_euclidean"))
+        self.assertEqual(c.create_collection("docs", 3)["name"], "docs")  # idempotent
+        with self.assertRaises(GliderError) as ctx:
+            c.create_collection("docs", 4)
+        self.assertEqual(ctx.exception.status, 409)
+        c.create_collection("notes", 2, metric="cosine")
+        self.assertEqual([d["name"] for d in c.list_collections()], ["docs", "notes"])
+        self.assertEqual(c.get_collection("notes")["metric"], "cosine")
+        self.assertIn("sequence", c.get_collection("docs")["status"])
+
+        docs = c.collection("docs")
+        notes = Client(self.server.url, timeout=10, collection="notes")
+        before = docs.status()["sequence"]
+        seq = docs.upsert_many(
+            [{"id": i, "vector": [i, 0, 0], "metadata": {"parity": str(i % 2)}} for i in range(1, 251)]
+        )
+        self.assertEqual(seq, 250)
+        self.assertGreater(docs.status()["sequence"], before)
+        notes.upsert([{"id": 1, "vector": [1, 0]}])
+        self.assertEqual(docs.count(), 250)
+        self.assertEqual(notes.count(), 1)  # isolated from "docs"
+
+        hits = docs.query([10.2, 0, 0], k=2, include_metadata=True)
+        self.assertEqual([h.id for h in hits], [10, 11])
+        self.assertEqual(hits[0].metadata, {"parity": "0"})
+        self.assertEqual(docs.get(7).vector, [7.0, 0.0, 0.0])
+        self.assertIsNone(docs.get(9999))
+        self.assertEqual([p.id for p in docs.get_many([3, 9999, 1])[:1]], [3])
+        self.assertEqual(len(docs.query([1, 0, 0], k=300, filter={"parity": "1"}, exact=True)), 125)
+        self.assertEqual(list(docs.scan({"parity": "0"}, page_size=40))[:3], [2, 4, 6])
+        self.assertEqual(docs.delete_by_filter({"parity": "1"}), 125)
+        self.assertEqual(docs.count(), 125)
+        self.assertEqual(docs.delete([2, 123456]) > 0, True)
+        self.assertEqual(docs.count(), 124)
+
+        # Wrong dimension is rejected per collection.
+        with self.assertRaises(GliderError) as ctx:
+            notes.upsert([{"id": 2, "vector": [1, 2, 3]}])
+        self.assertEqual(ctx.exception.status, 400)
+
+        self.assertTrue(c.delete_collection("docs"))
+        self.assertFalse(c.delete_collection("docs"))
+        self.assertIsNone(c.get_collection("docs"))
+        with self.assertRaises(GliderError) as ctx:
+            docs.status()
+        self.assertEqual(ctx.exception.status, 404)
+        self.assertEqual(notes.count(), 1)  # other collections unaffected
+        # Re-creating the name starts empty.
+        c.create_collection("docs", 3)
+        self.assertEqual(docs.count(), 0)
+        self.assertTrue(c.delete_collection("docs"))
+        self.assertTrue(c.delete_collection("notes"))
+        self.assertEqual(c.list_collections(), [])
+
+    def test_unprefixed_data_routes_are_404(self):
+        with self.assertRaises(GliderError) as ctx:
+            self.client.status()
+        self.assertEqual(ctx.exception.status, 404)
+        self.assertTrue(self.client.health())  # /healthz stays global
+
+
+@requires_server
 class AuthTests(unittest.TestCase):
     def test_bearer_token(self):
         token = secrets.token_hex(16)

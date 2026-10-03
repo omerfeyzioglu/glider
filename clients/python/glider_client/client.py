@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import math
 import random
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -23,6 +25,9 @@ _BUSY = 429
 # Statuses meaning "the server (or a proxy in front of it) failed; for a write the
 # outcome is uncertain". 500 is excluded: the server uses it for corruption.
 _UNCERTAIN = (502, 503, 504)
+
+# Collection names accepted by the server in multi-collection mode.
+_COLLECTION_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
 class GliderError(Exception):
@@ -94,12 +99,32 @@ def _vector(values: Iterable[Any]) -> List[float]:
     return vector
 
 
+def _check_collection(name: Any) -> str:
+    if not isinstance(name, str) or not _COLLECTION_NAME.fullmatch(name):
+        raise ValueError(
+            f"collection name must match [a-z0-9][a-z0-9-]{{0,62}}, got {name!r}"
+        )
+    return name
+
+
+def _check_dimensions(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"dimensions must be a positive integer, got {value!r}")
+    return value
+
+
 def _filter(value: Optional[Mapping[str, str]]) -> Dict[str, str]:
     return dict(value) if value else {}
 
 
 class Client:
     """Client for one ``glider-server`` collection.
+
+    Without ``collection`` the data calls use the single-collection routes
+    (``/v1/write``, ...), for a server started with ``GLIDER_DIMENSIONS``. With
+    ``collection`` they use ``/v1/collections/{collection}/...``, for a server in
+    multi-collection mode; :meth:`collection` returns such a bound copy and
+    ``create_collection`` and friends manage the collections themselves.
 
     Retry behaviour:
 
@@ -123,6 +148,7 @@ class Client:
         max_retries: int = 5,
         backoff_base: float = 0.1,
         backoff_max: float = 5.0,
+        collection: Optional[str] = None,
     ) -> None:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -136,6 +162,22 @@ class Client:
         self.backoff_base = backoff_base
         self.backoff_max = backoff_max
         self._sleep = time.sleep
+        self._collection = None if collection is None else _check_collection(collection)
+        self._api = (
+            "/v1" if collection is None else f"/v1/collections/{self._collection}"
+        )
+
+    @property
+    def collection_name(self) -> Optional[str]:
+        """The collection this client is bound to, or ``None``."""
+        return self._collection
+
+    def collection(self, name: str) -> "Client":
+        """A copy of this client bound to collection ``name`` (same url, token and retry settings)."""
+        bound = copy.copy(self)
+        bound._collection = _check_collection(name)
+        bound._api = f"/v1/collections/{name}"
+        return bound
 
     # -- transport ---------------------------------------------------------
 
@@ -197,8 +239,8 @@ class Client:
     # -- status ------------------------------------------------------------
 
     def status(self) -> Dict[str, Any]:
-        """``GET /v1/status``: sequence, queue, cache and clustering state."""
-        return self._read("GET", "/v1/status")
+        """``GET /v1/status`` (or the bound collection's ``/status``): sequence, queue, cache and clustering state."""
+        return self._read("GET", f"{self._api}/status")
 
     def health(self) -> bool:
         """``GET /healthz``: True while the server accepts work."""
@@ -206,6 +248,61 @@ class Client:
             self._request("GET", "/healthz")
         except (GliderError, _TransportError):
             return False
+        return True
+
+    # -- collections (multi-collection mode) --------------------------------
+
+    def create_collection(
+        self,
+        name: str,
+        dimensions: int,
+        metric: str = "squared_euclidean",
+        resident_filter: Optional[Mapping[str, str]] = None,
+        routed_keys: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """``POST /v1/collections``: create a collection and return its description.
+
+        Idempotent: creating a collection that already exists with the same
+        configuration returns its description. A different configuration raises
+        :class:`GliderError` with status 409. Dimensions and metric are fixed at
+        creation. Only a server started without ``GLIDER_DIMENSIONS`` has
+        collections.
+        """
+        body: Dict[str, Any] = {
+            "name": _check_collection(name),
+            "dimensions": _check_dimensions(dimensions),
+            "metric": metric,
+        }
+        if resident_filter is not None:
+            body["resident_filter"] = dict(resident_filter)
+        if routed_keys is not None:
+            body["routed_keys"] = list(routed_keys)
+        return self._read("POST", "/v1/collections", body)
+
+    def list_collections(self) -> List[Dict[str, Any]]:
+        """``GET /v1/collections``: descriptions of all collections, sorted by name."""
+        return self._read("GET", "/v1/collections")["collections"]
+
+    def get_collection(self, name: str) -> Optional[Dict[str, Any]]:
+        """Description of one collection with its current ``status``, or ``None`` if absent."""
+        try:
+            return self._read("GET", f"/v1/collections/{_check_collection(name)}")
+        except GliderError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def delete_collection(self, name: str) -> bool:
+        """``DELETE /v1/collections/{name}``: True if deleted, False if it did not exist.
+
+        Irreversible: a later create of the same name starts empty.
+        """
+        try:
+            self._read("DELETE", f"/v1/collections/{_check_collection(name)}")
+        except GliderError as exc:
+            if exc.status == 404:
+                return False
+            raise
         return True
 
     # -- writes ------------------------------------------------------------
@@ -235,7 +332,7 @@ class Client:
         boundary = self.status()["sequence"]
         request_id = {"boundary": boundary, "nonce": secrets.token_hex(16)}
         body = {"upsert": ups, "delete": dels, "request_id": request_id}
-        resolve_path = f"/v1/requests/{boundary}/{request_id['nonce']}"
+        resolve_path = f"{self._api}/requests/{boundary}/{request_id['nonce']}"
         attempt = 0
         resolve_first = False
         last = ""
@@ -262,7 +359,7 @@ class Client:
                     resolve_first = False  # not committed: resend the same body
             if not resolve_first:
                 try:
-                    return self._request("POST", "/v1/write", body)["sequence"]
+                    return self._request("POST", f"{self._api}/write", body)["sequence"]
                 except _TransportError as exc:
                     resolve_first = True
                     last = str(exc)
@@ -348,7 +445,7 @@ class Client:
             body["filter"] = dict(filter)
         if exact:
             body["exact"] = True
-        response = self._read("POST", "/v1/query", body)
+        response = self._read("POST", f"{self._api}/query", body)
         return [
             Hit(
                 id=r["id"],
@@ -362,7 +459,7 @@ class Client:
     def get(self, id: int) -> Optional[Point]:
         """Return one point (vector and metadata), or ``None`` if absent."""
         try:
-            r = self._read("GET", f"/v1/points/{_check_id(id)}")
+            r = self._read("GET", f"{self._api}/points/{_check_id(id)}")
         except GliderError as exc:
             if exc.status == 404:
                 return None
@@ -382,7 +479,7 @@ class Client:
             chunk = ids[start : start + MAX_GET_IDS]
             r = self._read(
                 "POST",
-                "/v1/points/get",
+                f"{self._api}/points/get",
                 {
                     "ids": chunk,
                     "include_vector": include_vector,
@@ -411,7 +508,7 @@ class Client:
         }
         if after is not None:
             body["after"] = after
-        return self._read("POST", "/v1/scan", body)
+        return self._read("POST", f"{self._api}/scan", body)
 
     def scan(
         self,

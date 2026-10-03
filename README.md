@@ -309,14 +309,19 @@ recovery semantics in full.
 ## Python client and agent memory
 
 [`clients/python`](clients/python/README.md) is a dependency-free Python
-client for the whole HTTP API, with safe write retries, paging scans, count
-and delete-by-filter. Its optional MCP server gives AI agents (Claude Code,
-Claude Desktop, Cursor and other MCP clients) durable `remember`, `recall`
-and `forget` tools backed by Glider:
+client for the whole HTTP API, with safe write retries, paging scans, count,
+delete-by-filter and collection management (`create_collection`,
+`client.collection(name)`). Its optional MCP server gives AI agents (Claude
+Code, Claude Desktop, Cursor and other MCP clients) durable `remember`,
+`recall` and `forget` tools backed by Glider. Run the server in
+multi-collection mode (no `GLIDER_DIMENSIONS`); the MCP server creates its
+collection, sized for the embedding model, on first use:
 
 ```sh
+docker run -d --name glider -p 8080:8080 -v glider-data:/var/lib/glider \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.1.0
 pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"
-claude mcp add glider -- glider-mcp
+claude mcp add glider -e GLIDER_COLLECTION=memory -- glider-mcp
 ```
 
 ## Library
