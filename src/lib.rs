@@ -71,11 +71,14 @@ pub enum Metric {
 impl Metric {
     fn score(self, a: &[f32], b: &[f32]) -> f64 {
         if self == Self::Cosine {
-            return 1.
-                - a.iter()
-                    .zip(b)
-                    .map(|(&x, &y)| f64::from(x) * f64::from(y))
-                    .sum::<f64>();
+            // Unit vectors: rounding can push the dot product of a vector
+            // with itself slightly above 1; a distance is never negative.
+            let dot = a
+                .iter()
+                .zip(b)
+                .map(|(&x, &y)| f64::from(x) * f64::from(y))
+                .sum::<f64>();
+            return (1. - dot).max(0.);
         }
         a.iter()
             .zip(b)

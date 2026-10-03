@@ -35,6 +35,7 @@ fn config(path: &Path, max: usize) -> ServerConfig {
         serving,
         limits: Limits::default(),
         token: None,
+        console: true,
         lease: Duration::from_millis(100),
         multi: true,
         max_open_collections: max,
@@ -168,6 +169,143 @@ fn catalog_delete_crash_window_and_recreate() {
     assert!(catalog.get("alpha").unwrap().is_none());
 }
 
+#[test]
+fn catalog_list_reads_many_collections_in_name_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = StoreConfig::Local(temp.path().to_path_buf());
+    let catalog = Catalog::new(base.clone());
+    for index in (0..200).rev() {
+        catalog
+            .create(request(&format!("collection-{index:03}"), 2))
+            .unwrap();
+    }
+    let names: Vec<_> = catalog
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|collection| collection.name)
+        .collect();
+    let expected: Vec<_> = (0..200)
+        .map(|index| format!("collection-{index:03}"))
+        .collect();
+    assert_eq!(names, expected);
+
+    base.child("catalog")
+        .open()
+        .unwrap()
+        .create("corrupt", b"not JSON")
+        .unwrap();
+    assert!(matches!(catalog.list(), Err(glider::Error::Corrupt(_))));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_background_sweep_eventually_removes_orphan() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(temp.path(), 2);
+    let catalog = Catalog::new(config.store.clone());
+    let (old, _) = catalog.create(request("orphan", 2)).unwrap();
+    let old_data = catalog.data_store(&old).open().unwrap();
+    old_data.create("point", b"old").unwrap();
+    catalog.delete(&old).unwrap();
+
+    let multi = Multi::new(config).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if old_data.get("point").unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background sweep should remove the orphan");
+    multi.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_sweep_preserves_a_collection_created_during_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(temp.path(), 2);
+    let catalog = Catalog::new(config.store.clone());
+    let (marker, _) = catalog.create(request("a-marker", 2)).unwrap();
+    let (blocker, _) = catalog.create(request("m-blocker", 2)).unwrap();
+    let (old, _) = catalog.create(request("z-recreated", 2)).unwrap();
+    let marker_data = catalog.data_store(&marker).open().unwrap();
+    let blocker_data = catalog.data_store(&blocker).open().unwrap();
+    let old_data = catalog.data_store(&old).open().unwrap();
+    marker_data.create("point", b"marker").unwrap();
+    blocker_data.create("point", b"blocker").unwrap();
+    old_data.create("point", b"old").unwrap();
+    for record in [&marker, &blocker, &old] {
+        catalog.delete(record).unwrap();
+    }
+
+    // The local store locks its directory for removal. Hold the middle
+    // orphan until the first has been removed, so the sweep's initial catalog
+    // listing is complete and it has not reached the recreated name.
+    let blocker_path = match catalog.data_store(&blocker) {
+        StoreConfig::Local(path) => path,
+        StoreConfig::S3 { .. } => unreachable!(),
+    };
+    let blocker_lock = std::fs::File::open(blocker_path).unwrap();
+    blocker_lock.lock().unwrap();
+    let multi = Multi::new(config).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if marker_data.get("point").unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sweep should reach the blocked orphan");
+
+    let (live, _) = multi.create(request("z-recreated", 2)).await.unwrap();
+    assert_ne!(live.generation, old.generation);
+    let live_data = catalog.data_store(&live).open().unwrap();
+    live_data.create("point", b"live").unwrap();
+    std::fs::File::unlock(&blocker_lock).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if blocker_data.get("point").unwrap().is_none()
+                && old_data.get("point").unwrap().is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sweep should finish removing the old generations");
+    assert_eq!(live_data.get("point").unwrap(), Some(b"live".to_vec()));
+    multi.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_closes_every_open_collection_and_releases_its_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config(temp.path(), 12);
+    config.collection_idle = Duration::ZERO;
+    let multi = Multi::new(config.clone()).unwrap();
+    for index in 0..12 {
+        let name = format!("open-{index:02}");
+        multi.create(request(&name, 2)).await.unwrap();
+        drop(multi.use_collection(&name).await.unwrap().unwrap());
+    }
+    assert_eq!(multi.open_count().await, 12);
+    multi.shutdown().await.unwrap();
+    assert_eq!(multi.open_count().await, 0);
+
+    let reopened = Multi::new(config).unwrap();
+    for index in 0..12 {
+        let name = format!("open-{index:02}");
+        drop(reopened.use_collection(&name).await.unwrap().unwrap());
+    }
+    assert_eq!(reopened.open_count().await, 12);
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn collections_lifecycle_isolation_and_restart() {
     let temp = tempfile::tempdir().unwrap();
@@ -248,11 +386,13 @@ async fn collections_lifecycle_isolation_and_restart() {
         &app,
         "POST",
         "/v1/collections/b/query",
-        Some(json!({"vector":[1.0,2.0,3.0],"exact":true})),
+        Some(json!({"vector":[1.0,2.0,3.0],"exact":true,"profile":true})),
     )
     .await;
     assert_eq!(code, StatusCode::OK, "{result}");
     assert_eq!(result["results"][0]["id"], 1);
+    assert_eq!(result["profile"]["mode"], "exact_scan");
+    assert!(result["profile"]["server_ms"].as_f64().unwrap() >= 0.0);
     let (code, scan) = call(&app, "POST", "/v1/collections/a/scan", Some(json!({}))).await;
     assert_eq!(code, StatusCode::OK, "{scan}");
     assert_eq!(scan["ids"], json!([1]));

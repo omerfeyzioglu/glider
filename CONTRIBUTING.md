@@ -28,12 +28,16 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tools/benchmarks.py summary --check
 python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 python3 tools/check_links.py
+python3 tools/drills.py --seed 29   # recovery drills; needs release server binaries
+GLIDER_SERVER_BIN=target/release/glider-server \
+  python3 -m unittest discover -s clients/python/tests
 python3 tools/test_s3.py   # requires Docker; disposable MinIO
 python3 tools/quickstart_smoke.py  # requires Docker; Compose quickstart
 ```
 
-For changes to the server, takeover, cache or conversion, also run
-`python3 tools/drills.py --seed 29`.
+The drills and Python client tests need
+`cargo build --release --locked --features server --bin glider-server --bin glider-admin`
+first.
 
 ## Tests
 
@@ -56,6 +60,9 @@ For changes to the server, takeover, cache or conversion, also run
 - Never report a measurement, test or command as successful unless it was
   run. Record dataset, configuration, seed, backend, revision and
   environment with every result ([BENCHMARKS.md](BENCHMARKS.md)).
+- Benchmarks and acceptance runs (`tools/m24_acceptance.py` on MinIO,
+  `tools/aws_acceptance.py` on EC2 and S3) are described in
+  [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Documentation
 

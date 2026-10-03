@@ -15,15 +15,48 @@ use crate::{
 };
 use axum::{
     extract::{Extension, FromRef, OriginalUri, Path, Request as HttpRequest, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
+
+const CONSOLE_HTML: &str = include_str!("console.html");
+const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+async fn console() -> Response {
+    let mut response = (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        CONSOLE_HTML,
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONSOLE_CSP),
+    );
+    response
+}
+
+async fn console_redirect() -> Redirect {
+    Redirect::to("/console")
+}
+
+fn with_console<S>(router: Router<S>, enabled: bool) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if enabled {
+        router
+            .route("/", get(console_redirect))
+            .route("/console", get(console))
+    } else {
+        router
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -183,6 +216,8 @@ struct QueryBody {
     include_vector: bool,
     #[serde(default)]
     exact: bool,
+    #[serde(default)]
+    profile: bool,
 }
 
 fn default_k() -> usize {
@@ -201,6 +236,7 @@ async fn query(
     headers: HeaderMap,
     Json(body): Json<QueryBody>,
 ) -> Result<Json<Value>, ApiError> {
+    let start = Instant::now();
     authorize(&state, &headers)?;
     if body.k == 0 || body.k > 1_000 {
         return Err(bad_request("k must be between 1 and 1000"));
@@ -212,13 +248,13 @@ async fn query(
             include_metadata: body.include_metadata,
             include_vector: body.include_vector,
         };
-        let result = client
+        let timed = client
             .query_with_mode_filter(body.vector, body.k, filter, options, body.exact)?
-            .wait()?
-            .value;
-        Ok(Json(json!({
-            "sequence": result.sequence,
-            "results": result
+            .wait()?;
+        let server_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let mut response = json!({
+            "sequence": timed.value.sequence,
+            "results": timed.value
                 .hits
                 .iter()
                 .map(|hit| {
@@ -232,7 +268,17 @@ async fn query(
                     result
                 })
                 .collect::<Vec<_>>(),
-        })))
+        });
+        if body.profile {
+            response["profile"] = json!({
+                "mode": timed.value.mode.as_str(),
+                "server_ms": server_ms,
+                "queue_ms": timed.queue_wait.as_secs_f64() * 1000.0,
+                "remote_reads": timed.value.remote_reads,
+                "remote_bytes": timed.value.remote_bytes,
+            });
+        }
+        Ok(Json(response))
     })
     .await
 }
@@ -475,13 +521,22 @@ async fn single_client(
 
 /// Routes for one collection served by `client`.
 pub fn router(client: Client<Engine0>, token: Option<String>) -> Router {
+    router_with_console(client, token, true)
+}
+
+/// Configure the public browser console independently of API authentication.
+pub fn router_with_console(
+    client: Client<Engine0>,
+    token: Option<String>,
+    enabled: bool,
+) -> Router {
     let http_metrics = Arc::new(HttpMetrics::new());
     let state = AppState {
         client: Some(client),
         token: token.map(Arc::from),
         metrics: http_metrics.clone(),
     };
-    Router::new()
+    with_console(Router::new(), enabled)
         .route("/healthz", get(health))
         .route("/metrics", get(metrics))
         .nest(
@@ -662,6 +717,11 @@ async fn multi_metrics(State(state): State<MultiState>) -> Response {
 }
 
 pub fn multi_router(manager: Multi, token: Option<String>) -> Router {
+    multi_router_with_console(manager, token, true)
+}
+
+/// Configure the public browser console independently of API authentication.
+pub fn multi_router_with_console(manager: Multi, token: Option<String>, enabled: bool) -> Router {
     let http_metrics = Arc::new(HttpMetrics::new());
     let token = token.map(Arc::from);
     let state = AppState {
@@ -681,7 +741,7 @@ pub fn multi_router(manager: Multi, token: Option<String>) -> Router {
                 multi_state.clone(),
                 multi_client,
             ));
-    Router::new()
+    with_console(Router::new(), enabled)
         .route("/healthz", get(health))
         .route("/metrics", get(multi_metrics))
         .route("/v1/write", post(legacy_route))

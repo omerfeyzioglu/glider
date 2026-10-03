@@ -149,11 +149,14 @@ impl Catalog {
     }
     pub fn list(&self) -> Result<Vec<Collection>> {
         let store = self.store()?;
+        let keys = store.list()?;
+        // S3's batched reads issue up to 32 GETs concurrently and preserve
+        // input order. The local store uses the same interface.
+        let values = store.get_many(&keys)?;
         let mut result = Vec::new();
-        for key in store.list()? {
-            let bytes = store
-                .get(&key)?
-                .ok_or_else(|| Error::Corrupt(format!("catalog disappeared: {key}")))?;
+        for (key, bytes) in keys.into_iter().zip(values) {
+            let bytes =
+                bytes.ok_or_else(|| Error::Corrupt(format!("catalog disappeared: {key}")))?;
             let value: Collection = serde_json::from_slice(&bytes)
                 .map_err(|error| Error::Corrupt(format!("catalog {key}: {error}")))?;
             value.validate(&key)?;

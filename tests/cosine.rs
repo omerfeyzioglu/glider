@@ -41,7 +41,7 @@ fn oracle(rows: &BTreeMap<u64, Vec<f32>>, query: &[f32], k: usize) -> Vec<Neighb
                 .sum::<f64>();
             Neighbor {
                 id,
-                distance: 1. - dot,
+                distance: (1. - dot).max(0.),
             }
         })
         .collect();
@@ -325,4 +325,20 @@ fn engine_and_configuration_mismatches_fail_clearly() {
         SegmentedDatabase::open(LocalStore::open(&segmented).unwrap(), euclidean).map(drop),
         "Cosine",
     );
+}
+
+#[test]
+fn cosine_distance_to_a_stored_vector_itself_is_never_negative() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db =
+        Database::open(LocalStore::open(temp.path().join("db")).unwrap(), config()).unwrap();
+    let rows = rows();
+    for (&id, vector) in &rows {
+        db.put(id, vector.clone()).unwrap();
+    }
+    for vector in rows.values() {
+        for hit in db.search(vector, 3).unwrap() {
+            assert!(hit.distance >= 0., "seed {SEED:#x}: {hit:?}");
+        }
+    }
 }

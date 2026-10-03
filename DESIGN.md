@@ -1355,7 +1355,9 @@ SIGINT/SIGTERM, or a renewal that finds the server deposed, stops accepting
 connections, drains queued commands and releases the lease, even after a
 worker failure; after a crash the next start waits out the lease. Either
 way the next takeover fences the old process. An optional static bearer token guards every
-endpoint except `/healthz` and `/metrics`. The latter serves Prometheus 0.0.4
+endpoint except `/healthz`, `/metrics`, `/console` and the redirect from `/`.
+The self-contained console performs data calls through the authenticated API;
+`GLIDER_CONSOLE=0` removes its two routes. `/metrics` serves Prometheus 0.0.4
 text: server atomics record per-endpoint response classes and latency buckets,
 while a read-only admission command samples sequence, segmented maintenance,
 cache, warm-up, writer epoch and sketch values on the committer; `/v1/status` reports
@@ -1392,8 +1394,10 @@ for the name returns `404`; a later create chooses a fresh generation, so its
 engine cannot read old data. The server then removes the old generation's
 objects as best effort. A crash before catalog removal leaves the collection
 intact (possibly closed); a crash after removal but before cleanup leaves
-unreachable objects. Startup and idle sweeps, and later deletes, remove
-generations not named by a catalog entry, rechecking the entry before removal.
+unreachable objects. A background sweep starts after startup without delaying
+serving, then runs periodically; later deletes also reclaim orphaned generations.
+Each sweep rechecks the catalog entry before removing a generation. Serving and
+recovery never depend on cleanup because recreated names use new generations.
 An uncertain catalog removal must be resolved by a fresh GET before reporting
 an outcome. Generation object keys are never reused, so delayed cleanup
 cannot affect a recreated collection.

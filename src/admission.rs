@@ -416,6 +416,24 @@ pub struct QueryResult {
     /// Remote object reads and payload bytes this query caused.
     pub remote_reads: u64,
     pub remote_bytes: u64,
+    pub mode: QueryMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryMode {
+    Approximate,
+    ResidentExact,
+    ExactScan,
+}
+
+impl QueryMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approximate => "approximate",
+            Self::ResidentExact => "resident_exact",
+            Self::ExactScan => "exact_scan",
+        }
+    }
 }
 #[derive(Debug)]
 pub struct BatchGetResult {
@@ -589,6 +607,11 @@ impl Read {
                                 sequence: db.sequence(),
                                 remote_reads: reads_after - reads,
                                 remote_bytes: bytes_after - bytes,
+                                mode: if exact {
+                                    QueryMode::ExactScan
+                                } else {
+                                    QueryMode::Approximate
+                                },
                                 neighbors: hits.iter().map(QueryHit::neighbor).collect(),
                                 hits,
                             }
