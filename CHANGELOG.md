@@ -4,6 +4,14 @@ All notable user-visible changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `exact: true` on `POST /v1/query` for exhaustive exact search, so filtered
+  queries return every match; `POST /v1/points/get` for up to 1000 points per
+  request; `POST /v1/scan` to count, list and page matching points by id.
+
 ## [1.0.1] - 2026-10-03
 
 ### Security
@@ -14,8 +22,6 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Exhaustive `exact` queries, batch point reads, and filtered scan/count/paging
-  through the HTTP API.
 - Multi-platform Docker image (`linux/amd64`, `linux/arm64`) published to
   GitHub Container Registry for each version tag.
 - `cargo audit` in CI, Dependabot, issue and pull request templates, and a
@@ -97,5 +103,6 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   with `400` ([limits](docs/API.md#post-v1write)).
 - No TLS; use a reverse proxy.
 
+[Unreleased]: https://github.com/omerfeyzioglu/glider/compare/v1.0.1...HEAD
 [1.0.1]: https://github.com/omerfeyzioglu/glider/releases/tag/v1.0.1
 [1.0.0]: https://github.com/omerfeyzioglu/glider/releases/tag/v1.0.0
