@@ -9,6 +9,7 @@ uses [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Optional query profiles report the executed search mode, latency, queue wait and remote I/O.
+- Close idle multi-mode collections after `GLIDER_COLLECTION_IDLE_SECONDS` to release their writer leases.
 - Collections: without `GLIDER_DIMENSIONS`, one server creates, lists,
   deletes and serves many collections over HTTP (`/v1/collections`), each
   in its own namespace under a versioned catalog; collections open lazily
