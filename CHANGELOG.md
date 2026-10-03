@@ -13,6 +13,8 @@ uses [Semantic Versioning](https://semver.org/).
 - `exact: true` on `POST /v1/query` for exhaustive exact search, so filtered
   queries return every match; `POST /v1/points/get` for up to 1000 points per
   request; `POST /v1/scan` to count, list and page matching points by id.
+- Python client (`clients/python`) and an MCP memory server (`glider-mcp`)
+  with `remember`, `recall`, `forget` and `memory_count` tools.
 
 ## [1.0.1] - 2026-10-03
 
