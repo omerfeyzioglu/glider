@@ -8,7 +8,7 @@ use super::{
     ReadBudget, SegmentedDatabase, SegmentedOptions, View,
 };
 use crate::{
-    admission::{Engine, EngineMetrics, QueryResult, ScanResult, Snapshot},
+    admission::{Engine, EngineMetrics, QueryMode, QueryResult, ScanResult, Snapshot},
     retry::{Lookup, Outcome, Request, RequestId, Revision},
     store::ObjectStore,
     streaming::OwnedDocument,
@@ -705,6 +705,11 @@ impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
             hits,
             remote_reads: reads.requests,
             remote_bytes: reads.bytes,
+            mode: if self.view.uses_resident_filter(&Filter::equality(filter)) {
+                QueryMode::ResidentExact
+            } else {
+                QueryMode::Approximate
+            },
         })
     }
     fn query_exact(
@@ -723,6 +728,7 @@ impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
             hits,
             remote_reads: reads.requests,
             remote_bytes: reads.bytes,
+            mode: QueryMode::ExactScan,
         })
     }
     fn query_filter(
@@ -745,6 +751,11 @@ impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
             hits,
             remote_reads: reads.requests,
             remote_bytes: reads.bytes,
+            mode: if self.view.uses_resident_filter(filter) {
+                QueryMode::ResidentExact
+            } else {
+                QueryMode::Approximate
+            },
         })
     }
     fn query_exact_filter(
@@ -763,6 +774,7 @@ impl<S: ObjectStore + Send + Sync> Snapshot for Published<S> {
             hits,
             remote_reads: reads.requests,
             remote_bytes: reads.bytes,
+            mode: QueryMode::ExactScan,
         })
     }
     fn scan(
