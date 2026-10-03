@@ -7,7 +7,7 @@ object-store prefix. Use the same
 dimensions, metric, resident filter and routed keys every time that prefix is
 opened. The server exposes [`/v1/status`](API.md#get-v1status) for its committed
 sequence, queue, cache and clustering state, and [`/metrics`](API.md#get-metrics)
-for Prometheus. The [configuration table](../README.md#configuration) lists
+for Prometheus. The [configuration guide](CONFIGURATION.md) lists
 the environment variables.
 
 With `GLIDER_DIMENSIONS` unset, the base prefix holds a collection catalog.
@@ -34,10 +34,18 @@ generations left by interrupted deletes.
 `glider-admin` uses the server's environment variables and takes the same
 writer lease. Stop the server before running it; while the server runs, use
 the HTTP status endpoint instead. Each admin invocation takes over the
-namespace and can advance its sequence, including `status`. The Compose
-image includes both binaries.
+namespace and can advance its sequence, including `status`. The Docker
+image includes both binaries; with the Compose demo:
+
+```sh
+docker compose stop glider
+docker compose run --rm --no-deps --entrypoint glider-admin glider status
+docker compose start glider
+```
+
 It currently requires single-collection mode. For a collection in a multi
 base, use its HTTP status; collection-aware admin commands are a follow-up.
+`glider-admin` provides `status`, `backup`, `restore` and `convert`.
 For example, back up the local demo to an **empty, nonoverlapping** MinIO
 prefix:
 

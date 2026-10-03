@@ -1,6 +1,6 @@
 # Architecture
 
-Glider runs one collection per `glider-server` process. The server keeps
+One `glider-server` process serves one collection or many collections. The server keeps
 routing state in memory and may cache vector blocks on local storage. The
 object store is the durable authority: replacing the process or clearing its
 cache does not discard acknowledged writes.
@@ -44,9 +44,9 @@ edge before exposing the service. Monitor [`/healthz`](API.md#get-healthz),
 [`/metrics`](API.md#get-metrics) and [`/v1/status`](API.md#get-v1status);
 the [serving guide](SERVING.md) covers backup and recovery. There is one active
 server and no built-in standby. The repository does not ship an AWS deployment
-template; each release publishes the server image as
-`ghcr.io/omerfeyzioglu/glider:<version>`. The [Compose quickstart](../README.md#quickstart)
-is a local demo; [configuration](../README.md#configuration) lists the S3
+template; the server image is published as
+`ghcr.io/omerfeyzioglu/glider:latest`. The [Compose demo](INSTALL.md#docker-compose-with-minio)
+is a local demo; [configuration](CONFIGURATION.md) lists the S3
 variables.
 
 ## Diagram sources

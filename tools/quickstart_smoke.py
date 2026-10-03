@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the README Docker Compose quickstart and offline admin status command."""
+"""Exercise the Docker Compose demo in docs/INSTALL.md and offline admin status command."""
 
 import json
 from pathlib import Path
