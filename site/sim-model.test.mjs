@@ -378,6 +378,21 @@ test('view immediately shows the current plan; repeated and interrupted clicks h
   assert.equal(view.get('count').textContent, '1,000,000 vectors');
 });
 
+test('map legend reports searched clusters across queries, reset, crash and dataset changes', async () => {
+  const view = await viewHarness(true);
+  assert.equal(view.get('selected-label').textContent, 'Selected clusters');
+  view.presets[1].dispatch();
+  assert.equal(view.get('selected-label').textContent, `${view.get('probes').textContent} clusters searched`);
+  assert.equal(view.get('selected-label').textContent, '32 clusters searched');
+  view.get('reset').dispatch();
+  assert.equal(view.get('selected-label').textContent, 'Selected clusters');
+  view.get('size').value = '100000'; view.get('size').dispatch('change');
+  view.presets[0].dispatch();
+  assert.equal(view.get('selected-label').textContent, '4 clusters searched');
+  view.get('crash').dispatch();
+  assert.equal(view.get('selected-label').textContent, 'Selected clusters');
+});
+
 test('view displays computed synthetic IDs and distances and clears results on reset and crash', async () => {
   const view = await viewHarness(true);
   assert.equal(view.get('result-table').hidden, true);

@@ -8,6 +8,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Playground highlights searched clusters with their sampled vectors and small
+  centre markers, and labels the selection and nearest neighbours in the legend.
 - Website playground shows computed neighbor IDs and distances in a results
   table; hero examples use the default multi-collection API.
 - Scale multi-collection startup, catalog listing, and graceful shutdown with background cleanup and bounded concurrent reads and closes.
