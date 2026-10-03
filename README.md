@@ -98,11 +98,11 @@ four readers run concurrently:
 | Measure | Result |
 |---|---:|
 | Recall@10, static (mean / p5) | 0.998 / 1.0 |
-| Recall@10 after updates, cold cache (mean / p5) | 0.963 / 0.8 |
-| Query p95, warm cache | 30.9 ms |
-| Query p95, cold cache | 58.6 ms |
-| Write p95 | 97.6 ms |
-| Open / reopen | 3.15 / 4.00 s |
+| Recall@10 after updates, cold cache (mean / p5) | 0.964 / 0.8 |
+| Query p95, warm cache | 29.8 ms |
+| Query p95, cold cache | 57.0 ms |
+| Write p95 | 86.9 ms |
+| Open / reopen | 2.93 / 3.84 s |
 
 The run lost no acknowledged writes and returned equal results after cache
 loss and backup restore. Methodology and raw results are in the
