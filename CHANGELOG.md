@@ -4,6 +4,21 @@ All notable user-visible changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- Update `rustls` to 0.23.45 (RUSTSEC-2026-0285, TLS 1.3 handshake
+  messages accepted across encryption levels); it is used by the S3 HTTPS
+  client.
+
+### Added
+
+- Multi-platform Docker image (`linux/amd64`, `linux/arm64`) published to
+  GitHub Container Registry for each version tag.
+- `cargo audit` in CI, Dependabot, issue and pull request templates, and a
+  security policy ([SECURITY.md](SECURITY.md)).
+
 ## [1.0.0] - 2026-10-03
 
 First release: a single-node, single-writer vector database with S3 as the
@@ -80,4 +95,5 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   with `400` ([limits](docs/API.md#post-v1write)).
 - No TLS; use a reverse proxy.
 
+[Unreleased]: https://github.com/omerfeyzioglu/glider/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/omerfeyzioglu/glider/releases/tag/v1.0.0

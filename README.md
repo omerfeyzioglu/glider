@@ -312,6 +312,7 @@ on EC2 and S3) are described in [BENCHMARKS.md](BENCHMARKS.md). See
 | [BENCHMARKS.md](BENCHMARKS.md), [benchmarks/SUMMARY.md](benchmarks/SUMMARY.md) | Measurements and how to reproduce them |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
+| [SECURITY.md](SECURITY.md) | Reporting vulnerabilities and deployment security |
 | [docs/EVOLUTION.md](docs/EVOLUTION.md) | History of major decisions |
 
 ## License

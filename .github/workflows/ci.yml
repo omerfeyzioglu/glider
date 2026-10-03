@@ -50,6 +50,22 @@ jobs:
           # Release mode: the crash-point matrices take minutes unoptimized.
           cargo test --release --all-features --locked
 
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit dependencies against the RustSec advisory database
+        run: cargo audit
+
   minio:
     # Disposable-MinIO integration, fault and benchmark smoke checks; runs in
     # parallel with the fast checks above.
