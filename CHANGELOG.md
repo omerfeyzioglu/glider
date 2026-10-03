@@ -4,7 +4,7 @@ All notable user-visible changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.1] - 2026-10-03
 
 ### Security
 
@@ -95,5 +95,5 @@ decisions in [docs/EVOLUTION.md](docs/EVOLUTION.md).
   with `400` ([limits](docs/API.md#post-v1write)).
 - No TLS; use a reverse proxy.
 
-[Unreleased]: https://github.com/omerfeyzioglu/glider/compare/v1.0.0...HEAD
+[1.0.1]: https://github.com/omerfeyzioglu/glider/releases/tag/v1.0.1
 [1.0.0]: https://github.com/omerfeyzioglu/glider/releases/tag/v1.0.0
