@@ -13,6 +13,9 @@ no data is fetched. `site/sim-model.mjs` represents 100K, 1M or 10M synthetic
 vectors by seeded ID generation and immutable block descriptors.
 `site/sim-view.mjs` draws a 30K sample and animates queries, writes, sealing,
 cache loss and fenced recovery; `site/sim.css` supplies the layout.
+The query details show the computed synthetic top-10 IDs and squared Euclidean
+distances in the 2D model. They are exact within the selected blocks and tail,
+not exhaustive neighbors over the dataset or results from the Rust engine.
 The seeded projection uses irregular Gaussian-mixture islands, spaced centres
 and varied populations; projected clusters can overlap. Presets are fixed,
 and “Run again” repeats the last point. Query execution fills the caches and
@@ -33,7 +36,9 @@ or ANN recall. Lease waiting is compressed into the restart animation.
 
 CI checks model determinism, read budgets, caching, LRU capacity,
 publication/replay, acknowledged IDs surviving crashes, and view behavior
-with interrupted or undelivered animation frames:
+with interrupted or undelivered animation frames and reduced motion. These
+checks validate the illustration; engine performance and recall require the
+separate [benchmark protocol](../BENCHMARKS.md).
 
 ```sh
 node --check site/sim-model.mjs

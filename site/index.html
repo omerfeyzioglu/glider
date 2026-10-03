@@ -230,7 +230,7 @@ footer .lic a{color:var(--paper)}
           <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
           View on GitHub
         </a>
-        <a class="btn" href="#playground">Try a query <span aria-hidden="true">&rarr;</span></a>
+        <a class="btn" href="#playground">Explore the playground <span aria-hidden="true">&rarr;</span></a>
       </div>
     </div>
 
@@ -259,11 +259,14 @@ footer .lic a{color:var(--paper)}
         <div role="tabpanel" id="p-py" aria-labelledby="t-py" tabindex="0"><pre><code><span class="k">from</span> glider_client <span class="k">import</span> Client
 
 client = Client(<span class="s">"http://localhost:8080"</span>)
-client.upsert([{<span class="s">"id"</span>: 1, <span class="s">"vector"</span>: [0, 0, 0],
-                <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"red"</span>}}])
+client.create_collection(<span class="s">"demo"</span>, dimensions=3)
+docs = client.collection(<span class="s">"demo"</span>)
+docs.upsert([{<span class="s">"id"</span>: 1, <span class="s">"vector"</span>: [0, 0, 0],
+              <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"red"</span>}}])
 
-hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
-        <div role="tabpanel" id="p-http" aria-labelledby="t-http" tabindex="0" hidden><pre><code><span class="k">curl</span> -sS localhost:8080/v1/query \
+hits = docs.query([1, 1, 0.9], k=10)</code></pre></div>
+        <div role="tabpanel" id="p-http" aria-labelledby="t-http" tabindex="0" hidden><pre><code><span class="c"># After creating and writing the demo collection</span>
+<span class="k">curl</span> -sS localhost:8080/v1/collections/demo/query \
   -H <span class="s">'content-type: application/json'</span> \
   -d <span class="s">'{"vector":[1,1,0.9],"k":10}'</span></code></pre></div>
         <div role="tabpanel" id="p-mcp" aria-labelledby="t-mcp" tabindex="0" hidden><pre><code><span class="k">claude</span> mcp add glider \
@@ -282,7 +285,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
         <div><dt>p95 durable write</dt><dd>86.9<small>ms</small></dd></div>
       </dl>
       <p class="band-note">SIFT1M &middot; 128 dimensions &middot; k=10 &middot; S3 Standard &middot; c7g.2xlarge, eu-central-1. Recall is the static mean; latency is from concurrent readers and writers. <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#current-main-on-s3">Methodology &amp; raw results &rarr;</a></p>
-      <p class="band-note">10,000 collections &middot; 10M vectors &middot; one server: 2,457 queries/s at 18.5&nbsp;ms p95, zero lost writes after <code>kill -9</code>. <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md#multi-tenant-server-scenario">Multi-tenant results &rarr;</a></p>
+      <p class="band-note">10,000 collections &middot; 10M vectors &middot; one server: warm queries over 64 active collections reached 2,457 queries/s at 18.5&nbsp;ms p95. All 10,000 collections were verified after <code>kill -9</code> during ingest. <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md#multi-tenant-server-scenario">Multi-tenant results &rarr;</a></p>
     </div>
   </div>
 </div>
@@ -294,7 +297,6 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
       <h2 id="sim-title">A million vectors. Three places to live.</h2>
       <p>Pick a spot, follow the blocks, then pull the plug.</p>
     </div>
-    <p class="sim-disclaimer">Simulation of Glider's storage layout — illustrative, not a benchmark</p>
     <div class="sheet sim" id="sim-app">
       <div class="sim-toolbar">
         <label class="sim-dataset">Dataset <select id="sim-size"><option value="100000">100K vectors</option><option value="1000000" selected>1M vectors</option><option value="10000000">10M vectors</option></select></label>
@@ -334,6 +336,11 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
             <dl class="sim-query-extra"><div><dt>Clusters probed</dt><dd id="sim-probes">—</dd></div><div><dt>Blocks read / candidates</dt><dd id="sim-reads">—</dd></div><div><dt>RAM / SSD / S3 hits</dt><dd id="sim-sources">—</dd></div></dl>
             <div id="sim-blocks" class="sim-query-blocks" aria-label="Candidate block reads"><span>Up to 12 candidate blocks · 8 range GETs · 1 MiB remote</span></div>
             <p class="sim-result" id="sim-results">Top-10 neighbours appear as connected points after a query.</p>
+            <table class="sim-result-table" id="sim-result-table" hidden>
+              <caption>Nearest neighbors &middot; squared Euclidean distance</caption>
+              <thead><tr><th scope="col">Rank</th><th scope="col">ID</th><th scope="col">Distance</th></tr></thead>
+              <tbody id="sim-result-rows"></tbody>
+            </table>
             <p>Latency = 0.25 ms RAM routing + 0.25 ms RAM selection + 0.5 ms RAM CPU reranking + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 reads. Illustrative, not measured.</p>
           </details>
         </div>
@@ -444,7 +451,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
       <p>Filtered search is approximate by default. Add <code>"exact": true</code> and you get every match, up to <code>k</code>.</p>
     </div>
     <div class="card sheet" data-copy>
-      <div class="card-head"><span class="card-title">POST /v1/query</span></div>
+      <div class="card-head"><span class="card-title">POST /v1/collections/demo/query</span></div>
 <pre><code>{
   <span class="k">"vector"</span>: [1, 1, 0.9],
   <span class="k">"k"</span>: 10,
@@ -572,9 +579,9 @@ client = Client(<span class="s">"http://localhost:8080"</span>)
       <h2 id="limits-title">Honest about the edges.</h2>
     </div>
     <ul class="limits">
-      <li>One node and one writer; no replication or read replicas.</li>
-      <li>Opening a large collection on S3 takes a few seconds.</li>
-      <li>Filtered search is approximate unless you ask for exact.</li>
+      <li>One server, with a single committer per collection. No replication or read replicas.</li>
+      <li>The measured 1M-vector collection opens on S3 in a few seconds; larger collections can take longer.</li>
+      <li>Search is approximate by default. Use exact mode for exhaustive results; a cold cache can lower ANN recall.</li>
       <li>Plain HTTP: put TLS in front with a reverse proxy.</li>
     </ul>
   </div>

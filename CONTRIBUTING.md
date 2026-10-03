@@ -28,6 +28,9 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tools/benchmarks.py summary --check
 python3 tools/benchmarks.py summary --archive benchmarks/filtering --check
 python3 tools/check_links.py
+node --check site/sim-model.mjs
+node --check site/sim-view.mjs
+node --test site/sim-model.test.mjs
 python3 tools/drills.py --seed 29   # recovery drills; needs release server binaries
 GLIDER_SERVER_BIN=target/release/glider-server \
   python3 -m unittest discover -s clients/python/tests

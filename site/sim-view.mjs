@@ -181,6 +181,8 @@ function clearQuery() {
   plan = null; results = []; activeClusters = []; recentBlocks = []; queryPoint = null;
   for (const name of ['probes', 'reads', 'sources', 'remote', 'cache', 'latency']) el(name).textContent = '—';
   el('results').textContent = 'Top-10 neighbours appear as connected points after a query.';
+  el('result-table').hidden = true;
+  el('result-rows').replaceChildren();
   el('blocks').replaceChildren(node('span', '', 'Up to 12 candidate blocks · 8 range GETs · 1 MiB remote'));
   traceSegments = []; el('trace-bar').replaceChildren(); el('trace-bar').hidden = true;
   el('trace-summary').textContent = 'Route and select in RAM → fetch from RAM, SSD or S3 → rerank in RAM on the CPU.';
@@ -193,7 +195,13 @@ function renderQuery() {
   el('remote').textContent = `${plan.sources.s3} blocks (${+(plan.bytes / 1024).toFixed(1)} KiB)`;
   el('cache').textContent = `${plan.sources.ram + plan.sources.ssd} blocks`;
   el('latency').textContent = `${plan.latency} ms`;
-  el('results').textContent = `Top ${plan.results.length} · exact rerank of fetched blocks + tail · IDs ${plan.results.map(p => number(p.id)).join(', ')}`;
+  el('results').textContent = `Top ${plan.results.length} in selected blocks + unsealed tail. Exact distances within these candidates; the overall search is approximate.`;
+  el('result-rows').replaceChildren(...plan.results.map((result, index) => {
+    const row = node('tr', '');
+    row.append(node('td', '', String(index + 1)), node('td', '', number(result.id)), node('td', '', result.distance.toExponential(4)));
+    return row;
+  }));
+  el('result-table').hidden = false;
 }
 const blockCards = new Map();
 function renderBlocks() {

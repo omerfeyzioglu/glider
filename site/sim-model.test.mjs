@@ -378,6 +378,25 @@ test('view immediately shows the current plan; repeated and interrupted clicks h
   assert.equal(view.get('count').textContent, '1,000,000 vectors');
 });
 
+test('view displays computed synthetic IDs and distances and clears results on reset and crash', async () => {
+  const view = await viewHarness(true);
+  assert.equal(view.get('result-table').hidden, true);
+  view.presets[1].dispatch();
+  const expected = query(createSimulation(), QUERY_PRESETS[1]).results;
+  const displayed = view.get('result-rows').children.map(row => row.children.map(cell => cell.textContent));
+  assert.deepEqual(displayed, expected.map((row, index) => [String(index + 1), row.id.toLocaleString('en-US'), row.distance.toExponential(4)]));
+  assert.equal(view.get('result-table').hidden, false);
+  assert.match(view.get('results').textContent, /overall search is approximate/);
+  view.get('crash').dispatch();
+  assert.equal(view.get('result-table').hidden, true);
+  assert.equal(view.get('result-rows').children.length, 0);
+  await view.get('restart').dispatch();
+  view.presets[1].dispatch();
+  assert.deepEqual(view.get('result-rows').children.map(row => row.children.map(cell => cell.textContent)), displayed);
+  view.get('reset').dispatch();
+  assert.equal(view.get('result-table').hidden, true);
+});
+
 test('view keeps seal, crash, lost-disk recovery and dataset controls usable with reduced motion', async () => {
   const view = await viewHarness(true);
   view.get('stream').dispatch(); view.idle(); view.get('stream').dispatch();
