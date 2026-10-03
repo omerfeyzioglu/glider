@@ -42,7 +42,9 @@ async fn console() -> Response {
 }
 
 async fn console_redirect() -> Redirect {
-    Redirect::to("/console")
+    // Relative, so the redirect also works behind a proxy that mounts the
+    // server under a path prefix.
+    Redirect::to("console")
 }
 
 fn with_console<S>(router: Router<S>, enabled: bool) -> Router<S>
