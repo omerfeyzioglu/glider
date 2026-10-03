@@ -305,7 +305,8 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
         <button type="button" id="sim-reset">Reset</button>
         <label class="sim-check"><input type="checkbox" id="sim-lose-disk"> Lose the local disk too</label>
       </div>
-      <div class="sim-layout">
+      <div class="sim-layout" id="sim-grid">
+        <canvas id="sim-tracks" class="sim-tracks" aria-hidden="true"></canvas>
         <div class="sim-map-panel">
           <div class="sim-map-heading"><strong id="sim-count">1,000,000 vectors</strong><span id="sim-status">PROCESS ONLINE</span></div>
           <div class="sim-map-wrap">
@@ -357,8 +358,6 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
           <div class="sim-recovery" id="sim-recovery" hidden><label for="sim-progress">Rebuilding from S3</label><progress id="sim-progress" value="0" max="1"></progress></div>
         </div>
       </div>
-      <div id="sim-query-flights" class="sim-flights" aria-hidden="true" hidden></div>
-      <span class="sim-flight" id="sim-flight" aria-hidden="true" hidden>block</span>
       <details class="sim-model-note"><summary>How the illustration is sized and timed</summary><p>30,000 sampled dots stand for the selected dataset, already sealed and clustered (including the 100K example). Seeded Gaussian-mixture islands with Poisson-disc centres have varied populations averaging about 4,000 vectors per centroid. Projected islands can overlap; cluster membership represents the original embedding. Routing uses the M31 profile's 32 probes, scaled to 4 for 100K. Reranking is exact within selected blocks and the tail; the overall search is approximate. The projection and five-bit scores use two dimensions, while sizes assume 128-dimensional float32 vectors: 24 B per directory slot, 80 B of five-bit codes + 4 B ID offset + 8 B posting sequence per sealed row, 512 B per centroid, and 640 B per tail/log row. Blocks are sized proportionally up to 120 KiB; packs hold up to eight blocks (960 KiB) plus sketches. Compression, allocator overhead, routing cache files and retired objects are omitted. RAM's hot cache is 4 MiB; SSD defaults to 256 MiB. Latency = 1 ms compute + 0.1 ms per RAM hit + 0.5 ms per SSD hit + 20 ms per batch of four parallel S3 range GETs. Each batch adds 100 new IDs; 32 log objects trigger sealing. Restart compresses the real lease wait and recovery into five visual stages.</p></details>
     </div>
     <p class="sim-cta"><a class="btn sm go" href="#quickstart">Try it on your own data <span aria-hidden="true">→</span> Quickstart</a></p>
