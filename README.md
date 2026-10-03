@@ -322,7 +322,7 @@ collection, sized for the embedding model, on first use:
 
 ```sh
 docker run -d --name glider -p 8080:8080 -v glider-data:/var/lib/glider \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.1.0
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:latest
 pip install "glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"
 claude mcp add glider -e GLIDER_COLLECTION=memory -- glider-mcp
 ```

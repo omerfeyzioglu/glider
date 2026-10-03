@@ -20,7 +20,7 @@ Start a server (data is lost when the container stops; see the
 
 ```sh
 docker run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.1.0
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:latest
 ```
 
 ```python
@@ -149,7 +149,7 @@ memories. Text is embedded locally with
    docker run -d --name glider -p 8080:8080 \
      -v glider-data:/var/lib/glider \
      -e GLIDER_DATA_DIR=/var/lib/glider/data \
-     ghcr.io/omerfeyzioglu/glider:1.1.0
+     ghcr.io/omerfeyzioglu/glider:latest
    ```
 
 2. Install the extra:
