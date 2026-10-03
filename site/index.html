@@ -279,6 +279,7 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
         <div><dt>p95 durable write</dt><dd>86.9<small>ms</small></dd></div>
       </dl>
       <p class="band-note">SIFT1M &middot; 128 dimensions &middot; k=10 &middot; S3 Standard &middot; c7g.2xlarge, eu-central-1. Recall is the static mean; latency is from concurrent readers and writers. <a href="https://github.com/omerfeyzioglu/glider/blob/main/benchmarks/M39.md#current-main-on-s3">Methodology &amp; raw results &rarr;</a></p>
+      <p class="band-note">10,000 collections &middot; 10M vectors &middot; one server: 2,457 queries/s at 18.5&nbsp;ms p95, zero lost writes after <code>kill -9</code>. <a href="https://github.com/omerfeyzioglu/glider/blob/main/BENCHMARKS.md#multi-tenant-server-scenario">Multi-tenant results &rarr;</a></p>
     </div>
   </div>
 </div>

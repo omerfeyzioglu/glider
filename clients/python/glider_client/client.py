@@ -311,13 +311,15 @@ class Client:
         self,
         upsert: Iterable[PointLike] = (),
         delete: Iterable[int] = (),
+        request_id: Optional[Mapping[str, Any]] = None,
     ) -> int:
         """Apply one atomic batch of upserts then deletes; return its commit sequence.
 
         At most 100 operations (``upsert`` plus ``delete``) per call. An upsert
         replaces the point's vector and its complete metadata. See the class
         docstring for retry semantics: the write is applied exactly once even
-        if responses are lost.
+        if responses are lost. Pass ``request_id`` to reuse the same boundary
+        and nonce across calls, including after a server restart.
         """
         ups = [_encode_point(p) for p in upsert]
         dels = [_check_id(i) for i in delete]
@@ -326,11 +328,25 @@ class Client:
             raise ValueError("a write needs at least one upsert or delete")
         if ops > MAX_WRITE_OPS:
             raise ValueError(f"at most {MAX_WRITE_OPS} operations per write, got {ops}")
-        return self._send_write(ups, dels)
+        return self._send_write(ups, dels, request_id)
 
-    def _send_write(self, ups: List[Dict[str, Any]], dels: List[int]) -> int:
-        boundary = self.status()["sequence"]
-        request_id = {"boundary": boundary, "nonce": secrets.token_hex(16)}
+    def _send_write(
+        self, ups: List[Dict[str, Any]], dels: List[int],
+        request_id: Optional[Mapping[str, Any]] = None,
+    ) -> int:
+        if request_id is None:
+            request_id = {"boundary": self.status()["sequence"], "nonce": secrets.token_hex(16)}
+        else:
+            if set(request_id) != {"boundary", "nonce"}:
+                raise ValueError("request_id needs boundary and nonce")
+            boundary = request_id["boundary"]
+            nonce = request_id["nonce"]
+            if isinstance(boundary, bool) or not isinstance(boundary, int) or not 0 <= boundary < 2**64:
+                raise ValueError("request_id.boundary must be an unsigned 64-bit integer")
+            if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+                raise ValueError("request_id.nonce must be 32 lowercase hex digits")
+            request_id = {"boundary": boundary, "nonce": nonce}
+        boundary = request_id["boundary"]
         body = {"upsert": ups, "delete": dels, "request_id": request_id}
         resolve_path = f"{self._api}/requests/{boundary}/{request_id['nonce']}"
         attempt = 0
@@ -382,9 +398,11 @@ class Client:
             self._sleep(self._delay(attempt))
             attempt += 1
 
-    def upsert(self, points: Iterable[PointLike]) -> int:
+    def upsert(
+        self, points: Iterable[PointLike], request_id: Optional[Mapping[str, Any]] = None,
+    ) -> int:
         """Atomically upsert up to 100 points; return the commit sequence."""
-        return self.write(upsert=points)
+        return self.write(upsert=points, request_id=request_id)
 
     def delete(self, ids: Iterable[int]) -> int:
         """Atomically delete up to 100 IDs (absent IDs are allowed); return the sequence."""

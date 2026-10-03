@@ -112,6 +112,15 @@ loss and backup restore. Methodology and raw results are in the
 [benchmark report](benchmarks/M39.md#root-manifests-and-fast-open-on-s3) and
 [BENCHMARKS.md](BENCHMARKS.md).
 
+Many small collections on one server, same instance and S3 Standard:
+10,000 collections of 1,000 vectors (10,000,000 vectors) were created and
+loaded in 22 minutes with the server killed (`SIGKILL`) halfway; every
+tenant was verified with no lost or duplicated write. Warm queries ran at
+2,457 per second with a p95 of 18.5 ms and recall@10 of 1.0; a cold tenant
+opened from S3 and answered its first query in 716 ms (p95). Idle
+collections close, so they cost no S3 requests
+([details](BENCHMARKS.md#multi-tenant-server-scenario)).
+
 ## Architecture
 
 ![Glider runtime architecture](docs/architecture/runtime.svg)

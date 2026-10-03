@@ -34,7 +34,11 @@ curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 git clone -q https://github.com/omerfeyzioglu/glider.git /opt/glider
 cd /opt/glider
 git checkout -q @@REVISION@@
-cargo build -q --locked --release --features s3 --example m24_acceptance
+if [ @@SCENARIO@@ = tenants ]; then
+    cargo build --release --locked --features server --bin glider-server
+else
+    cargo build -q --locked --release --features s3 --example m24_acceptance
+fi
 echo "built $(git rev-parse HEAD)"
 
 mkdir -p /opt/data/sift && cd /opt/data/sift
@@ -48,8 +52,24 @@ cd /opt/glider
 BIN=target/release/examples/m24_acceptance
 BASE=/opt/data/sift/sift_base.fvecs QUERY=/opt/data/sift/sift_query.fvecs
 CACHE=/opt/cache && mkdir -p "$CACHE"
-ORACLE=$(python3 -c "import sys; sys.path.insert(0, 'tools'); from m24_acceptance import ENVELOPES; print(ENVELOPES[@@ROWS@@]['oracle'])")
+if [ @@SCENARIO@@ = tenants ]; then
+    export GLIDER_S3_NAMESPACE="$NAMESPACE" GLIDER_CACHE_DIR="$CACHE"
+    export GLIDER_BENCH_INSTANCE_TYPE=@@INSTANCE_TYPE@@
+    python3 tools/tenants_benchmark.py --server-bin target/release/glider-server \
+        --base "$BASE" --query "$QUERY" --tenants @@TENANTS@@ \
+        --per-tenant @@PER_TENANT@@ --workers 32 --seed 42 --output /opt/run.json \
+        --storage-bytes-cmd "aws s3 ls --recursive --summarize s3://@@BUCKET@@/$NAMESPACE/" || {
+            echo "FAILED: tenants benchmark" >/tmp/FAILED
+            aws s3 cp --only-show-errors /tmp/FAILED "$RESULTS/FAILED"
+            [ ! -f /opt/run.json ] || aws s3 cp --only-show-errors /opt/run.json "$RESULTS/run.json"
+            exit 1
+        }
+    aws s3 cp --only-show-errors /opt/run.json "$RESULTS/run.json"
+    echo "done $(date -u +%T)"
+    exit 0
+fi
 
+ORACLE=$(python3 -c "import sys; sys.path.insert(0, 'tools'); from m24_acceptance import ENVELOPES; print(ENVELOPES[@@ROWS@@]['oracle'])")
 echo "load $(date -u +%T)"
 $BIN load "$BASE" "$NAMESPACE" >/opt/load.json
 echo "serve $(date -u +%T)"
