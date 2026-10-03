@@ -34,6 +34,7 @@ fn config(path: &Path, multi: bool) -> ServerConfig {
         lease: Duration::from_millis(100),
         multi,
         max_open_collections: 2,
+        collection_idle: std::time::Duration::ZERO,
     }
 }
 
