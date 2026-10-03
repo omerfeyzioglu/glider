@@ -1,10 +1,10 @@
 export const efforts = Object.freeze({
-  lean: {probes: 2, requests: 1, bytes: 16384},
-  balanced: {probes: 8, requests: 2, bytes: 65536},
-  wide: {probes: 16, requests: 8, bytes: 262144},
+  lean: {probes: 1, requests: 1, bytes: 65536},
+  balanced: {probes: 2, requests: 2, bytes: 65536},
+  wide: {probes: 4, requests: 8, bytes: 262144},
 });
-export function recording(data, {query = 0, effort = 'balanced', tier = 'cold', fresh = false} = {}) {
-  const result = data.records.find(r => r.query === query && r.effort === effort && r.tier === tier && r.fresh === fresh);
+export function recording(data, {query = 0, effort = 'wide', tier = 'cold'} = {}) {
+  const result = data.records.find(r => r.query === query && r.effort === effort && r.tier === tier);
   if (!result) throw new Error('Unknown query state');
   return result;
 }

@@ -106,6 +106,9 @@ section{padding:clamp(88px,12vw,150px) 0 0}
 .c{color:#5B6878;font-style:italic}
 .p{color:#5B6878;user-select:none}
 
+/* Numbered setup commands */
+.setup{min-width:0}.setup-steps{display:grid;gap:18px}.setup-title{display:flex;align-items:center;gap:12px;font:600 .82rem/1.3 var(--sans);color:var(--paper);margin:0}.setup-number{display:grid;place-items:center;flex:none;width:25px;height:25px;border:1px solid var(--orange);color:var(--orange);font:600 .7rem var(--mono)}.setup-step pre{padding:18px 20px;font-size:.79rem;white-space:pre-wrap;overflow-wrap:anywhere}.setup-tabs{margin-bottom:12px}.setup-tabs button{color:var(--navy);border-color:var(--navy)}.setup-tabs button[aria-selected="true"]{background:var(--navy);color:var(--paper)}.setup-tabs button:hover{border-color:var(--orange)}.setup-hint{font-size:.8rem;color:var(--muted);margin:0 0 18px}.setup-step code .s{overflow-wrap:anywhere}.setup-step .copy{flex:none}
+
 /* proof band */
 .band{background:var(--navy);color:var(--paper);border-top:var(--line) solid var(--ink);border-bottom:var(--line) solid var(--ink);margin-top:clamp(80px,10vw,130px);padding:clamp(44px,6vw,72px) 0}
 .facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px;margin:0}
@@ -287,39 +290,39 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
 <section id="playground" aria-labelledby="pg-title">
   <div class="wrap">
     <div class="head">
-      <p class="eyebrow">Query playground</p>
-      <h2 id="pg-title">Follow the query.<br>Watch the reads disappear.</h2>
-      <p>Route in memory. Read a few blocks. Find your neighbors. Run the same search with a warm cache and see what changes.</p>
+      <p class="eyebrow">Search playground</p>
+      <h2 id="pg-title">Find answers in your docs.</h2>
+      <p>Pick a question to search Glider&rsquo;s documentation. Run it again to see how the cache saves another trip to object storage.</p>
     </div>
     <div class="sheet pg-shell" id="pg-app" hidden>
-      <div class="pg-top"><span class="pg-stamp">GLIDER / CLUSTERED SEARCH</span><span class="pg-dataset">4,096 vectors &middot; 16 dimensions</span></div>
-      <div class="pg-controls">
-        <div class="pg-field"><label for="pg-query">Query</label><select id="pg-query"><option value="0">Near a vector</option><option value="1">Cluster boundary</option></select></div>
-        <div class="pg-field"><label for="pg-effort">Search breadth</label><select id="pg-effort"><option value="lean">Lean</option><option value="balanced" selected>Balanced</option><option value="wide">Wide</option></select></div>
-        <fieldset class="pg-cache"><legend>Cache state</legend><div class="pg-segments"><button type="button" data-tier="cold" aria-pressed="true">Cold</button><button type="button" data-tier="ssd" aria-pressed="false">SSD</button><button type="button" data-tier="ram" aria-pressed="false">RAM</button></div></fieldset>
+      <div class="pg-top"><span>GLIDER DOCS / SEMANTIC SEARCH</span><span id="pg-dataset"></span></div>
+      <div class="pg-search">
+        <div class="pg-presets" role="group" aria-label="Example questions"><button type="button" data-query="0" aria-pressed="true">Cache loss</button><button type="button" data-query="1" aria-pressed="false">Metadata filters</button><button type="button" data-query="2" aria-pressed="false">Concurrent writes</button></div>
+        <div class="pg-question-line"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="m15 15 6 6" stroke="currentColor" stroke-width="2"/></svg><p id="pg-question" aria-live="polite" aria-atomic="true"></p><button type="button" id="pg-run">Run again &rarr;</button></div>
       </div>
       <div class="pg-main">
-        <div class="pg-journey">
-          <div class="pg-step-head"><span class="pg-step">01</span><h3>Route in RAM</h3><span id="pg-probes"></span></div>
-          <div id="pg-clusters" class="pg-clusters" aria-label="Cluster routing"></div>
-          <div class="pg-flow" aria-hidden="true"><span></span><span></span><span></span></div>
-          <div class="pg-step-head"><span class="pg-step">02</span><h3>Read selected blocks</h3><span id="pg-block-count"></span></div>
-          <div id="pg-blocks" class="pg-blocks" aria-label="Block read sources"></div>
-          <div class="pg-legend"><span><i class="pg-object"></i>Object storage</span><span><i class="pg-ssd"></i>SSD</span><span><i class="pg-ram"></i>RAM</span><span><i></i>Unread</span></div>
-          <p class="pg-story" id="pg-story"></p>
-        </div>
-        <div class="pg-neighbors">
-          <div class="pg-step-head"><span class="pg-step">03</span><h3>Rerank + merge tail</h3></div>
-          <ol id="pg-results" class="pg-results" aria-label="Nearest neighbors"></ol>
-          <button type="button" class="pg-fresh" id="pg-fresh" aria-pressed="false">+ Add a fresh vector</button>
-          <p class="pg-tail" id="pg-tail">New writes join the search from the in-memory log tail.</p>
-        </div>
+        <div class="pg-documents"><div class="pg-result-heading"><h3>Relevant documents</h3><span id="pg-result-note"></span></div><ol id="pg-results" class="pg-results" aria-label="Relevant documents"></ol></div>
+        <aside class="pg-read-path" aria-label="How this search was served">
+          <p class="pg-label" id="pg-pass">FIRST SEARCH</p>
+          <div class="pg-source" id="pg-source"><span class="pg-source-icon" aria-hidden="true"></span><strong id="pg-source-name">Object storage</strong></div>
+          <div class="pg-read-meter"><span id="pg-read-fill"></span></div>
+          <dl class="pg-main-stats"><div><dt>Object-store reads</dt><dd id="pg-reads"></dd></div><div><dt>Downloaded</dt><dd id="pg-bytes"></dd></div></dl>
+          <p class="pg-story" id="pg-story" role="status" aria-live="polite"></p>
+          <button type="button" id="pg-reset" class="pg-reset" hidden>Reset to a cold cache</button>
+        </aside>
       </div>
-      <dl class="pg-stats" aria-live="polite" aria-atomic="true"><div><dt>Recall@5</dt><dd id="pg-recall"></dd></div><div><dt>Object-store reads</dt><dd id="pg-reads"></dd></div><div><dt>Fetched bytes</dt><dd id="pg-bytes"></dd></div><div><dt>Cache hits</dt><dd id="pg-hits"></dd></div></dl>
-      <div class="pg-bottom"><span>Recorded with Glider</span><details><summary>Inside this run</summary><p>These are recorded queries from Glider&rsquo;s Rust segmented engine: seeded 16-dimensional vectors, a 16-centroid clustered index, five-bit block routing, full-precision squared L2 reranking and a durable log tail. Each state includes engine results, exact-search recall and actual range-read/cache counters.</p><p>The recording uses an in-memory object-store backend and a filesystem block cache. SSD is prewarmed; RAM repeats that query. Search breadth changes centroid probes and remote read limits. Warm-up I/O is separate from query reads. Block colors show read sources; cluster positions are an index view. This run reports no network latency.</p><p><a href="explorer-data.json" download>Download query records</a> &middot; <a href="https://github.com/omerfeyzioglu/glider/blob/main/site/README.md">Reproduce this run</a></p></details></div>
+      <details class="pg-engine"><summary><span>Recorded with Glider</span>Inside the search <span aria-hidden="true">+</span></summary><div class="pg-engine-content">
+        <div class="pg-engine-controls"><label for="pg-effort">Search breadth <select id="pg-effort"><option value="lean">Lean</option><option value="balanced">Balanced</option><option value="wide" selected>Wide</option></select></label><fieldset><legend>Read from</legend><div class="pg-segments"><button type="button" data-tier="cold" aria-pressed="true">Object storage</button><button type="button" data-tier="ssd" aria-pressed="false">SSD</button><button type="button" data-tier="ram" aria-pressed="false">RAM</button></div></fieldset></div>
+        <div class="pg-engine-grid"><div><h4>Centroid routing <span id="pg-probes"></span></h4><div id="pg-clusters" class="pg-clusters" aria-label="Cluster routing"></div></div><div><h4>Block reads <span id="pg-block-count"></span></h4><div id="pg-blocks" class="pg-blocks" aria-label="Block read sources"></div></div></div>
+        <p class="pg-legend"><span><i class="pg-object"></i>Object storage</span><span><i class="pg-ssd"></i>SSD</span><span><i class="pg-ram"></i>RAM</span><span><i></i>Unread</span></p>
+        <p id="pg-quality"></p>
+        <p>Document and question embeddings come from <a href="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2">all-MiniLM-L6-v2</a>. Glider stores them and returns the nearest documents with cosine distance. Each preset replays recorded queries through the Rust segmented engine, using centroid and five-bit block routing followed by full-precision reranking.</p>
+        <p>The recording backend implements the in-memory ObjectStore contract and uses a filesystem block cache. SSD is prewarmed; RAM repeats that query. Warm-up reads are separate from query counters. This run reports no network latency.</p>
+        <p><a href="explorer-data.json" download>Download query records</a> &middot; <a href="https://github.com/omerfeyzioglu/glider/blob/main/site/README.md">Reproduce this search</a></p>
+      </div></details>
     </div>
-    <p id="pg-error" class="pg-error" role="alert" hidden>Query records could not be loaded. Reload to try again, or <a href="#quickstart">run Glider locally</a>.</p>
-    <noscript><p>Enable JavaScript to explore the query, or <a href="#quickstart">run Glider locally</a>.</p></noscript>
+    <p id="pg-error" class="pg-error" role="alert" hidden>Search records could not be loaded. Reload to try again, or <a href="#quickstart">run Glider locally</a>.</p>
+    <noscript><p>Enable JavaScript to try the search, or <a href="#quickstart">run Glider locally</a>.</p></noscript>
   </div>
 </section>
 
@@ -422,22 +425,25 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
         <li>remember</li><li>recall</li><li>forget</li>
       </ul>
     </div>
-    <div class="card sheet" data-copy>
-      <div class="card-head"><span class="card-title">Terminal</span></div>
-<pre><code><span class="c"># 1. run Glider in multi-collection mode</span>
-<span class="k">docker</span> run -d --name glider -p 8080:8080 \
+    <div class="setup"><div class="setup-steps">
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">01</span>Start Glider</h3></div>
+  <pre><code><span class="k">docker</span> run -d --name glider -p 8080:8080 \
   -v glider-data:/var/lib/glider \
   -e GLIDER_DATA_DIR=/var/lib/glider/data \
-  ghcr.io/omerfeyzioglu/glider:latest
-
-<span class="c"># 2. install the client with the MCP extra</span>
-<span class="k">pip</span> install \
-  <span class="s">"glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span>
-
-<span class="c"># 3. register it with Claude Code</span>
-<span class="k">claude</span> mcp add glider \
+  ghcr.io/omerfeyzioglu/glider:latest</code></pre>
+</div>
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">02</span>Install the MCP client</h3></div>
+  <pre><code><span class="k">pip</span> install \
+  <span class="s">"glider-client[mcp] @ git+https://github.com/omerfeyzioglu<wbr>/glider#subdirectory=clients/python"</span></code></pre>
+</div>
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">03</span>Connect Claude Code</h3></div>
+  <pre><code><span class="k">claude</span> mcp add glider \
   -e GLIDER_COLLECTION=memory -- glider-mcp</code></pre>
-    </div>
+</div>
+</div></div>
   </div>
 </section>
 
@@ -449,45 +455,68 @@ hits = client.query([1, 1, 0.9], k=10)</code></pre></div>
       <p>Only Docker and curl. This demo uses a local Docker volume that survives container removal. For object storage, <a href="https://github.com/omerfeyzioglu/glider/blob/main/docs/INSTALL.md#aws">run it on S3</a>.</p>
       <p class="fine">Once it is running, open <a href="http://localhost:8080/console">localhost:8080/console</a> to browse points and query your server.</p>
     </div>
-    <div class="card sheet stack" data-tabs>
-      <div class="card-head">
-        <div class="tabs" role="tablist" aria-label="Quickstart">
-          <button type="button" role="tab" id="t-qc" aria-controls="p-qc" aria-selected="true">curl</button>
-          <button type="button" role="tab" id="t-qp" aria-controls="p-qp" aria-selected="false" tabindex="-1">Python</button>
-        </div>
+    <div class="setup" data-tabs data-step-tabs>
+      <div class="tabs setup-tabs" role="tablist" aria-label="Quickstart">
+        <button type="button" role="tab" id="t-qc" aria-controls="p-qc" aria-selected="true">curl</button>
+        <button type="button" role="tab" id="t-qp" aria-controls="p-qp" aria-selected="false" tabindex="-1">Python</button>
       </div>
-      <div role="tabpanel" id="p-qc" aria-labelledby="t-qc" tabindex="0"><pre><code><span class="c"># 1. start a server</span>
-<span class="k">docker</span> run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
+      <p class="setup-hint">Keep the server running. Use another terminal for the next steps.</p>
+      <div role="tabpanel" id="p-qc" aria-labelledby="t-qc" tabindex="0"><div class="setup-steps">
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">01</span>Start the server</h3></div>
+  <pre><code><span class="k">docker</span> run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
   -v glider-quickstart-data:/var/lib/glider \
   -e GLIDER_DATA_DIR=/var/lib/glider/data \
-  ghcr.io/omerfeyzioglu/glider:latest
-
-<span class="c"># 2. write two points</span>
-<span class="k">curl</span> -sS localhost:8080/v1/write \
+  ghcr.io/omerfeyzioglu/glider:latest</code></pre>
+</div>
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">02</span>Write two points</h3></div>
+  <pre><code><span class="k">curl</span> -sS localhost:8080/v1/write \
   -H <span class="s">'content-type: application/json'</span> \
   -d <span class="s">'{"upsert":[
     {"id":1,"vector":[0,0,0],"metadata":{"color":"red"}},
-    {"id":2,"vector":[1,1,1]}]}'</span>
-
-<span class="c"># 3. query</span>
-<span class="k">curl</span> -sS localhost:8080/v1/query \
+    {"id":2,"vector":[1,1,1]}]}'</span></code></pre>
+</div>
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">03</span>Find their neighbors</h3></div>
+  <pre><code><span class="k">curl</span> -sS localhost:8080/v1/query \
   -H <span class="s">'content-type: application/json'</span> \
-  -d <span class="s">'{"vector":[1,1,0.9],"k":2,"include_metadata":true}'</span></code></pre></div>
-      <div role="tabpanel" id="p-qp" aria-labelledby="t-qp" tabindex="0" hidden><pre><code><span class="c"># pip install "git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span>
-<span class="k">from</span> glider_client <span class="k">import</span> Client
+  -d <span class="s">'{"vector":[1,1,0.9],"k":2,"include_metadata":true}'</span></code></pre>
+</div>
+</div></div>
+      <div role="tabpanel" id="p-qp" aria-labelledby="t-qp" tabindex="0" hidden><div class="setup-steps">
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">01</span>Start the server</h3></div>
+  <pre><code><span class="k">docker</span> run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
+  -v glider-quickstart-data:/var/lib/glider \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data \
+  ghcr.io/omerfeyzioglu/glider:latest</code></pre>
+</div>
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">02</span>Install the Python client</h3></div>
+  <pre><code><span class="k">pip</span> install <span class="s">"git+https://github.com/omerfeyzioglu<wbr>/glider#subdirectory=clients/python"</span></code></pre>
+</div>
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">03</span>Write two points</h3></div>
+  <pre><code><span class="k">from</span> glider_client <span class="k">import</span> Client
 
 client = Client(<span class="s">"http://localhost:8080"</span>)
 
 client.upsert([
     {<span class="s">"id"</span>: 1, <span class="s">"vector"</span>: [0, 0, 0], <span class="s">"metadata"</span>: {<span class="s">"color"</span>: <span class="s">"red"</span>}},
     {<span class="s">"id"</span>: 2, <span class="s">"vector"</span>: [1, 1, 1]},
-])
+])</code></pre>
+</div>
+<div class="card sheet setup-step" data-copy>
+  <div class="card-head"><h3 class="setup-title"><span class="setup-number">04</span>Find their neighbors</h3></div>
+  <pre><code><span class="k">from</span> glider_client <span class="k">import</span> Client
+
+client = Client(<span class="s">"http://localhost:8080"</span>)
 
 <span class="k">for</span> hit <span class="k">in</span> client.query([1, 1, 0.9], k=2):
-    print(hit.id, hit.distance)
-
-<span class="c"># every red point, exactly</span>
-client.query([1, 1, 0.9], k=10, filter={<span class="s">"color"</span>: <span class="s">"red"</span>}, exact=<span class="k">True</span>)</code></pre></div>
+    print(hit.id, hit.distance)</code></pre>
+</div>
+</div></div>
     </div>
   </div>
 </section>
@@ -582,7 +611,7 @@ client.query([1, 1, 0.9], k=10, filter={<span class="s">"color"</span>: <span cl
         select(n); n.focus();
       });
     });
-    addCopy(card.querySelector(".card-head"), function () { return card.querySelector('[role="tabpanel"]:not([hidden]) pre'); });
+    if (!card.hasAttribute("data-step-tabs")) addCopy(card.querySelector(".card-head"), function () { return card.querySelector('[role="tabpanel"]:not([hidden]) pre'); });
   });
 })();
 </script>

@@ -2,1253 +2,625 @@
   "backend": "In-memory ObjectStore; filesystem SSD cache; no network timing",
   "blocks": [
     {
-      "bytes": 10302,
+      "bytes": 3024,
       "cluster": 0,
       "id": 0,
-      "rows": 170
+      "rows": 2
     },
     {
-      "bytes": 10420,
-      "cluster": 0,
+      "bytes": 4490,
+      "cluster": 1,
       "id": 1,
-      "rows": 170
+      "rows": 3
     },
     {
-      "bytes": 732,
-      "cluster": 0,
+      "bytes": 10336,
+      "cluster": 2,
       "id": 2,
-      "rows": 10
+      "rows": 7
     },
     {
-      "bytes": 10340,
-      "cluster": 1,
+      "bytes": 17698,
+      "cluster": 3,
       "id": 3,
-      "rows": 170
-    },
-    {
-      "bytes": 5960,
-      "cluster": 1,
-      "id": 4,
-      "rows": 97
-    },
-    {
-      "bytes": 10382,
-      "cluster": 2,
-      "id": 5,
-      "rows": 170
-    },
-    {
-      "bytes": 4625,
-      "cluster": 2,
-      "id": 6,
-      "rows": 75
-    },
-    {
-      "bytes": 10328,
-      "cluster": 3,
-      "id": 7,
-      "rows": 170
-    },
-    {
-      "bytes": 6867,
-      "cluster": 3,
-      "id": 8,
-      "rows": 112
-    },
-    {
-      "bytes": 10374,
-      "cluster": 4,
-      "id": 9,
-      "rows": 170
-    },
-    {
-      "bytes": 6567,
-      "cluster": 4,
-      "id": 10,
-      "rows": 107
-    },
-    {
-      "bytes": 9327,
-      "cluster": 5,
-      "id": 11,
-      "rows": 152
-    },
-    {
-      "bytes": 10284,
-      "cluster": 6,
-      "id": 12,
-      "rows": 170
-    },
-    {
-      "bytes": 5421,
-      "cluster": 6,
-      "id": 13,
-      "rows": 89
-    },
-    {
-      "bytes": 10335,
-      "cluster": 7,
-      "id": 14,
-      "rows": 170
-    },
-    {
-      "bytes": 2989,
-      "cluster": 7,
-      "id": 15,
-      "rows": 48
-    },
-    {
-      "bytes": 10295,
-      "cluster": 8,
-      "id": 16,
-      "rows": 170
-    },
-    {
-      "bytes": 4350,
-      "cluster": 8,
-      "id": 17,
-      "rows": 71
-    },
-    {
-      "bytes": 10484,
-      "cluster": 9,
-      "id": 18,
-      "rows": 170
-    },
-    {
-      "bytes": 5102,
-      "cluster": 9,
-      "id": 19,
-      "rows": 84
-    },
-    {
-      "bytes": 10389,
-      "cluster": 10,
-      "id": 20,
-      "rows": 170
-    },
-    {
-      "bytes": 4853,
-      "cluster": 10,
-      "id": 21,
-      "rows": 79
-    },
-    {
-      "bytes": 10411,
-      "cluster": 11,
-      "id": 22,
-      "rows": 170
-    },
-    {
-      "bytes": 4308,
-      "cluster": 11,
-      "id": 23,
-      "rows": 70
-    },
-    {
-      "bytes": 10305,
-      "cluster": 12,
-      "id": 24,
-      "rows": 170
-    },
-    {
-      "bytes": 7890,
-      "cluster": 12,
-      "id": 25,
-      "rows": 129
-    },
-    {
-      "bytes": 10418,
-      "cluster": 13,
-      "id": 26,
-      "rows": 170
-    },
-    {
-      "bytes": 4415,
-      "cluster": 13,
-      "id": 27,
-      "rows": 72
-    },
-    {
-      "bytes": 10334,
-      "cluster": 14,
-      "id": 28,
-      "rows": 170
-    },
-    {
-      "bytes": 3348,
-      "cluster": 14,
-      "id": 29,
-      "rows": 54
-    },
-    {
-      "bytes": 10341,
-      "cluster": 15,
-      "id": 30,
-      "rows": 170
-    },
-    {
-      "bytes": 7694,
-      "cluster": 15,
-      "id": 31,
-      "rows": 127
+      "rows": 12
     }
   ],
-  "centroids": 16,
-  "dimensions": 16,
-  "metric": "squared_euclidean",
+  "centroids": 4,
+  "dimensions": 384,
+  "documents": [
+    {
+      "category": "Storage",
+      "id": 0,
+      "text": "The RAM and SSD caches are disposable acceleration. Acknowledged writes remain in object storage; losing the local cache makes queries cold again without losing committed data.",
+      "title": "Cache loss does not lose data",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#persisted-pack-sketches-and-selective-reads"
+    },
+    {
+      "category": "Storage",
+      "id": 1,
+      "text": "The server warms its local SSD block cache in the background. Queries can read selected vector blocks from RAM or SSD instead of downloading them from object storage.",
+      "title": "Warm searches avoid remote reads",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#persisted-pack-sketches-and-selective-reads"
+    },
+    {
+      "category": "Storage",
+      "id": 2,
+      "text": "Glider acknowledges a write after publishing a complete immutable log object. Roots and logs define the committed state; local caches are derived and never replace durable storage.",
+      "title": "The bucket is authoritative",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#acknowledgement-and-recovery"
+    },
+    {
+      "category": "Storage",
+      "id": 3,
+      "text": "A restarted server takes over the collection, fences its previous writer and replays the durable log. It serves every acknowledged write after recovery.",
+      "title": "Recover after a restart",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#consistency"
+    },
+    {
+      "category": "Storage",
+      "id": 4,
+      "text": "Full vectors live in immutable object-store packs. In memory, the segmented engine retains the latest-ID directory, routing sketches and the unsealed log tail.",
+      "title": "Immutable vector packs",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#engines-and-namespace-compatibility"
+    },
+    {
+      "category": "Storage",
+      "id": 5,
+      "text": "Block bytes from RAM, SSD and object storage are authenticated against the committed block digest before decoding and scoring. Corrupt cached entries cannot become authoritative data.",
+      "title": "Authenticate cached blocks",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#persisted-pack-sketches-and-selective-reads"
+    },
+    {
+      "category": "Search",
+      "id": 6,
+      "text": "Search supports equality, set membership, existence, numeric comparisons and logical combinations over string metadata. The full predicate is checked against the records read for the query.",
+      "title": "Filter by metadata",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#filters"
+    },
+    {
+      "category": "Search",
+      "id": 7,
+      "text": "Add exact: true to search all live points and evaluate the full metadata filter exhaustively. The query returns up to k matches; bounded approximate search can miss eligible points.",
+      "title": "Get complete filtered results",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#filters"
+    },
+    {
+      "category": "Search",
+      "id": 8,
+      "text": "A filter can combine a color equality with a price range and tag membership. Conditions on the same key and different members of one filter object are ANDed.",
+      "title": "Combine numeric and category filters",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#filters"
+    },
+    {
+      "category": "Search",
+      "id": 9,
+      "text": "Required equality predicates on declared routed metadata keys restrict candidate routing. Glider still applies the complete filter to authenticated records during reranking.",
+      "title": "Route declared filter keys",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#persisted-pack-sketches-and-selective-reads"
+    },
+    {
+      "category": "Search",
+      "id": 10,
+      "text": "A collection has a fixed dimension and a fixed metric: squared Euclidean, Manhattan or cosine. Cosine vectors and queries must have nonzero norm and are normalized by the engine.",
+      "title": "Choose your distance metric",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#engines-and-namespace-compatibility"
+    },
+    {
+      "category": "Search",
+      "id": 11,
+      "text": "Exact search scores every live matching vector and sorts by distance then ID. Approximate query results are evaluated against exact neighbors using recall at k.",
+      "title": "Exact search is the recall oracle",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#post-v1query"
+    },
+    {
+      "category": "Concurrency",
+      "id": 12,
+      "text": "Reader threads search immutable published views while the committer accepts writes. Each query observes a consistent snapshot; readers do not wait behind a long object-store write.",
+      "title": "Queries and writes run together",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#concurrent-queries-on-published-views-m34"
+    },
+    {
+      "category": "Concurrency",
+      "id": 13,
+      "text": "A query sent after a successful write acknowledgement observes that write. A snapshot never exposes a partially applied write group or a partially published root.",
+      "title": "Read your acknowledged writes",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#consistency"
+    },
+    {
+      "category": "Concurrency",
+      "id": 14,
+      "text": "Recent acknowledged writes stay in the in-memory log tail until sealing. Selective queries scan that tail exactly and merge it with neighbors reranked from selected immutable blocks.",
+      "title": "New writes are searchable immediately",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#post-v1query"
+    },
+    {
+      "category": "Concurrency",
+      "id": 15,
+      "text": "Each write carries a request ID. Resending a retained request returns its original outcome instead of applying its mutations again. The retry window is bounded.",
+      "title": "Retry without applying a write twice",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#request-ids-and-retries"
+    },
+    {
+      "category": "Concurrency",
+      "id": 16,
+      "text": "Admission limits count queued and active operations and their encoded payload bytes. Requests that exceed available capacity return overload instead of creating an unbounded queue.",
+      "title": "Bound concurrent work",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/DESIGN.md#bounded-concurrent-admission-m16"
+    },
+    {
+      "category": "Concurrency",
+      "id": 17,
+      "text": "Glider establishes single-writer ownership of each collection. A takeover fences earlier writers, while queries can execute concurrently on published snapshots.",
+      "title": "One committer owns each collection",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#consistency"
+    },
+    {
+      "category": "Getting started",
+      "id": 18,
+      "text": "Run the Glider server on port 8080 with a mounted Docker volume to preserve local data. Then write points with curl and issue your first vector query.",
+      "title": "Start Glider with Docker",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/INSTALL.md"
+    },
+    {
+      "category": "Getting started",
+      "id": 19,
+      "text": "The dependency-free Python client creates collections, upserts vectors and metadata, and returns nearest neighbors. Each collection selects its dimensions and distance metric.",
+      "title": "Use the Python client",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/README.md#quickstart"
+    },
+    {
+      "category": "Getting started",
+      "id": 20,
+      "text": "Open localhost:8080/console to browse your collections and points, run queries, and inspect the Glider server from your browser.",
+      "title": "Browse collections in the console",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#get-console"
+    },
+    {
+      "category": "Getting started",
+      "id": 21,
+      "text": "Glider supports S3-compatible object storage. Configure a bucket and a nonoverlapping namespace prefix; the service must provide strongly consistent reads and conditional object creation.",
+      "title": "Run on S3 or MinIO",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/INSTALL.md"
+    },
+    {
+      "category": "Getting started",
+      "id": 22,
+      "text": "The glider-mcp client exposes remember, recall and forget tools to MCP clients. Memories survive restarts and request IDs support safe retries within the retained window.",
+      "title": "Give agents durable memory",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/README.md#agent-memory-mcp"
+    },
+    {
+      "category": "Getting started",
+      "id": 23,
+      "text": "Set profile: true on a query to include its execution mode, elapsed time, queue wait and remote I/O counters. These counters describe the reads caused by that query.",
+      "title": "Inspect query I/O",
+      "url": "https://github.com/omerfeyzioglu/glider/blob/main/docs/API.md#post-v1query"
+    }
+  ],
+  "metric": "cosine",
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "model_revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
   "queries": [
-    [
-      0.8124092221260071,
-      0.9300578832626343,
-      0.7610878944396973,
-      0.46301183104515076,
-      0.49296846985816956,
-      0.6814188361167908,
-      0.9256249666213989,
-      0.11015458405017853,
-      0.05545051768422127,
-      0.9385923743247986,
-      0.7068743705749512,
-      0.9049811959266663,
-      0.27502599358558655,
-      0.11006839573383331,
-      0.2229040414094925,
-      0.9119773507118225
-    ],
-    [
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.5
-    ]
+    "Will I lose my data if the SSD cache disappears?",
+    "How can I search only documents that match my metadata?",
+    "Do queries have to wait for writes to finish?"
   ],
   "records": [
     {
-      "bytes": 15705,
+      "bytes": 17698,
       "effort": "lean",
-      "fresh": false,
       "hits": [
         {
-          "distance": 0.006399993902448511,
+          "distance": 0.2427233991575225,
           "exact": true,
-          "id": 731,
-          "tail": false
+          "id": 0
         },
         {
-          "distance": 0.8405070569598571,
+          "distance": 0.5806979192612096,
           "exact": true,
-          "id": 905,
-          "tail": false
+          "id": 5
         },
         {
-          "distance": 0.9276565626090739,
-          "exact": false,
-          "id": 590,
-          "tail": false
-        },
-        {
-          "distance": 0.9532562685909066,
-          "exact": false,
-          "id": 3270,
-          "tail": false
-        },
-        {
-          "distance": 0.9686885229546381,
-          "exact": false,
-          "id": 3041,
-          "tail": false
+          "distance": 0.6244621865167066,
+          "exact": true,
+          "id": 3
         }
       ],
       "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
+        0,
+        5,
+        3
       ],
       "probed": [
-        6,
-        4
+        3
       ],
       "query": 0,
       "ram_hits": 0,
-      "recall": 0.4,
+      "recall": 1.0,
       "requests": 1,
       "selected": [
         {
-          "id": 12,
-          "source": "object"
-        },
-        {
-          "id": 13,
+          "id": 3,
           "source": "object"
         }
       ],
-      "sequence": 41,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "cold"
     },
     {
       "bytes": 0,
       "effort": "lean",
-      "fresh": false,
       "hits": [
         {
-          "distance": 0.006399993902448511,
+          "distance": 0.2427233991575225,
           "exact": true,
-          "id": 731,
-          "tail": false
+          "id": 0
         },
         {
-          "distance": 0.7919444054771968,
+          "distance": 0.5806979192612096,
           "exact": true,
-          "id": 2517,
-          "tail": false
+          "id": 5
         },
         {
-          "distance": 0.8405070569598571,
+          "distance": 0.6244621865167066,
           "exact": true,
-          "id": 905,
-          "tail": false
-        },
-        {
-          "distance": 0.9276565626090739,
-          "exact": false,
-          "id": 590,
-          "tail": false
-        },
-        {
-          "distance": 0.9532562685909066,
-          "exact": false,
-          "id": 3270,
-          "tail": false
+          "id": 3
         }
       ],
       "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
+        0,
+        5,
+        3
       ],
       "probed": [
-        6,
-        4
+        3
       ],
       "query": 0,
       "ram_hits": 0,
-      "recall": 0.6,
+      "recall": 1.0,
       "requests": 0,
       "selected": [
         {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
+          "id": 3,
           "source": "ssd"
         }
       ],
-      "sequence": 41,
+      "sequence": 1,
+      "ssd_hits": 1,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "lean",
+      "hits": [
+        {
+          "distance": 0.2427233991575225,
+          "exact": true,
+          "id": 0
+        },
+        {
+          "distance": 0.5806979192612096,
+          "exact": true,
+          "id": 5
+        },
+        {
+          "distance": 0.6244621865167066,
+          "exact": true,
+          "id": 3
+        }
+      ],
+      "oracle": [
+        0,
+        5,
+        3
+      ],
+      "probed": [
+        3
+      ],
+      "query": 0,
+      "ram_hits": 1,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 3,
+          "source": "ram"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 28034,
+      "effort": "balanced",
+      "hits": [
+        {
+          "distance": 0.2427233991575225,
+          "exact": true,
+          "id": 0
+        },
+        {
+          "distance": 0.5806979192612096,
+          "exact": true,
+          "id": 5
+        },
+        {
+          "distance": 0.6244621865167066,
+          "exact": true,
+          "id": 3
+        }
+      ],
+      "oracle": [
+        0,
+        5,
+        3
+      ],
+      "probed": [
+        3,
+        2
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 1,
+      "selected": [
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "hits": [
+        {
+          "distance": 0.2427233991575225,
+          "exact": true,
+          "id": 0
+        },
+        {
+          "distance": 0.5806979192612096,
+          "exact": true,
+          "id": 5
+        },
+        {
+          "distance": 0.6244621865167066,
+          "exact": true,
+          "id": 3
+        }
+      ],
+      "oracle": [
+        0,
+        5,
+        3
+      ],
+      "probed": [
+        3,
+        2
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 2,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "hits": [
+        {
+          "distance": 0.2427233991575225,
+          "exact": true,
+          "id": 0
+        },
+        {
+          "distance": 0.5806979192612096,
+          "exact": true,
+          "id": 5
+        },
+        {
+          "distance": 0.6244621865167066,
+          "exact": true,
+          "id": 3
+        }
+      ],
+      "oracle": [
+        0,
+        5,
+        3
+      ],
+      "probed": [
+        3,
+        2
+      ],
+      "query": 0,
+      "ram_hits": 2,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 35548,
+      "effort": "wide",
+      "hits": [
+        {
+          "distance": 0.2427233991575225,
+          "exact": true,
+          "id": 0
+        },
+        {
+          "distance": 0.5806979192612096,
+          "exact": true,
+          "id": 5
+        },
+        {
+          "distance": 0.6244621865167066,
+          "exact": true,
+          "id": 3
+        }
+      ],
+      "oracle": [
+        0,
+        5,
+        3
+      ],
+      "probed": [
+        3,
+        2,
+        1,
+        0
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 1,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "hits": [
+        {
+          "distance": 0.2427233991575225,
+          "exact": true,
+          "id": 0
+        },
+        {
+          "distance": 0.5806979192612096,
+          "exact": true,
+          "id": 5
+        },
+        {
+          "distance": 0.6244621865167066,
+          "exact": true,
+          "id": 3
+        }
+      ],
+      "oracle": [
+        0,
+        5,
+        3
+      ],
+      "probed": [
+        3,
+        2,
+        1,
+        0
+      ],
+      "query": 0,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 1,
       "ssd_hits": 4,
       "tier": "ssd"
     },
     {
       "bytes": 0,
-      "effort": "lean",
-      "fresh": false,
+      "effort": "wide",
       "hits": [
         {
-          "distance": 0.006399993902448511,
+          "distance": 0.2427233991575225,
           "exact": true,
-          "id": 731,
-          "tail": false
+          "id": 0
         },
         {
-          "distance": 0.7919444054771968,
+          "distance": 0.5806979192612096,
           "exact": true,
-          "id": 2517,
-          "tail": false
+          "id": 5
         },
         {
-          "distance": 0.8405070569598571,
+          "distance": 0.6244621865167066,
           "exact": true,
-          "id": 905,
-          "tail": false
-        },
-        {
-          "distance": 0.9276565626090739,
-          "exact": false,
-          "id": 590,
-          "tail": false
-        },
-        {
-          "distance": 0.9532562685909066,
-          "exact": false,
-          "id": 3270,
-          "tail": false
+          "id": 3
         }
       ],
       "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
+        0,
+        5,
+        3
       ],
       "probed": [
-        6,
-        4
+        3,
+        2,
+        1,
+        0
       ],
       "query": 0,
       "ram_hits": 4,
-      "recall": 0.6,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "ram"
-    },
-    {
-      "bytes": 49841,
-      "effort": "balanced",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": true,
-          "id": 905,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 2,
-      "selected": [
-        {
-          "id": 7,
-          "source": "object"
-        },
-        {
-          "id": 8,
-          "source": "object"
-        },
-        {
-          "id": 9,
-          "source": "object"
-        },
-        {
-          "id": 10,
-          "source": "object"
-        },
-        {
-          "id": 12,
-          "source": "object"
-        },
-        {
-          "id": 13,
-          "source": "object"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "cold"
-    },
-    {
-      "bytes": 0,
-      "effort": "balanced",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": true,
-          "id": 905,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 22,
-          "source": "ssd"
-        },
-        {
-          "id": 23,
-          "source": "ssd"
-        },
-        {
-          "id": 28,
-          "source": "ssd"
-        },
-        {
-          "id": 29,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 16,
-      "tier": "ssd"
-    },
-    {
-      "bytes": 0,
-      "effort": "balanced",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": true,
-          "id": 905,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9
-      ],
-      "query": 0,
-      "ram_hits": 16,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 22,
-          "source": "ram"
-        },
-        {
-          "id": 23,
-          "source": "ram"
-        },
-        {
-          "id": 28,
-          "source": "ram"
-        },
-        {
-          "id": 29,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "ram"
-    },
-    {
-      "bytes": 250190,
-      "effort": "wide",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": true,
-          "id": 905,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9,
-        12,
-        8,
-        2,
-        1,
-        13,
-        0,
-        7,
-        5
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 3,
-      "selected": [
-        {
-          "id": 0,
-          "source": "object"
-        },
-        {
-          "id": 1,
-          "source": "object"
-        },
-        {
-          "id": 2,
-          "source": "object"
-        },
-        {
-          "id": 3,
-          "source": "object"
-        },
-        {
-          "id": 4,
-          "source": "object"
-        },
-        {
-          "id": 5,
-          "source": "object"
-        },
-        {
-          "id": 6,
-          "source": "object"
-        },
-        {
-          "id": 7,
-          "source": "object"
-        },
-        {
-          "id": 8,
-          "source": "object"
-        },
-        {
-          "id": 9,
-          "source": "object"
-        },
-        {
-          "id": 10,
-          "source": "object"
-        },
-        {
-          "id": 11,
-          "source": "object"
-        },
-        {
-          "id": 12,
-          "source": "object"
-        },
-        {
-          "id": 13,
-          "source": "object"
-        },
-        {
-          "id": 14,
-          "source": "object"
-        },
-        {
-          "id": 15,
-          "source": "object"
-        },
-        {
-          "id": 16,
-          "source": "object"
-        },
-        {
-          "id": 17,
-          "source": "object"
-        },
-        {
-          "id": 18,
-          "source": "object"
-        },
-        {
-          "id": 19,
-          "source": "object"
-        },
-        {
-          "id": 20,
-          "source": "object"
-        },
-        {
-          "id": 21,
-          "source": "object"
-        },
-        {
-          "id": 22,
-          "source": "object"
-        },
-        {
-          "id": 23,
-          "source": "object"
-        },
-        {
-          "id": 24,
-          "source": "object"
-        },
-        {
-          "id": 25,
-          "source": "object"
-        },
-        {
-          "id": 26,
-          "source": "object"
-        },
-        {
-          "id": 27,
-          "source": "object"
-        },
-        {
-          "id": 28,
-          "source": "object"
-        },
-        {
-          "id": 29,
-          "source": "object"
-        },
-        {
-          "id": 30,
-          "source": "object"
-        },
-        {
-          "id": 31,
-          "source": "object"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "cold"
-    },
-    {
-      "bytes": 0,
-      "effort": "wide",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": true,
-          "id": 905,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9,
-        12,
-        8,
-        2,
-        1,
-        13,
-        0,
-        7,
-        5
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 0,
-          "source": "ssd"
-        },
-        {
-          "id": 1,
-          "source": "ssd"
-        },
-        {
-          "id": 2,
-          "source": "ssd"
-        },
-        {
-          "id": 3,
-          "source": "ssd"
-        },
-        {
-          "id": 4,
-          "source": "ssd"
-        },
-        {
-          "id": 5,
-          "source": "ssd"
-        },
-        {
-          "id": 6,
-          "source": "ssd"
-        },
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 11,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
-          "source": "ssd"
-        },
-        {
-          "id": 14,
-          "source": "ssd"
-        },
-        {
-          "id": 15,
-          "source": "ssd"
-        },
-        {
-          "id": 16,
-          "source": "ssd"
-        },
-        {
-          "id": 17,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 22,
-          "source": "ssd"
-        },
-        {
-          "id": 23,
-          "source": "ssd"
-        },
-        {
-          "id": 24,
-          "source": "ssd"
-        },
-        {
-          "id": 25,
-          "source": "ssd"
-        },
-        {
-          "id": 26,
-          "source": "ssd"
-        },
-        {
-          "id": 27,
-          "source": "ssd"
-        },
-        {
-          "id": 28,
-          "source": "ssd"
-        },
-        {
-          "id": 29,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 32,
-      "tier": "ssd"
-    },
-    {
-      "bytes": 0,
-      "effort": "wide",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": true,
-          "id": 905,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        731,
-        3920,
-        2517,
-        184,
-        905
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9,
-        12,
-        8,
-        2,
-        1,
-        13,
-        0,
-        7,
-        5
-      ],
-      "query": 0,
-      "ram_hits": 32,
       "recall": 1.0,
       "requests": 0,
       "selected": [
@@ -1267,2731 +639,614 @@
         {
           "id": 3,
           "source": "ram"
-        },
-        {
-          "id": 4,
-          "source": "ram"
-        },
-        {
-          "id": 5,
-          "source": "ram"
-        },
-        {
-          "id": 6,
-          "source": "ram"
-        },
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 11,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        },
-        {
-          "id": 14,
-          "source": "ram"
-        },
-        {
-          "id": 15,
-          "source": "ram"
-        },
-        {
-          "id": 16,
-          "source": "ram"
-        },
-        {
-          "id": 17,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 22,
-          "source": "ram"
-        },
-        {
-          "id": 23,
-          "source": "ram"
-        },
-        {
-          "id": 24,
-          "source": "ram"
-        },
-        {
-          "id": 25,
-          "source": "ram"
-        },
-        {
-          "id": 26,
-          "source": "ram"
-        },
-        {
-          "id": 27,
-          "source": "ram"
-        },
-        {
-          "id": 28,
-          "source": "ram"
-        },
-        {
-          "id": 29,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
         }
       ],
-      "sequence": 41,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "ram"
     },
     {
-      "bytes": 11152,
+      "bytes": 10336,
       "effort": "lean",
-      "fresh": false,
       "hits": [
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.37819492498468854,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 6
         },
         {
-          "distance": 0.6285027749554182,
-          "exact": false,
-          "id": 3180,
-          "tail": false
+          "distance": 0.4941642439251004,
+          "exact": true,
+          "id": 7
         },
         {
-          "distance": 0.6980911584952807,
-          "exact": false,
-          "id": 3716,
-          "tail": false
-        },
-        {
-          "distance": 0.7058821152171575,
-          "exact": false,
-          "id": 2433,
-          "tail": false
-        },
-        {
-          "distance": 0.7181725318404304,
-          "exact": false,
-          "id": 2420,
-          "tail": false
+          "distance": 0.7113431327880109,
+          "exact": true,
+          "id": 11
         }
       ],
       "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
+        6,
+        7,
+        11
       ],
       "probed": [
-        0,
-        15
+        2
       ],
       "query": 1,
       "ram_hits": 0,
-      "recall": 0.2,
+      "recall": 1.0,
       "requests": 1,
       "selected": [
         {
-          "id": 1,
-          "source": "object"
-        },
-        {
           "id": 2,
           "source": "object"
         }
       ],
-      "sequence": 41,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "cold"
     },
     {
       "bytes": 0,
       "effort": "lean",
-      "fresh": false,
       "hits": [
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.37819492498468854,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 6
         },
         {
-          "distance": 0.4347874818405515,
+          "distance": 0.4941642439251004,
           "exact": true,
-          "id": 1316,
-          "tail": false
+          "id": 7
         },
         {
-          "distance": 0.49241590832491866,
+          "distance": 0.7113431327880109,
           "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5300412681990387,
-          "exact": false,
-          "id": 1379,
-          "tail": false
-        },
-        {
-          "distance": 0.6046726332989358,
-          "exact": false,
-          "id": 1590,
-          "tail": false
+          "id": 11
         }
       ],
       "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
+        6,
+        7,
+        11
       ],
       "probed": [
-        0,
-        15
+        2
       ],
       "query": 1,
       "ram_hits": 0,
-      "recall": 0.6,
+      "recall": 1.0,
       "requests": 0,
       "selected": [
         {
-          "id": 0,
-          "source": "ssd"
-        },
-        {
-          "id": 1,
-          "source": "ssd"
-        },
-        {
           "id": 2,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
           "source": "ssd"
         }
       ],
-      "sequence": 41,
-      "ssd_hits": 5,
+      "sequence": 1,
+      "ssd_hits": 1,
       "tier": "ssd"
     },
     {
       "bytes": 0,
       "effort": "lean",
-      "fresh": false,
       "hits": [
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.37819492498468854,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 6
         },
         {
-          "distance": 0.4347874818405515,
+          "distance": 0.4941642439251004,
           "exact": true,
-          "id": 1316,
-          "tail": false
+          "id": 7
         },
         {
-          "distance": 0.49241590832491866,
+          "distance": 0.7113431327880109,
           "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5300412681990387,
-          "exact": false,
-          "id": 1379,
-          "tail": false
-        },
-        {
-          "distance": 0.6046726332989358,
-          "exact": false,
-          "id": 1590,
-          "tail": false
+          "id": 11
         }
       ],
       "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
+        6,
+        7,
+        11
       ],
       "probed": [
-        0,
-        15
+        2
       ],
       "query": 1,
-      "ram_hits": 5,
-      "recall": 0.6,
+      "ram_hits": 1,
+      "recall": 1.0,
       "requests": 0,
       "selected": [
         {
-          "id": 0,
-          "source": "ram"
-        },
-        {
-          "id": 1,
-          "source": "ram"
-        },
-        {
           "id": 2,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
           "source": "ram"
         }
       ],
-      "sequence": 41,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "ram"
     },
     {
-      "bytes": 62622,
+      "bytes": 17850,
       "effort": "balanced",
-      "fresh": false,
       "hits": [
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.37819492498468854,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 6
         },
         {
-          "distance": 0.4190656749433046,
+          "distance": 0.4941642439251004,
           "exact": true,
-          "id": 2053,
-          "tail": false
+          "id": 7
         },
         {
-          "distance": 0.4347874818405515,
+          "distance": 0.7113431327880109,
           "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.5235830105433088,
-          "exact": false,
-          "id": 3484,
-          "tail": false
-        },
-        {
-          "distance": 0.5300412681990387,
-          "exact": false,
-          "id": 1379,
-          "tail": false
+          "id": 11
         }
       ],
       "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
-      ],
-      "probed": [
-        0,
-        15,
-        3,
-        12,
-        1,
-        4,
-        9,
-        10
-      ],
-      "query": 1,
-      "ram_hits": 0,
-      "recall": 0.6,
-      "requests": 2,
-      "selected": [
-        {
-          "id": 0,
-          "source": "object"
-        },
-        {
-          "id": 1,
-          "source": "object"
-        },
-        {
-          "id": 2,
-          "source": "object"
-        },
-        {
-          "id": 3,
-          "source": "object"
-        },
-        {
-          "id": 18,
-          "source": "object"
-        },
-        {
-          "id": 19,
-          "source": "object"
-        },
-        {
-          "id": 20,
-          "source": "object"
-        },
-        {
-          "id": 21,
-          "source": "object"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "cold"
-    },
-    {
-      "bytes": 0,
-      "effort": "balanced",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.4179684108521009,
-          "exact": true,
-          "id": 2600,
-          "tail": false
-        },
-        {
-          "distance": 0.4190656749433046,
-          "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5017747471943892,
-          "exact": true,
-          "id": 834,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
-      ],
-      "probed": [
-        0,
-        15,
-        3,
-        12,
-        1,
-        4,
-        9,
-        10
-      ],
-      "query": 1,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 0,
-          "source": "ssd"
-        },
-        {
-          "id": 1,
-          "source": "ssd"
-        },
-        {
-          "id": 2,
-          "source": "ssd"
-        },
-        {
-          "id": 3,
-          "source": "ssd"
-        },
-        {
-          "id": 4,
-          "source": "ssd"
-        },
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 24,
-          "source": "ssd"
-        },
-        {
-          "id": 25,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 17,
-      "tier": "ssd"
-    },
-    {
-      "bytes": 0,
-      "effort": "balanced",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.4179684108521009,
-          "exact": true,
-          "id": 2600,
-          "tail": false
-        },
-        {
-          "distance": 0.4190656749433046,
-          "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5017747471943892,
-          "exact": true,
-          "id": 834,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
-      ],
-      "probed": [
-        0,
-        15,
-        3,
-        12,
-        1,
-        4,
-        9,
-        10
-      ],
-      "query": 1,
-      "ram_hits": 17,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 0,
-          "source": "ram"
-        },
-        {
-          "id": 1,
-          "source": "ram"
-        },
-        {
-          "id": 2,
-          "source": "ram"
-        },
-        {
-          "id": 3,
-          "source": "ram"
-        },
-        {
-          "id": 4,
-          "source": "ram"
-        },
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 24,
-          "source": "ram"
-        },
-        {
-          "id": 25,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "ram"
-    },
-    {
-      "bytes": 250190,
-      "effort": "wide",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.4179684108521009,
-          "exact": true,
-          "id": 2600,
-          "tail": false
-        },
-        {
-          "distance": 0.4190656749433046,
-          "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5017747471943892,
-          "exact": true,
-          "id": 834,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
-      ],
-      "probed": [
-        0,
-        15,
-        3,
-        12,
-        1,
-        4,
-        9,
-        10,
         6,
         7,
-        8,
-        11,
+        11
+      ],
+      "probed": [
         2,
-        14,
-        13,
-        5
+        0
       ],
       "query": 1,
       "ram_hits": 0,
       "recall": 1.0,
-      "requests": 3,
-      "selected": [
-        {
-          "id": 0,
-          "source": "object"
-        },
-        {
-          "id": 1,
-          "source": "object"
-        },
-        {
-          "id": 2,
-          "source": "object"
-        },
-        {
-          "id": 3,
-          "source": "object"
-        },
-        {
-          "id": 4,
-          "source": "object"
-        },
-        {
-          "id": 5,
-          "source": "object"
-        },
-        {
-          "id": 6,
-          "source": "object"
-        },
-        {
-          "id": 7,
-          "source": "object"
-        },
-        {
-          "id": 8,
-          "source": "object"
-        },
-        {
-          "id": 9,
-          "source": "object"
-        },
-        {
-          "id": 10,
-          "source": "object"
-        },
-        {
-          "id": 11,
-          "source": "object"
-        },
-        {
-          "id": 12,
-          "source": "object"
-        },
-        {
-          "id": 13,
-          "source": "object"
-        },
-        {
-          "id": 14,
-          "source": "object"
-        },
-        {
-          "id": 15,
-          "source": "object"
-        },
-        {
-          "id": 16,
-          "source": "object"
-        },
-        {
-          "id": 17,
-          "source": "object"
-        },
-        {
-          "id": 18,
-          "source": "object"
-        },
-        {
-          "id": 19,
-          "source": "object"
-        },
-        {
-          "id": 20,
-          "source": "object"
-        },
-        {
-          "id": 21,
-          "source": "object"
-        },
-        {
-          "id": 22,
-          "source": "object"
-        },
-        {
-          "id": 23,
-          "source": "object"
-        },
-        {
-          "id": 24,
-          "source": "object"
-        },
-        {
-          "id": 25,
-          "source": "object"
-        },
-        {
-          "id": 26,
-          "source": "object"
-        },
-        {
-          "id": 27,
-          "source": "object"
-        },
-        {
-          "id": 28,
-          "source": "object"
-        },
-        {
-          "id": 29,
-          "source": "object"
-        },
-        {
-          "id": 30,
-          "source": "object"
-        },
-        {
-          "id": 31,
-          "source": "object"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "cold"
-    },
-    {
-      "bytes": 0,
-      "effort": "wide",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.4179684108521009,
-          "exact": true,
-          "id": 2600,
-          "tail": false
-        },
-        {
-          "distance": 0.4190656749433046,
-          "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5017747471943892,
-          "exact": true,
-          "id": 834,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
-      ],
-      "probed": [
-        0,
-        15,
-        3,
-        12,
-        1,
-        4,
-        9,
-        10,
-        6,
-        7,
-        8,
-        11,
-        2,
-        14,
-        13,
-        5
-      ],
-      "query": 1,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 0,
-          "source": "ssd"
-        },
-        {
-          "id": 1,
-          "source": "ssd"
-        },
-        {
-          "id": 2,
-          "source": "ssd"
-        },
-        {
-          "id": 3,
-          "source": "ssd"
-        },
-        {
-          "id": 4,
-          "source": "ssd"
-        },
-        {
-          "id": 5,
-          "source": "ssd"
-        },
-        {
-          "id": 6,
-          "source": "ssd"
-        },
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 11,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
-          "source": "ssd"
-        },
-        {
-          "id": 14,
-          "source": "ssd"
-        },
-        {
-          "id": 15,
-          "source": "ssd"
-        },
-        {
-          "id": 16,
-          "source": "ssd"
-        },
-        {
-          "id": 17,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 22,
-          "source": "ssd"
-        },
-        {
-          "id": 23,
-          "source": "ssd"
-        },
-        {
-          "id": 24,
-          "source": "ssd"
-        },
-        {
-          "id": 25,
-          "source": "ssd"
-        },
-        {
-          "id": 26,
-          "source": "ssd"
-        },
-        {
-          "id": 27,
-          "source": "ssd"
-        },
-        {
-          "id": 28,
-          "source": "ssd"
-        },
-        {
-          "id": 29,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 32,
-      "tier": "ssd"
-    },
-    {
-      "bytes": 0,
-      "effort": "wide",
-      "fresh": false,
-      "hits": [
-        {
-          "distance": 0.4179684108521009,
-          "exact": true,
-          "id": 2600,
-          "tail": false
-        },
-        {
-          "distance": 0.4190656749433046,
-          "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5017747471943892,
-          "exact": true,
-          "id": 834,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        2600,
-        2053,
-        1316,
-        869,
-        834
-      ],
-      "probed": [
-        0,
-        15,
-        3,
-        12,
-        1,
-        4,
-        9,
-        10,
-        6,
-        7,
-        8,
-        11,
-        2,
-        14,
-        13,
-        5
-      ],
-      "query": 1,
-      "ram_hits": 32,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 0,
-          "source": "ram"
-        },
-        {
-          "id": 1,
-          "source": "ram"
-        },
-        {
-          "id": 2,
-          "source": "ram"
-        },
-        {
-          "id": 3,
-          "source": "ram"
-        },
-        {
-          "id": 4,
-          "source": "ram"
-        },
-        {
-          "id": 5,
-          "source": "ram"
-        },
-        {
-          "id": 6,
-          "source": "ram"
-        },
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 11,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        },
-        {
-          "id": 14,
-          "source": "ram"
-        },
-        {
-          "id": 15,
-          "source": "ram"
-        },
-        {
-          "id": 16,
-          "source": "ram"
-        },
-        {
-          "id": 17,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 22,
-          "source": "ram"
-        },
-        {
-          "id": 23,
-          "source": "ram"
-        },
-        {
-          "id": 24,
-          "source": "ram"
-        },
-        {
-          "id": 25,
-          "source": "ram"
-        },
-        {
-          "id": 26,
-          "source": "ram"
-        },
-        {
-          "id": 27,
-          "source": "ram"
-        },
-        {
-          "id": 28,
-          "source": "ram"
-        },
-        {
-          "id": 29,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
-        }
-      ],
-      "sequence": 41,
-      "ssd_hits": 0,
-      "tier": "ram"
-    },
-    {
-      "bytes": 15705,
-      "effort": "lean",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9000,
-          "tail": true
-        },
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": false,
-          "id": 905,
-          "tail": false
-        },
-        {
-          "distance": 0.9276565626090739,
-          "exact": false,
-          "id": 590,
-          "tail": false
-        },
-        {
-          "distance": 0.9532562685909066,
-          "exact": false,
-          "id": 3270,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
-      ],
-      "probed": [
-        6,
-        4
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 0.4,
       "requests": 1,
       "selected": [
         {
-          "id": 12,
+          "id": 0,
           "source": "object"
         },
         {
-          "id": 13,
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
           "source": "object"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "cold"
     },
     {
       "bytes": 0,
-      "effort": "lean",
-      "fresh": true,
+      "effort": "balanced",
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.37819492498468854,
           "exact": true,
-          "id": 9000,
-          "tail": true
+          "id": 6
         },
         {
-          "distance": 0.006399993902448511,
+          "distance": 0.4941642439251004,
           "exact": true,
-          "id": 731,
-          "tail": false
+          "id": 7
         },
         {
-          "distance": 0.7919444054771968,
+          "distance": 0.7113431327880109,
           "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": false,
-          "id": 905,
-          "tail": false
-        },
-        {
-          "distance": 0.9276565626090739,
-          "exact": false,
-          "id": 590,
-          "tail": false
+          "id": 11
         }
       ],
       "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
+        6,
+        7,
+        11
       ],
       "probed": [
-        6,
-        4
+        2,
+        0
       ],
-      "query": 0,
+      "query": 1,
       "ram_hits": 0,
-      "recall": 0.6,
+      "recall": 1.0,
       "requests": 0,
       "selected": [
         {
-          "id": 9,
+          "id": 0,
           "source": "ssd"
         },
         {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
+          "id": 2,
           "source": "ssd"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
+      "ssd_hits": 2,
+      "tier": "ssd"
+    },
+    {
+      "bytes": 0,
+      "effort": "balanced",
+      "hits": [
+        {
+          "distance": 0.37819492498468854,
+          "exact": true,
+          "id": 6
+        },
+        {
+          "distance": 0.4941642439251004,
+          "exact": true,
+          "id": 7
+        },
+        {
+          "distance": 0.7113431327880109,
+          "exact": true,
+          "id": 11
+        }
+      ],
+      "oracle": [
+        6,
+        7,
+        11
+      ],
+      "probed": [
+        2,
+        0
+      ],
+      "query": 1,
+      "ram_hits": 2,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 35548,
+      "effort": "wide",
+      "hits": [
+        {
+          "distance": 0.37819492498468854,
+          "exact": true,
+          "id": 6
+        },
+        {
+          "distance": 0.4941642439251004,
+          "exact": true,
+          "id": 7
+        },
+        {
+          "distance": 0.7113431327880109,
+          "exact": true,
+          "id": 11
+        }
+      ],
+      "oracle": [
+        6,
+        7,
+        11
+      ],
+      "probed": [
+        2,
+        0,
+        1,
+        3
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 1,
+      "selected": [
+        {
+          "id": 0,
+          "source": "object"
+        },
+        {
+          "id": 1,
+          "source": "object"
+        },
+        {
+          "id": 2,
+          "source": "object"
+        },
+        {
+          "id": 3,
+          "source": "object"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 0,
+      "tier": "cold"
+    },
+    {
+      "bytes": 0,
+      "effort": "wide",
+      "hits": [
+        {
+          "distance": 0.37819492498468854,
+          "exact": true,
+          "id": 6
+        },
+        {
+          "distance": 0.4941642439251004,
+          "exact": true,
+          "id": 7
+        },
+        {
+          "distance": 0.7113431327880109,
+          "exact": true,
+          "id": 11
+        }
+      ],
+      "oracle": [
+        6,
+        7,
+        11
+      ],
+      "probed": [
+        2,
+        0,
+        1,
+        3
+      ],
+      "query": 1,
+      "ram_hits": 0,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ssd"
+        },
+        {
+          "id": 1,
+          "source": "ssd"
+        },
+        {
+          "id": 2,
+          "source": "ssd"
+        },
+        {
+          "id": 3,
+          "source": "ssd"
+        }
+      ],
+      "sequence": 1,
       "ssd_hits": 4,
       "tier": "ssd"
     },
     {
       "bytes": 0,
-      "effort": "lean",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9000,
-          "tail": true
-        },
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8405070569598571,
-          "exact": false,
-          "id": 905,
-          "tail": false
-        },
-        {
-          "distance": 0.9276565626090739,
-          "exact": false,
-          "id": 590,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
-      ],
-      "probed": [
-        6,
-        4
-      ],
-      "query": 0,
-      "ram_hits": 4,
-      "recall": 0.6,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        }
-      ],
-      "sequence": 42,
-      "ssd_hits": 0,
-      "tier": "ram"
-    },
-    {
-      "bytes": 49841,
-      "effort": "balanced",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9000,
-          "tail": true
-        },
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 2,
-      "selected": [
-        {
-          "id": 7,
-          "source": "object"
-        },
-        {
-          "id": 8,
-          "source": "object"
-        },
-        {
-          "id": 9,
-          "source": "object"
-        },
-        {
-          "id": 10,
-          "source": "object"
-        },
-        {
-          "id": 12,
-          "source": "object"
-        },
-        {
-          "id": 13,
-          "source": "object"
-        }
-      ],
-      "sequence": 42,
-      "ssd_hits": 0,
-      "tier": "cold"
-    },
-    {
-      "bytes": 0,
-      "effort": "balanced",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9000,
-          "tail": true
-        },
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 22,
-          "source": "ssd"
-        },
-        {
-          "id": 23,
-          "source": "ssd"
-        },
-        {
-          "id": 28,
-          "source": "ssd"
-        },
-        {
-          "id": 29,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
-        }
-      ],
-      "sequence": 42,
-      "ssd_hits": 16,
-      "tier": "ssd"
-    },
-    {
-      "bytes": 0,
-      "effort": "balanced",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9000,
-          "tail": true
-        },
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9
-      ],
-      "query": 0,
-      "ram_hits": 16,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 22,
-          "source": "ram"
-        },
-        {
-          "id": 23,
-          "source": "ram"
-        },
-        {
-          "id": 28,
-          "source": "ram"
-        },
-        {
-          "id": 29,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
-        }
-      ],
-      "sequence": 42,
-      "ssd_hits": 0,
-      "tier": "ram"
-    },
-    {
-      "bytes": 250190,
       "effort": "wide",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.37819492498468854,
           "exact": true,
-          "id": 9000,
-          "tail": true
+          "id": 6
         },
         {
-          "distance": 0.006399993902448511,
+          "distance": 0.4941642439251004,
           "exact": true,
-          "id": 731,
-          "tail": false
+          "id": 7
         },
         {
-          "distance": 0.5254169261292497,
+          "distance": 0.7113431327880109,
           "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
+          "id": 11
         }
       ],
       "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
-      ],
-      "probed": [
         6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9,
-        12,
-        8,
-        2,
-        1,
-        13,
-        0,
         7,
-        5
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 3,
-      "selected": [
-        {
-          "id": 0,
-          "source": "object"
-        },
-        {
-          "id": 1,
-          "source": "object"
-        },
-        {
-          "id": 2,
-          "source": "object"
-        },
-        {
-          "id": 3,
-          "source": "object"
-        },
-        {
-          "id": 4,
-          "source": "object"
-        },
-        {
-          "id": 5,
-          "source": "object"
-        },
-        {
-          "id": 6,
-          "source": "object"
-        },
-        {
-          "id": 7,
-          "source": "object"
-        },
-        {
-          "id": 8,
-          "source": "object"
-        },
-        {
-          "id": 9,
-          "source": "object"
-        },
-        {
-          "id": 10,
-          "source": "object"
-        },
-        {
-          "id": 11,
-          "source": "object"
-        },
-        {
-          "id": 12,
-          "source": "object"
-        },
-        {
-          "id": 13,
-          "source": "object"
-        },
-        {
-          "id": 14,
-          "source": "object"
-        },
-        {
-          "id": 15,
-          "source": "object"
-        },
-        {
-          "id": 16,
-          "source": "object"
-        },
-        {
-          "id": 17,
-          "source": "object"
-        },
-        {
-          "id": 18,
-          "source": "object"
-        },
-        {
-          "id": 19,
-          "source": "object"
-        },
-        {
-          "id": 20,
-          "source": "object"
-        },
-        {
-          "id": 21,
-          "source": "object"
-        },
-        {
-          "id": 22,
-          "source": "object"
-        },
-        {
-          "id": 23,
-          "source": "object"
-        },
-        {
-          "id": 24,
-          "source": "object"
-        },
-        {
-          "id": 25,
-          "source": "object"
-        },
-        {
-          "id": 26,
-          "source": "object"
-        },
-        {
-          "id": 27,
-          "source": "object"
-        },
-        {
-          "id": 28,
-          "source": "object"
-        },
-        {
-          "id": 29,
-          "source": "object"
-        },
-        {
-          "id": 30,
-          "source": "object"
-        },
-        {
-          "id": 31,
-          "source": "object"
-        }
-      ],
-      "sequence": 42,
-      "ssd_hits": 0,
-      "tier": "cold"
-    },
-    {
-      "bytes": 0,
-      "effort": "wide",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9000,
-          "tail": true
-        },
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
+        11
       ],
       "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9,
-        12,
-        8,
         2,
+        0,
         1,
-        13,
-        0,
-        7,
-        5
-      ],
-      "query": 0,
-      "ram_hits": 0,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 0,
-          "source": "ssd"
-        },
-        {
-          "id": 1,
-          "source": "ssd"
-        },
-        {
-          "id": 2,
-          "source": "ssd"
-        },
-        {
-          "id": 3,
-          "source": "ssd"
-        },
-        {
-          "id": 4,
-          "source": "ssd"
-        },
-        {
-          "id": 5,
-          "source": "ssd"
-        },
-        {
-          "id": 6,
-          "source": "ssd"
-        },
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 11,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
-          "source": "ssd"
-        },
-        {
-          "id": 14,
-          "source": "ssd"
-        },
-        {
-          "id": 15,
-          "source": "ssd"
-        },
-        {
-          "id": 16,
-          "source": "ssd"
-        },
-        {
-          "id": 17,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 22,
-          "source": "ssd"
-        },
-        {
-          "id": 23,
-          "source": "ssd"
-        },
-        {
-          "id": 24,
-          "source": "ssd"
-        },
-        {
-          "id": 25,
-          "source": "ssd"
-        },
-        {
-          "id": 26,
-          "source": "ssd"
-        },
-        {
-          "id": 27,
-          "source": "ssd"
-        },
-        {
-          "id": 28,
-          "source": "ssd"
-        },
-        {
-          "id": 29,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
-        }
-      ],
-      "sequence": 42,
-      "ssd_hits": 32,
-      "tier": "ssd"
-    },
-    {
-      "bytes": 0,
-      "effort": "wide",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9000,
-          "tail": true
-        },
-        {
-          "distance": 0.006399993902448511,
-          "exact": true,
-          "id": 731,
-          "tail": false
-        },
-        {
-          "distance": 0.5254169261292497,
-          "exact": true,
-          "id": 3920,
-          "tail": false
-        },
-        {
-          "distance": 0.7919444054771968,
-          "exact": true,
-          "id": 2517,
-          "tail": false
-        },
-        {
-          "distance": 0.8017192319552892,
-          "exact": true,
-          "id": 184,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9000,
-        731,
-        3920,
-        2517,
-        184
-      ],
-      "probed": [
-        6,
-        4,
-        3,
-        10,
-        14,
-        15,
-        11,
-        9,
-        12,
-        8,
-        2,
-        1,
-        13,
-        0,
-        7,
-        5
-      ],
-      "query": 0,
-      "ram_hits": 32,
-      "recall": 1.0,
-      "requests": 0,
-      "selected": [
-        {
-          "id": 0,
-          "source": "ram"
-        },
-        {
-          "id": 1,
-          "source": "ram"
-        },
-        {
-          "id": 2,
-          "source": "ram"
-        },
-        {
-          "id": 3,
-          "source": "ram"
-        },
-        {
-          "id": 4,
-          "source": "ram"
-        },
-        {
-          "id": 5,
-          "source": "ram"
-        },
-        {
-          "id": 6,
-          "source": "ram"
-        },
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 11,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        },
-        {
-          "id": 14,
-          "source": "ram"
-        },
-        {
-          "id": 15,
-          "source": "ram"
-        },
-        {
-          "id": 16,
-          "source": "ram"
-        },
-        {
-          "id": 17,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 22,
-          "source": "ram"
-        },
-        {
-          "id": 23,
-          "source": "ram"
-        },
-        {
-          "id": 24,
-          "source": "ram"
-        },
-        {
-          "id": 25,
-          "source": "ram"
-        },
-        {
-          "id": 26,
-          "source": "ram"
-        },
-        {
-          "id": 27,
-          "source": "ram"
-        },
-        {
-          "id": 28,
-          "source": "ram"
-        },
-        {
-          "id": 29,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
-        }
-      ],
-      "sequence": 42,
-      "ssd_hits": 0,
-      "tier": "ram"
-    },
-    {
-      "bytes": 11152,
-      "effort": "lean",
-      "fresh": true,
-      "hits": [
-        {
-          "distance": 0.0,
-          "exact": true,
-          "id": 9001,
-          "tail": true
-        },
-        {
-          "distance": 0.4179684108521009,
-          "exact": true,
-          "id": 2600,
-          "tail": false
-        },
-        {
-          "distance": 0.6285027749554182,
-          "exact": false,
-          "id": 3180,
-          "tail": false
-        },
-        {
-          "distance": 0.6980911584952807,
-          "exact": false,
-          "id": 3716,
-          "tail": false
-        },
-        {
-          "distance": 0.7058821152171575,
-          "exact": false,
-          "id": 2433,
-          "tail": false
-        }
-      ],
-      "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
-      ],
-      "probed": [
-        0,
-        15
+        3
       ],
       "query": 1,
+      "ram_hits": 4,
+      "recall": 1.0,
+      "requests": 0,
+      "selected": [
+        {
+          "id": 0,
+          "source": "ram"
+        },
+        {
+          "id": 1,
+          "source": "ram"
+        },
+        {
+          "id": 2,
+          "source": "ram"
+        },
+        {
+          "id": 3,
+          "source": "ram"
+        }
+      ],
+      "sequence": 1,
+      "ssd_hits": 0,
+      "tier": "ram"
+    },
+    {
+      "bytes": 17698,
+      "effort": "lean",
+      "hits": [
+        {
+          "distance": 0.32932798912234373,
+          "exact": true,
+          "id": 14
+        },
+        {
+          "distance": 0.3511395108580968,
+          "exact": true,
+          "id": 12
+        },
+        {
+          "distance": 0.48972797288415193,
+          "exact": true,
+          "id": 13
+        }
+      ],
+      "oracle": [
+        14,
+        12,
+        13
+      ],
+      "probed": [
+        3
+      ],
+      "query": 2,
       "ram_hits": 0,
-      "recall": 0.4,
+      "recall": 1.0,
       "requests": 1,
       "selected": [
         {
-          "id": 1,
-          "source": "object"
-        },
-        {
-          "id": 2,
+          "id": 3,
           "source": "object"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "cold"
     },
     {
       "bytes": 0,
       "effort": "lean",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4347874818405515,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5300412681990387,
-          "exact": false,
-          "id": 1379,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15
+        3
       ],
-      "query": 1,
+      "query": 2,
       "ram_hits": 0,
-      "recall": 0.8,
+      "recall": 1.0,
       "requests": 0,
       "selected": [
         {
-          "id": 0,
-          "source": "ssd"
-        },
-        {
-          "id": 1,
-          "source": "ssd"
-        },
-        {
-          "id": 2,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
+          "id": 3,
           "source": "ssd"
         }
       ],
-      "sequence": 42,
-      "ssd_hits": 5,
+      "sequence": 1,
+      "ssd_hits": 1,
       "tier": "ssd"
     },
     {
       "bytes": 0,
       "effort": "lean",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4347874818405515,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
-        },
-        {
-          "distance": 0.5300412681990387,
-          "exact": false,
-          "id": 1379,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15
+        3
       ],
-      "query": 1,
-      "ram_hits": 5,
-      "recall": 0.8,
+      "query": 2,
+      "ram_hits": 1,
+      "recall": 1.0,
       "requests": 0,
       "selected": [
         {
-          "id": 0,
-          "source": "ram"
-        },
-        {
-          "id": 1,
-          "source": "ram"
-        },
-        {
-          "id": 2,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
+          "id": 3,
           "source": "ram"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "ram"
     },
     {
-      "bytes": 62622,
+      "bytes": 28034,
       "effort": "balanced",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4190656749433046,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.5235830105433088,
-          "exact": false,
-          "id": 3484,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15,
         3,
-        12,
-        1,
-        4,
-        9,
-        10
+        2
       ],
-      "query": 1,
+      "query": 2,
       "ram_hits": 0,
-      "recall": 0.8,
-      "requests": 2,
+      "recall": 1.0,
+      "requests": 1,
       "selected": [
-        {
-          "id": 0,
-          "source": "object"
-        },
-        {
-          "id": 1,
-          "source": "object"
-        },
         {
           "id": 2,
           "source": "object"
@@ -3999,94 +1254,46 @@
         {
           "id": 3,
           "source": "object"
-        },
-        {
-          "id": 18,
-          "source": "object"
-        },
-        {
-          "id": 19,
-          "source": "object"
-        },
-        {
-          "id": 20,
-          "source": "object"
-        },
-        {
-          "id": 21,
-          "source": "object"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "cold"
     },
     {
       "bytes": 0,
       "effort": "balanced",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4190656749433046,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15,
         3,
-        12,
-        1,
-        4,
-        9,
-        10
+        2
       ],
-      "query": 1,
+      "query": 2,
       "ram_hits": 0,
       "recall": 1.0,
       "requests": 0,
       "selected": [
-        {
-          "id": 0,
-          "source": "ssd"
-        },
-        {
-          "id": 1,
-          "source": "ssd"
-        },
         {
           "id": 2,
           "source": "ssd"
@@ -4094,260 +1301,94 @@
         {
           "id": 3,
           "source": "ssd"
-        },
-        {
-          "id": 4,
-          "source": "ssd"
-        },
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 24,
-          "source": "ssd"
-        },
-        {
-          "id": 25,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
         }
       ],
-      "sequence": 42,
-      "ssd_hits": 17,
+      "sequence": 1,
+      "ssd_hits": 2,
       "tier": "ssd"
     },
     {
       "bytes": 0,
       "effort": "balanced",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4190656749433046,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15,
         3,
-        12,
-        1,
-        4,
-        9,
-        10
+        2
       ],
-      "query": 1,
-      "ram_hits": 17,
+      "query": 2,
+      "ram_hits": 2,
       "recall": 1.0,
       "requests": 0,
       "selected": [
         {
-          "id": 0,
-          "source": "ram"
-        },
-        {
-          "id": 1,
-          "source": "ram"
-        },
-        {
           "id": 2,
           "source": "ram"
         },
         {
           "id": 3,
           "source": "ram"
-        },
-        {
-          "id": 4,
-          "source": "ram"
-        },
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 24,
-          "source": "ram"
-        },
-        {
-          "id": 25,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "ram"
     },
     {
-      "bytes": 250190,
+      "bytes": 35548,
       "effort": "wide",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4190656749433046,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15,
         3,
-        12,
-        1,
-        4,
-        9,
-        10,
-        6,
-        7,
-        8,
-        11,
         2,
-        14,
-        13,
-        5
+        1,
+        0
       ],
-      "query": 1,
+      "query": 2,
       "ram_hits": 0,
       "recall": 1.0,
-      "requests": 3,
+      "requests": 1,
       "selected": [
         {
           "id": 0,
@@ -4364,186 +1405,44 @@
         {
           "id": 3,
           "source": "object"
-        },
-        {
-          "id": 4,
-          "source": "object"
-        },
-        {
-          "id": 5,
-          "source": "object"
-        },
-        {
-          "id": 6,
-          "source": "object"
-        },
-        {
-          "id": 7,
-          "source": "object"
-        },
-        {
-          "id": 8,
-          "source": "object"
-        },
-        {
-          "id": 9,
-          "source": "object"
-        },
-        {
-          "id": 10,
-          "source": "object"
-        },
-        {
-          "id": 11,
-          "source": "object"
-        },
-        {
-          "id": 12,
-          "source": "object"
-        },
-        {
-          "id": 13,
-          "source": "object"
-        },
-        {
-          "id": 14,
-          "source": "object"
-        },
-        {
-          "id": 15,
-          "source": "object"
-        },
-        {
-          "id": 16,
-          "source": "object"
-        },
-        {
-          "id": 17,
-          "source": "object"
-        },
-        {
-          "id": 18,
-          "source": "object"
-        },
-        {
-          "id": 19,
-          "source": "object"
-        },
-        {
-          "id": 20,
-          "source": "object"
-        },
-        {
-          "id": 21,
-          "source": "object"
-        },
-        {
-          "id": 22,
-          "source": "object"
-        },
-        {
-          "id": 23,
-          "source": "object"
-        },
-        {
-          "id": 24,
-          "source": "object"
-        },
-        {
-          "id": 25,
-          "source": "object"
-        },
-        {
-          "id": 26,
-          "source": "object"
-        },
-        {
-          "id": 27,
-          "source": "object"
-        },
-        {
-          "id": 28,
-          "source": "object"
-        },
-        {
-          "id": 29,
-          "source": "object"
-        },
-        {
-          "id": 30,
-          "source": "object"
-        },
-        {
-          "id": 31,
-          "source": "object"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "cold"
     },
     {
       "bytes": 0,
       "effort": "wide",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4190656749433046,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15,
         3,
-        12,
-        1,
-        4,
-        9,
-        10,
-        6,
-        7,
-        8,
-        11,
         2,
-        14,
-        13,
-        5
+        1,
+        0
       ],
-      "query": 1,
+      "query": 2,
       "ram_hits": 0,
       "recall": 1.0,
       "requests": 0,
@@ -4563,187 +1462,45 @@
         {
           "id": 3,
           "source": "ssd"
-        },
-        {
-          "id": 4,
-          "source": "ssd"
-        },
-        {
-          "id": 5,
-          "source": "ssd"
-        },
-        {
-          "id": 6,
-          "source": "ssd"
-        },
-        {
-          "id": 7,
-          "source": "ssd"
-        },
-        {
-          "id": 8,
-          "source": "ssd"
-        },
-        {
-          "id": 9,
-          "source": "ssd"
-        },
-        {
-          "id": 10,
-          "source": "ssd"
-        },
-        {
-          "id": 11,
-          "source": "ssd"
-        },
-        {
-          "id": 12,
-          "source": "ssd"
-        },
-        {
-          "id": 13,
-          "source": "ssd"
-        },
-        {
-          "id": 14,
-          "source": "ssd"
-        },
-        {
-          "id": 15,
-          "source": "ssd"
-        },
-        {
-          "id": 16,
-          "source": "ssd"
-        },
-        {
-          "id": 17,
-          "source": "ssd"
-        },
-        {
-          "id": 18,
-          "source": "ssd"
-        },
-        {
-          "id": 19,
-          "source": "ssd"
-        },
-        {
-          "id": 20,
-          "source": "ssd"
-        },
-        {
-          "id": 21,
-          "source": "ssd"
-        },
-        {
-          "id": 22,
-          "source": "ssd"
-        },
-        {
-          "id": 23,
-          "source": "ssd"
-        },
-        {
-          "id": 24,
-          "source": "ssd"
-        },
-        {
-          "id": 25,
-          "source": "ssd"
-        },
-        {
-          "id": 26,
-          "source": "ssd"
-        },
-        {
-          "id": 27,
-          "source": "ssd"
-        },
-        {
-          "id": 28,
-          "source": "ssd"
-        },
-        {
-          "id": 29,
-          "source": "ssd"
-        },
-        {
-          "id": 30,
-          "source": "ssd"
-        },
-        {
-          "id": 31,
-          "source": "ssd"
         }
       ],
-      "sequence": 42,
-      "ssd_hits": 32,
+      "sequence": 1,
+      "ssd_hits": 4,
       "tier": "ssd"
     },
     {
       "bytes": 0,
       "effort": "wide",
-      "fresh": true,
       "hits": [
         {
-          "distance": 0.0,
+          "distance": 0.32932798912234373,
           "exact": true,
-          "id": 9001,
-          "tail": true
+          "id": 14
         },
         {
-          "distance": 0.4179684108521009,
+          "distance": 0.3511395108580968,
           "exact": true,
-          "id": 2600,
-          "tail": false
+          "id": 12
         },
         {
-          "distance": 0.4190656749433046,
+          "distance": 0.48972797288415193,
           "exact": true,
-          "id": 2053,
-          "tail": false
-        },
-        {
-          "distance": 0.4347874818405515,
-          "exact": true,
-          "id": 1316,
-          "tail": false
-        },
-        {
-          "distance": 0.49241590832491866,
-          "exact": true,
-          "id": 869,
-          "tail": false
+          "id": 13
         }
       ],
       "oracle": [
-        9001,
-        2600,
-        2053,
-        1316,
-        869
+        14,
+        12,
+        13
       ],
       "probed": [
-        0,
-        15,
         3,
-        12,
-        1,
-        4,
-        9,
-        10,
-        6,
-        7,
-        8,
-        11,
         2,
-        14,
-        13,
-        5
+        1,
+        0
       ],
-      "query": 1,
-      "ram_hits": 32,
+      "query": 2,
+      "ram_hits": 4,
       "recall": 1.0,
       "requests": 0,
       "selected": [
@@ -4762,126 +1519,14 @@
         {
           "id": 3,
           "source": "ram"
-        },
-        {
-          "id": 4,
-          "source": "ram"
-        },
-        {
-          "id": 5,
-          "source": "ram"
-        },
-        {
-          "id": 6,
-          "source": "ram"
-        },
-        {
-          "id": 7,
-          "source": "ram"
-        },
-        {
-          "id": 8,
-          "source": "ram"
-        },
-        {
-          "id": 9,
-          "source": "ram"
-        },
-        {
-          "id": 10,
-          "source": "ram"
-        },
-        {
-          "id": 11,
-          "source": "ram"
-        },
-        {
-          "id": 12,
-          "source": "ram"
-        },
-        {
-          "id": 13,
-          "source": "ram"
-        },
-        {
-          "id": 14,
-          "source": "ram"
-        },
-        {
-          "id": 15,
-          "source": "ram"
-        },
-        {
-          "id": 16,
-          "source": "ram"
-        },
-        {
-          "id": 17,
-          "source": "ram"
-        },
-        {
-          "id": 18,
-          "source": "ram"
-        },
-        {
-          "id": 19,
-          "source": "ram"
-        },
-        {
-          "id": 20,
-          "source": "ram"
-        },
-        {
-          "id": 21,
-          "source": "ram"
-        },
-        {
-          "id": 22,
-          "source": "ram"
-        },
-        {
-          "id": 23,
-          "source": "ram"
-        },
-        {
-          "id": 24,
-          "source": "ram"
-        },
-        {
-          "id": 25,
-          "source": "ram"
-        },
-        {
-          "id": 26,
-          "source": "ram"
-        },
-        {
-          "id": 27,
-          "source": "ram"
-        },
-        {
-          "id": 28,
-          "source": "ram"
-        },
-        {
-          "id": 29,
-          "source": "ram"
-        },
-        {
-          "id": 30,
-          "source": "ram"
-        },
-        {
-          "id": 31,
-          "source": "ram"
         }
       ],
-      "sequence": 42,
+      "sequence": 1,
       "ssd_hits": 0,
       "tier": "ram"
     }
   ],
-  "rows": 4096,
+  "rows": 24,
   "seed": 42,
-  "version": 1
+  "version": 2
 }
