@@ -21,7 +21,7 @@ Each release is published as a multi-platform image (`linux/amd64`,
 
 ```sh
 docker run --rm -p 8080:8080 -e GLIDER_DIMENSIONS=3 \
-  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:1.0.1
+  -e GLIDER_DATA_DIR=/var/lib/glider/data ghcr.io/omerfeyzioglu/glider:latest
 ```
 
 Data in the container is lost when it stops; point it at S3 with the
