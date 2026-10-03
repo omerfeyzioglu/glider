@@ -440,7 +440,7 @@ client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n
 <pre><code><span class="c"># durable agent memory, embedded locally with fastembed</span>
 <span class="p">$ </span><span class="k">pip</span> install <span class="s">"glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span>
 
-<span class="p">$ </span><span class="k">claude</span> mcp add glider -- glider-mcp
+<span class="p">$ </span><span class="k">claude</span> mcp add glider -e GLIDER_COLLECTION=memory -- glider-mcp
 
 <span class="out"># tools: remember · recall · forget · memory_count</span></code></pre>
         </div>
@@ -514,7 +514,7 @@ client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n
         <p>Filtered search is approximate by default. Add <code>"exact": true</code> and a filtered query returns every match, up to <code>k</code>.</p>
       </article>
 
-      <article class="cell glass s2">
+      <article class="cell glass s3">
         <div class="pair viz">
           <div><b>30.9 ms</b><span>warm p95</span></div>
           <div><b>58.6 ms</b><span>cold p95</span></div>
@@ -523,13 +523,21 @@ client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n
         <p>A block cache fills in the background so warm queries need no remote reads. Losing it loses no acknowledged writes; latency and approximate recall recover as it warms.</p>
       </article>
 
-      <article class="cell glass s2">
+      <article class="cell glass s3">
         <p class="big viz">250,000<small>rows</small></p>
         <h3>Automatic clustering</h3>
         <p>At 250,000 rows the server builds a clustered view (centroids and cluster-contiguous postings) by itself, and rebuilds it as the collection grows. Unfiltered queries read at most 8 remote ranges and 1&nbsp;MiB.</p>
       </article>
 
-      <article class="cell glass s2">
+      <article class="cell glass s3">
+        <ul class="ops viz" aria-label="Collection endpoints">
+          <li>POST /v1/collections</li><li>/v1/collections/{name}/query</li>
+        </ul>
+        <h3>Many collections, one server <span class="tag">New in 1.1</span></h3>
+        <p>Create, list and delete collections over HTTP, each with its own dimension and metric in its own S3 prefix. They open on first use and the least recently used close when idle, so many small tenants or agents share one process.</p>
+      </article>
+
+      <article class="cell glass s3">
         <ul class="ops viz" aria-label="Operational tools">
           <li>/metrics</li><li>/v1/status</li><li>bearer auth</li><li>glider-admin</li>
         </ul>
@@ -709,17 +717,16 @@ client.query([<span class="n">1</span>, <span class="n">1</span>, <span class="n
       <p class="note">Text is embedded locally with fastembed (default <code>BAAI/bge-small-en-v1.5</code>, 384 dimensions; Python 3.10 or newer). <code>recall</code> uses exact search, so its cost grows with the number of memories.</p>
     </div>
     <div>
-      <p class="stepl"><b>01</b> Run Glider: 384 dimensions, cosine</p>
-      <div class="code block"><pre><code><span class="k">docker</span> run -d --name glider-memory -p 8080:8080 \
-  <span class="f">-v</span> glider-memory:/var/lib/glider \
-  <span class="f">-e</span> GLIDER_DIMENSIONS=<span class="n">384</span> <span class="f">-e</span> GLIDER_METRIC=cosine \
+      <p class="stepl"><b>01</b> Run Glider in multi-collection mode</p>
+      <div class="code block"><pre><code><span class="k">docker</span> run -d --name glider -p 8080:8080 \
+  <span class="f">-v</span> glider-data:/var/lib/glider \
   <span class="f">-e</span> GLIDER_DATA_DIR=/var/lib/glider/data \
   ghcr.io/omerfeyzioglu/glider:1.1.0</code></pre></div>
       <p class="stepl"><b>02</b> Install the client with the MCP extra</p>
       <div class="code block"><pre><code><span class="k">pip</span> install <span class="s">"glider-client[mcp] @ git+https://github.com/omerfeyzioglu/glider#subdirectory=clients/python"</span></code></pre></div>
       <p class="stepl"><b>03</b> Register it with Claude Code</p>
-      <div class="code block"><pre><code><span class="k">claude</span> mcp add glider -- glider-mcp</code></pre></div>
-      <p class="note">Dimension and metric are fixed when a collection is created. Claude Desktop setup and environment variables are in the <a href="https://github.com/omerfeyzioglu/glider/tree/main/clients/python#mcp-memory-for-agents">client README</a>.</p>
+      <div class="code block"><pre><code><span class="k">claude</span> mcp add glider -e GLIDER_COLLECTION=memory -- glider-mcp</code></pre></div>
+      <p class="note">On first use <code>glider-mcp</code> creates its collection with the model&rsquo;s dimension and cosine distance; give each agent its own collection name. Claude Desktop setup and environment variables are in the <a href="https://github.com/omerfeyzioglu/glider/tree/main/clients/python#mcp-memory-for-agents">client README</a>.</p>
     </div>
   </div>
 </section>
@@ -845,7 +852,7 @@ client.delete([<span class="n">1</span>])</code></pre></div>
       <p>Glider is deliberately single-node today. These are the trade-offs to know before you deploy it.</p>
     </div>
     <ul class="limits">
-      <li class="glass"><b>Single node, single writer</b>No replication, sharding, read replicas or standby. Availability during a restart depends on the writer lease (default 10 s) and the open time.</li>
+      <li class="glass"><b>Single node, single writer</b>One process serves its collections, with no replication, sharding, read replicas or standby. Availability during a restart depends on the writer lease (default 10 s) and the open time.</li>
       <li class="glass"><b>Opening on S3 takes seconds</b>3.15 s, and 4.00 s for a reopen, at 1,000,000 vectors; the target is 2 s.</li>
       <li class="glass"><b>Memory above target at 1M</b>Peak engine RSS is 257.9 MiB on AWS (235.6 MiB on MinIO) against a 192 MiB target.</li>
       <li class="glass"><b>Filtered search is approximate by default</b>Metadata values are strings. Only the declared resident predicate is exact by default; other filters may return fewer than <code>k</code> results unless you use <code>exact: true</code>, which scans every point.</li>
