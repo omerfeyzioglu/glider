@@ -775,6 +775,11 @@ impl<E: Engine> Clone for Client<E> {
     }
 }
 impl<E: Engine> Client<E> {
+    /// The collection configuration fixed when this client was opened.
+    pub fn config(&self) -> Config {
+        self.config
+    }
+
     fn submit<T, F, B>(&self, read: bool, bytes: usize, build: B) -> Result<Ticket<T>>
     where
         T: Send + 'static,

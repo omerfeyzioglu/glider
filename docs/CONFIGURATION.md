@@ -45,6 +45,39 @@ single-collection mode.
 | `GLIDER_AUTO_CLUSTER_ROWS` | `250000` | Live sealed rows at which a collection without a clustered view is converted to one in the background. `0` disables. |
 | `GLIDER_AUTO_RECLUSTER_FACTOR` | `4` | Rebuild the clustered view with more clusters once the collection holds more than this factor times the rows it was sized for (about 4,000 per cluster). `0` disables. |
 
+## Text embedding (optional)
+
+Disabled by default. Source builds need `embed-local` and/or `embed-openai`
+in addition to `server`; the Docker image includes both. Invalid provider
+combinations, unsupported local models and missing features stop startup.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GLIDER_EMBED_PROVIDER` | unset / `none` | `none`, `local` or `openai`. |
+| `GLIDER_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` for local | Local fastembed model name (or its ONNX repository / enum name); required for openai. |
+| `GLIDER_EMBED_URL` | unset | Required for openai: HTTP(S) base URL, e.g. `https://api.openai.com/v1` or `http://localhost:11434/v1`. No URL credentials, query or fragment. |
+| `GLIDER_EMBED_API_KEY` | unset | Optional openai Bearer key. Never included in status or errors. |
+| `GLIDER_EMBED_CACHE_DIR` | `<GLIDER_DATA_DIR>/models` in local multi mode; `<GLIDER_CACHE_DIR>/models` otherwise | Local model download cache. Persist it to avoid downloading again after container replacement. |
+
+Model settings require an enabled provider. URL and key are openai-only;
+model cache is local-only. In single-collection local mode, keep model files
+outside `GLIDER_DATA_DIR`: that directory contains only engine objects.
+Local model files download on first embedding,
+not at startup or image build. The default model has 384 dimensions; use
+cosine collections. Other examples: `BAAI/bge-base-en-v1.5` (768),
+`intfloat/multilingual-e5-small` (384), `nomic-ai/nomic-embed-text-v1.5` (768).
+Local query/document prefixes follow the selected model. OpenAI-compatible
+endpoints receive the configured model and unmodified text; `kind` has no
+standard remote equivalent, so choose a model that supports this interface.
+Match collection dimensions to the provider output and use the same model
+for document and query embeddings. Changing models does not re-embed stored points.
+
+Embedding allows two active requests, with no waiting queue (`429` when full).
+Remote calls have a 60-second timeout and do not follow redirects; endpoint
+failures return a sanitized `503`. No API keys, endpoint URLs or endpoint
+error bodies are exposed to clients. Embedding does not write documents:
+clients call `/v1/embed` then submit vectors through the write API.
+
 ## Fixed serving profile
 
 The server uses the 1,000,000-row serving profile

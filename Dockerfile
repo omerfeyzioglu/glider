@@ -1,14 +1,17 @@
 # Build the server and admin tool. See README "Quickstart", "Docker Compose".
-FROM rust:1.98.1-slim-bookworm AS build
+FROM rust:1.98.1-slim-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
 COPY examples ./examples
 COPY tests ./tests
-RUN cargo build --locked --release --features server --bin glider-server --bin glider-admin
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates g++ \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo build --locked --release --features server,embed-local,embed-openai --bin glider-server --bin glider-admin
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

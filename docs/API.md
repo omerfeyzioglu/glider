@@ -8,6 +8,7 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 | Method and path | Auth | Purpose |
 |---|---|---|
 | [`POST /v1/write`](#post-v1write) | bearer | Atomic batch of upserts and deletes |
+| [`POST /v1/embed`](#post-v1embed) | bearer | Optional server-wide text embedding |
 | [`POST /v1/query`](#post-v1query) | bearer | k-nearest-neighbor query with optional metadata filter |
 | [`POST /v1/points/get`](#post-v1pointsget) | bearer | Get up to 1000 points in one consistent read |
 | [`POST /v1/scan`](#post-v1scan) | bearer | Count and page through live points matching a filter |
@@ -21,12 +22,12 @@ are in [DESIGN.md](../DESIGN.md#http-service) and [RECOVERY.md](RECOVERY.md).
 ## Collections
 
 When `GLIDER_DIMENSIONS` is unset, the base storage prefix is a collection
-catalog. All seven data endpoints above use the prefix
+catalog. The seven collection data endpoints above use the prefix
 `/v1/collections/{name}` (for example,
 `POST /v1/collections/demo/write` and `GET /v1/collections/demo/status`).
 Request and response schemas, request IDs and durability are unchanged.
 Unprefixed data endpoints return JSON `404` directing clients to the prefix.
-`/healthz`, `/metrics`, `/console` and `/` remain global. Names match
+`/v1/embed`, `/healthz`, `/metrics`, `/console` and `/` remain global. Names match
 `^[a-z0-9][a-z0-9-]{0,62}$`.
 
 | Method and path | Body and result |
@@ -135,13 +136,34 @@ Response `200`:
 | `sequence` | u64 | Commit sequence of this write |
 | `request_id` | object | The ID this write was recorded under; resend with it to retry |
 
+## `POST /v1/embed`
+
+Optional server-wide embedding; requires the same bearer token as other API
+routes. There is no collection-specific embed route.
+
+Request: `{"input":["a document","another document"],"kind":"document"}`.
+`kind` is `query` or `document`, default `document`. Input is 1–64 nonblank
+texts, at most 32768 UTF-8 bytes each and 262144 bytes total. Violations
+return `400`; disabled embedding returns `400` with an enablement message.
+
+Response: `{"model":"BAAI/bge-small-en-v1.5","dimensions":384,"vectors":[[...],[...]]}`.
+Vectors preserve input order. Submit them through the write API to store
+points. Remote errors return sanitized `503`; embedding capacity exhaustion
+returns `429`. Models may truncate text to their token limit.
+
 ## `POST /v1/query`
 
-Return the `k` nearest current points to `vector`. See [Filters](#filters).
+Return the `k` nearest current points to `vector` or `text`. Provide exactly
+one; both or neither return `400`. Text uses the configured query embedder,
+then the normal query path with all other options unchanged. A dimension
+mismatch returns `400` naming embedding and collection dimensions. Disabled
+text embedding returns `400`. Collection query routes accept the same body.
+See [Filters](#filters).
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `vector` | array of numbers | required | Same dimension and validity rules as writes |
+| `vector` | array of numbers | absent | Same dimension and validity rules as writes; required unless `text` is given |
+| `text` | string | absent | Alternative to `vector`; nonblank, at most 32768 UTF-8 bytes |
 | `k` | integer | `10` | 1 to 1000 |
 | `filter` | object | `{}` | Metadata predicate; see [Filters](#filters) |
 | `include_metadata` | bool | `false` | Add each hit's `metadata` |
@@ -354,6 +376,14 @@ Resolve a write whose response was lost, by its request ID.
 | `clustering.auto_cluster_rows`, `clustering.auto_recluster_factor` | The configured thresholds (0 = disabled) |
 | `clustering.progress` | While converting: `phase` (`sample`, `assign`, `gather`, `write`, `catalog`, `root`), `sources`, `sources_done`, `pass`, `passes`, `posting_packs`, `rows`, and the `epoch` and `centroids` being built; otherwise `null` |
 | `clustering.reclusters`, `clustering.conversions`, `clustering.conversion_failures` | Automatic rebuilds started, conversions published, and automatic conversions abandoned since start |
+
+When embedding is enabled, status also contains
+`"embedding":{"provider":"local","model":"BAAI/bge-small-en-v1.5","dimensions":384}`.
+Dimensions are known immediately for local models and after a successful
+remote embedding for openai (otherwise `null`). URLs and keys are omitted.
+The collection listing also includes this server-wide field, allowing
+console discovery before any collection exists. Disabled providers add no
+status or listing fields.
 
 ## `GET /console`
 

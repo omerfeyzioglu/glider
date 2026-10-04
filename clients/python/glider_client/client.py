@@ -435,16 +435,34 @@ class Client:
             total += len(batch)
         return total
 
+    def embed(self, texts: Sequence[str], kind: str = "document") -> Dict[str, Any]:
+        """Embed texts through the server-wide provider; returns model, dimensions and vectors."""
+        if isinstance(texts, str):
+            raise ValueError("texts must be a sequence of strings")
+        texts = list(texts)
+        if not 1 <= len(texts) <= 64 or any(
+            not isinstance(t, str) or not t.strip() or len(t.encode("utf-8")) > 32768
+            for t in texts
+        ):
+            raise ValueError("embed needs 1 to 64 nonblank texts, at most 32768 UTF-8 bytes each")
+        if sum(len(t.encode("utf-8")) for t in texts) > 262144:
+            raise ValueError("embed input exceeds 262144 UTF-8 bytes")
+        if kind not in ("query", "document"):
+            raise ValueError("kind must be query or document")
+        return self._read("POST", "/v1/embed", {"input": texts, "kind": kind})
+
     # -- reads -------------------------------------------------------------
 
     def query(
         self,
-        vector: Sequence[float],
+        vector: Optional[Sequence[float]] = None,
         k: int = 10,
         filter: Optional[Mapping[str, str]] = None,
         exact: bool = False,
         include_metadata: bool = False,
         include_vector: bool = False,
+        *,
+        text: Optional[str] = None,
     ) -> List[Hit]:
         """Return the ``k`` nearest points, ordered by ascending distance.
 
@@ -453,12 +471,16 @@ class Client:
         a filter it returns ``min(k, matches)``. Otherwise the search is
         approximate and a filtered query may return fewer than ``k`` hits.
         """
+        if (vector is None) == (text is None):
+            raise ValueError("provide exactly one of vector or text")
+        if text is not None and (not isinstance(text, str) or not text.strip()):
+            raise ValueError("text must be a nonblank string")
         body: Dict[str, Any] = {
-            "vector": _vector(vector),
             "k": k,
             "include_metadata": include_metadata,
             "include_vector": include_vector,
         }
+        body.update({"text": text} if text is not None else {"vector": _vector(vector)})
         if filter:
             body["filter"] = dict(filter)
         if exact:

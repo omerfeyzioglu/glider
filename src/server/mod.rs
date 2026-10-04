@@ -9,6 +9,7 @@
 //! and returned).
 mod catalog;
 mod config;
+mod embedding;
 mod error;
 mod http;
 mod metrics;
@@ -17,7 +18,11 @@ mod recovery;
 
 pub use catalog::{Catalog, Collection, CreateCollection};
 pub use config::{ServerConfig, Store, StoreConfig};
-pub use http::{multi_router, multi_router_with_console, router, router_with_console};
+pub use embedding::{EmbedConfig, Embedder};
+pub use http::{
+    multi_router, multi_router_with_console, multi_router_with_embedder, router,
+    router_with_console, router_with_embedder,
+};
 pub use multi::Multi;
 pub use recovery::stage_segmented_namespace;
 
@@ -180,13 +185,19 @@ impl Running {
 /// writer lease. Stops early, with an error, if another process takes over
 /// (only possible after this process failed to renew for a full lease).
 pub async fn run(config: ServerConfig) -> crate::Result<()> {
+    let embedder = Arc::new(Embedder::new(config.embedding.clone())?);
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     if config.multi {
         let setup = config.clone();
         let multi = tokio::task::spawn_blocking(move || Multi::new(setup))
             .await
             .map_err(|error| Error::Invalid(error.to_string()))??;
-        let app = multi_router_with_console(multi.clone(), config.token.clone(), config.console);
+        let app = http::multi_router_with_embedder(
+            multi.clone(),
+            config.token.clone(),
+            config.console,
+            embedder,
+        );
         let sweeper = multi.clone();
         let sweep_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -220,7 +231,12 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
         return stopped;
     }
     let running = tokio::task::block_in_place(|| config.start())?;
-    let app = router_with_console(running.client(), config.token.clone(), config.console);
+    let app = http::router_with_embedder(
+        running.client(),
+        config.token.clone(),
+        config.console,
+        embedder,
+    );
     let deposed = running.deposed();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

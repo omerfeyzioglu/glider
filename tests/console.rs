@@ -31,6 +31,7 @@ fn config(path: &Path, multi: bool) -> ServerConfig {
         limits: Limits::default(),
         token: None,
         console: true,
+        embedding: Default::default(),
         lease: Duration::from_millis(100),
         multi,
         max_open_collections: 2,
@@ -66,6 +67,10 @@ async fn assert_console(app: &Router) {
     assert!(csp.contains("default-src 'none'"));
     assert!(csp.contains("connect-src 'self'"));
     assert!(body.contains("Glider"));
+    assert!(body.contains("data-query-mode=\"text\""));
+    assert!(body.contains("Ask in plain language…"));
+    assert!(body.contains("GLIDER_EMBED_PROVIDER"));
+    assert!(body.contains("readableMetadata(hit.metadata)"));
     assert!(!body.contains("http://"));
     assert!(!body.contains("https://"));
     let (status, headers, _) = get(app, "/").await;

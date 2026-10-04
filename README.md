@@ -58,6 +58,32 @@ For S3 or MinIO storage, the Docker Compose demo and building from source,
 see [installation](docs/INSTALL.md); every setting is listed in
 [configuration](docs/CONFIGURATION.md).
 
+## Text search (optional)
+
+Enable server-side embedding to query with `{"text":"a sleepy cat"}` or use
+Text mode in the console. Embed documents with `POST /v1/embed`, then write
+its vectors with optional `metadata.text`. Stored and acknowledged data stays
+vectors. The default local model needs a 384-dimension cosine collection.
+
+```sh
+# Local ONNX model; downloaded on first use into the persistent volume.
+docker run --rm -p 8080:8080 -v glider-text:/var/lib/glider \
+  -e GLIDER_DATA_DIR=/var/lib/glider/data -e GLIDER_EMBED_PROVIDER=local \
+  ghcr.io/omerfeyzioglu/glider:latest
+
+# Ollama on the host (pull nomic-embed-text in Ollama first).
+docker run --rm -p 8080:8080 -e GLIDER_DATA_DIR=/var/lib/glider/data \
+  -e GLIDER_EMBED_PROVIDER=openai -e GLIDER_EMBED_MODEL=nomic-embed-text \
+  -e GLIDER_EMBED_URL=http://host.docker.internal:11434/v1 \
+  ghcr.io/omerfeyzioglu/glider:latest
+```
+
+For OpenAI, set `GLIDER_EMBED_URL=https://api.openai.com/v1`, a model such
+as `text-embedding-3-small`, and `GLIDER_EMBED_API_KEY`. Use the response's
+dimensions when creating a collection. Embedding is off by default; source
+builds opt into `embed-local` and/or `embed-openai`. See
+[configuration](docs/CONFIGURATION.md#text-embedding-optional).
+
 ## Features
 
 - **Durable on S3.** Each write batch becomes one immutable log object, created

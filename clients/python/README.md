@@ -52,7 +52,8 @@ A server started without `GLIDER_DIMENSIONS` serves many collections; see
 | `write(upsert=(), delete=())` | One atomic batch of at most 100 operations; returns the commit sequence |
 | `upsert(points)`, `delete(ids)` | Shorthands for `write` |
 | `upsert_many(points, batch_size=100)` | Any number of points in batches; returns the count written. **Not atomic across batches**: after an error, earlier batches stay committed. Upserts are idempotent, so repeat the call. |
-| `query(vector, k=10, filter=None, exact=False, include_metadata=False, include_vector=False)` | Nearest neighbors as `Hit` objects. `filter` is a metadata filter: equality, `$in`, `$ne`, numeric ranges and `$and`/`$or`/`$not` ([filters](../../docs/API.md#filters)). Unfiltered and most filtered queries are approximate; `exact=True` searches exhaustively and, with a filter, returns `min(k, matches)`. |
+| `embed(texts, kind="document")` | Server-wide embedding result: model, dimensions and vectors; `kind` may also be `"query"`. |
+| `query(vector=None, k=10, filter=None, exact=False, include_metadata=False, include_vector=False)` | Nearest neighbors as `Hit` objects. `filter` is a metadata filter: equality, `$in`, `$ne`, numeric ranges and `$and`/`$or`/`$not` ([filters](../../docs/API.md#filters)). Unfiltered and most filtered queries are approximate; `exact=True` searches exhaustively and, with a filter, returns `min(k, matches)`. |
 | `get(id)` | `Point`, or `None` when absent |
 | `get_many(ids, include_vector=True, include_metadata=True)` | List aligned with `ids`; `None` for absent points. Chunks of 1000. |
 | `scan(filter=None, include_metadata=False, page_size=1000)` | Generator over matching IDs (or `Point`s with metadata) in ascending ID order, following the server's cursor |
@@ -104,6 +105,25 @@ admin.delete_collection("docs")           # irreversible; a new "docs" starts em
 Names must match `[a-z0-9][a-z0-9-]{0,62}` and are checked before any request
 (`ValueError`). A multi-collection server answers `404` on the un-prefixed
 data routes, and a single-collection server has no `/v1/collections`.
+
+## Text search (optional)
+
+With [server embedding enabled](../../docs/CONFIGURATION.md#text-embedding-optional):
+
+```python
+texts = ["A cat sleeps on a sofa.", "A dog plays outside."]
+embedded = client.embed(texts)
+client.create_collection("notes", embedded["dimensions"], metric="cosine")
+notes = client.collection("notes")
+notes.upsert([
+    {"id": i + 1, "vector": vector, "metadata": {"text": text}}
+    for i, (text, vector) in enumerate(zip(texts, embedded["vectors"]))
+])
+print(notes.query(text="sleepy cat", include_metadata=True))
+```
+
+Pass exactly one of `vector` or `text` to `query`. `embed` stays server-wide
+even on a collection-bound client. Writes continue to accept vectors only.
 
 ## Retry semantics
 
