@@ -67,10 +67,51 @@ async fn assert_console(app: &Router) {
     assert!(csp.contains("default-src 'none'"));
     assert!(csp.contains("connect-src 'self'"));
     assert!(body.contains("Glider"));
+    assert!(body.contains("viewBox=\"0 0 32 32\""));
+    assert!(body.contains("id=\"connection-notice\""));
+    assert!(body.contains("id=\"retry\""));
+    assert!(!body.contains("health-dot"));
+    assert!(!body.contains("Healthy"));
+    assert!(!body.contains("class=\"chip\""));
+    assert!(!body.contains("query-sequence"));
+    for heading in ["Search", "Browse", "Collections"] {
+        assert!(!body.contains(&format!("<h1>{heading}</h1>")));
+    }
     assert!(body.contains("data-query-mode=\"text\""));
-    assert!(body.contains("Ask in plain language…"));
+    assert!(body.contains("Search in plain language…"));
     assert!(body.contains("GLIDER_EMBED_PROVIDER"));
-    assert!(body.contains("readableMetadata(hit.metadata)"));
+    for id in [
+        "collection-select",
+        "query-form",
+        "query-k",
+        "query-exact",
+        "query-metadata",
+        "query-filter",
+        "query-profile",
+        "scan-form",
+        "scan-filter",
+        "scan-next",
+        "point-detail",
+        "use-vector",
+        "create-form",
+        "delete-form",
+        "auth-form",
+    ] {
+        assert!(
+            body.contains(&format!("id=\"{id}\"")),
+            "missing control {id}"
+        );
+    }
+    for view in ["search", "browse", "collections"] {
+        assert!(body.contains(&format!("data-view=\"{view}\"")));
+    }
+    assert!(body.contains("prefers-color-scheme: dark"));
+    assert!(body.contains("role=\"tab\""));
+    assert!(body.contains("sessionStorage"));
+    assert!(!body.contains("src=\"//"));
+    assert!(!body.contains("href=\"//"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("base-uri 'none'"));
     assert!(!body.contains("http://"));
     assert!(!body.contains("https://"));
     let (status, headers, _) = get(app, "/").await;
@@ -89,7 +130,11 @@ async fn single_console_is_public_and_can_be_disabled_without_changing_api() {
     let disabled = router_with_console(running.client(), None, false);
     assert_eq!(get(&disabled, "/console").await.0, StatusCode::NOT_FOUND);
     assert_eq!(get(&disabled, "/").await.0, StatusCode::NOT_FOUND);
-    assert_eq!(get(&disabled, "/v1/status").await.0, StatusCode::OK);
+    let (status, _, body) = get(&disabled, "/v1/status").await;
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["configuration"]["dimensions"], 2);
+    assert_eq!(body["configuration"]["metric"], "squared_euclidean");
     tokio::task::block_in_place(|| running.shutdown(Shutdown::Drain).unwrap());
 }
 

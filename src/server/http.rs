@@ -247,10 +247,13 @@ async fn query(
         return Err(bad_request("k must be between 1 and 1000"));
     }
     let filter = Filter::parse(&body.filter).map_err(bad_request)?;
+    let mut embedding_ms = None;
     let vector = match (body.vector, body.text) {
         (Some(vector), None) => vector,
         (None, Some(text)) => {
+            let embedding_start = Instant::now();
             let embedded = state.embedder.embed(vec![text], Kind::Query).await?;
+            embedding_ms = Some(embedding_start.elapsed().as_secs_f64() * 1000.0);
             let vector = embedded.vectors.into_iter().next().unwrap();
             let dimensions = client.config().dimensions;
             if vector.len() != dimensions {
@@ -290,6 +293,9 @@ async fn query(
                 })
                 .collect::<Vec<_>>(),
         });
+        if let Some(embedding_ms) = embedding_ms {
+            response["embedding_ms"] = json!(embedding_ms);
+        }
         if body.profile {
             response["profile"] = json!({
                 "mode": timed.value.mode.as_str(),
@@ -475,6 +481,7 @@ async fn status(
         let queue = client.status();
         let mut response = json!({
             "sequence": engine.sequence,
+            "configuration": client.config(),
             "queued_commands": queue.commands,
             "queued_bytes": queue.bytes,
             "closed": queue.closed,
@@ -707,7 +714,8 @@ async fn get_collection(
         let engine = client.metrics()?.wait()?.value;
         let queue = client.status();
         Ok::<_, ApiError>(
-            json!({"sequence":engine.sequence,"queued_commands":queue.commands,
+            json!({"sequence":engine.sequence,"configuration":client.config(),
+            "queued_commands":queue.commands,
             "queued_bytes":queue.bytes,"closed":queue.closed,"failed":queue.failed,
             "maintenance_errors":queue.maintenance_errors,"cache":cache_status(&engine),
             "clustering":clustering_status(&engine)}),
