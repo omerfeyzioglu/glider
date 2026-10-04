@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glider-client"
-version = "1.1.0.dev0"
+version = "1.0.0"
 description = "Python client and MCP memory server for the Glider vector database"
 readme = "README.md"
 requires-python = ">=3.9"
