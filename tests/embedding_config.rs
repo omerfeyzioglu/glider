@@ -126,6 +126,6 @@ fn local_model_selection_is_lazy() {
     ])
     .is_err());
     assert!(
-        matches!(parse(&[("GLIDER_EMBED_PROVIDER","local")]).unwrap(),EmbedConfig::Local {cache_dir, ..} if cache_dir == std::path::PathBuf::from("data/models"))
+        matches!(parse(&[("GLIDER_EMBED_PROVIDER","local")]).unwrap(),EmbedConfig::Local {cache_dir, ..} if cache_dir.as_path() == std::path::Path::new("data/models"))
     );
 }
