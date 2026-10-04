@@ -58,6 +58,23 @@ For S3 or MinIO storage, the Docker Compose demo and building from source,
 see [installation](docs/INSTALL.md); every setting is listed in
 [configuration](docs/CONFIGURATION.md).
 
+### Run on S3
+
+With a bucket and AWS credentials exported in your shell:
+
+```sh
+docker run --rm -p 8080:8080 -v glider-cache:/var/lib/glider/cache \
+  -e GLIDER_S3_BUCKET=my-bucket -e GLIDER_S3_NAMESPACE=glider \
+  -e GLIDER_S3_REGION=eu-central-1 \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+  ghcr.io/omerfeyzioglu/glider:latest
+```
+
+Nothing else is needed: the bucket is the database; stop the container and start
+a new one anywhere with the same settings and access, and the data is there.
+See [Run on AWS](docs/INSTALL.md#run-on-aws) for setup and IAM, or
+[S3-compatible storage](docs/INSTALL.md#s3-compatible-storage) for MinIO.
+
 ## Text search (optional)
 
 Enable server-side embedding to query with `{"text":"a sleepy cat"}` or use

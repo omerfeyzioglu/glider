@@ -45,6 +45,13 @@ single-collection mode.
 | `GLIDER_AUTO_CLUSTER_ROWS` | `250000` | Live sealed rows at which a collection without a clustered view is converted to one in the background. `0` disables. |
 | `GLIDER_AUTO_RECLUSTER_FACTOR` | `4` | Rebuild the clustered view with more clusters once the collection holds more than this factor times the rows it was sized for (about 4,000 per cluster). `0` disables. |
 
+The S3 client also supports EC2 instance roles through IMDSv2, ECS task roles
+through `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, and web identity through
+`AWS_WEB_IDENTITY_TOKEN_FILE` plus `AWS_ROLE_ARN` (the token file must be
+readable inside the container). Explicit access keys take precedence.
+It does not read AWS CLI profiles or shared credential files. See
+[Run on AWS](INSTALL.md#run-on-aws) for IAM and container setup.
+
 ## Text embedding (optional)
 
 Disabled by default. Source builds need `embed-local` and/or `embed-openai`
