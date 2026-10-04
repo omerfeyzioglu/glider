@@ -203,11 +203,14 @@ async fn fake_openai_embed_text_query_limits_and_dimension_mismatch() {
     assert_eq!(call(&app,"POST","/v1/write",json!({"upsert":[{"id":1,"vector":embedded["vectors"][0],"metadata":{"text":"cat"}},{"id":2,"vector":embedded["vectors"][1],"metadata":{"text":"dog"}}]}),true).await.0,StatusCode::OK);
     for exact in [false, true] {
         let (status,text)=call(&app,"POST","/v1/query",json!({"text":"cat","k":2,"exact":exact,"include_metadata":true,"include_vector":true,"profile":true,"filter":{"text":{"$ne":"mouse"}}}),true).await;
-        let (_,vector)=call(&app,"POST","/v1/query",json!({"vector":[1,0],"k":2,"exact":exact,"include_metadata":true,"include_vector":true,"filter":{"text":{"$ne":"mouse"}}}),true).await;
+        let (_,vector)=call(&app,"POST","/v1/query",json!({"vector":[1,0],"k":2,"exact":exact,"profile":exact,"include_metadata":true,"include_vector":true,"filter":{"text":{"$ne":"mouse"}}}),true).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(text["results"], vector["results"]);
         assert_eq!(text["results"][0]["id"], 1);
         assert!(text.get("profile").is_some());
+        let embedding_ms = text["embedding_ms"].as_f64().unwrap();
+        assert!(embedding_ms.is_finite() && embedding_ms >= 0.0);
+        assert!(vector.get("embedding_ms").is_none());
     }
     let (_, after) = call(&app, "GET", "/v1/status", json!(null), true).await;
     assert_eq!(after["embedding"]["dimensions"], 2);
@@ -318,6 +321,13 @@ async fn fake_openai_embed_text_query_limits_and_dimension_mismatch() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hits["results"][0]["id"], 1);
+    assert!(hits["embedding_ms"].as_f64().unwrap() >= 0.0);
+    let (status, description) = call(&app, "GET", "/v1/collections/docs", json!(null), true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        description["status"]["configuration"],
+        json!({"dimensions": 2, "metric": "cosine"})
+    );
     multi.shutdown().await.unwrap();
     task.abort();
     tokio::task::block_in_place(|| running.shutdown(Shutdown::Drain).unwrap());

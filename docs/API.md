@@ -163,7 +163,7 @@ See [Filters](#filters).
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `vector` | array of numbers | absent | Same dimension and validity rules as writes; required unless `text` is given |
-| `text` | string | absent | Alternative to `vector`; nonblank, at most 32768 UTF-8 bytes |
+| `text` | string | absent | Alternative to `vector`; nonblank, at most 32768 UTF-8 bytes. Text responses include `embedding_ms` (float), elapsed query embedding time in milliseconds; vector responses omit it, regardless of `profile`. |
 | `k` | integer | `10` | 1 to 1000 |
 | `filter` | object | `{}` | Metadata predicate; see [Filters](#filters) |
 | `include_metadata` | bool | `false` | Add each hit's `metadata` |
@@ -230,10 +230,12 @@ example:
 
 `mode` is `approximate`, `resident_exact`, or `exact_scan` for the path used.
 `server_ms` measures from the query handler start until the engine result is
-received, including admission queue wait; `queue_ms` is the admission queue
-wait. The remote counters count this query's object reads and payload bytes.
+received, including query embedding and admission queue wait; `queue_ms` is
+the admission queue wait. The remote counters count this query's object
+reads and payload bytes.
 They can be zero when the query is served from the unsealed tail or cache.
-Without `profile`, the response shape is unchanged. Collection query routes
+`embedding_ms` is independent of `profile`; subtract it from `server_ms` for
+the remaining handler and search time. Collection query routes
 accept the same field.
 
 ## `GET /v1/points/{id}`
@@ -351,6 +353,7 @@ Resolve a write whose response was lost, by its request ID.
 ```json
 {
   "sequence": 133,
+  "configuration": {"dimensions": 384, "metric": "cosine"},
   "queued_commands": 0,
   "queued_bytes": 0,
   "closed": false,
@@ -365,6 +368,7 @@ Resolve a write whose response was lost, by its request ID.
 | Field | Meaning |
 |---|---|
 | `sequence` | Last acknowledged commit sequence |
+| `configuration` | Collection `dimensions` and `metric` |
 | `queued_commands`, `queued_bytes` | Admission queue occupancy (limits 8 and 1 MiB) |
 | `closed`, `failed` | The worker is shutting down, or failed after an uncertain write; restart the server |
 | `maintenance_errors` | Background maintenance units that failed without affecting acknowledged data (retried later) |
@@ -387,10 +391,10 @@ status or listing fields.
 
 ## `GET /console`
 
-Returns a self-contained HTML console for overview, collection browsing and
-vector queries. `GET /` redirects to it. Both routes are public and can be
-disabled with `GLIDER_CONSOLE=0`; the page sends the token entered by the user
-on API requests and keeps it in browser session storage only. The response
+Returns a self-contained HTML console for text/vector search, point browsing,
+collection management and status. `GET /` redirects to it. Both routes are
+public and can be disabled with `GLIDER_CONSOLE=0`; the page sends the token
+entered by the user on API requests and keeps it in browser session storage only. The response
 sets a restrictive Content Security Policy and loads no external resources.
 
 ## `GET /healthz`

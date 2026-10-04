@@ -3,59 +3,760 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="light dark">
 <title>Glider Console</title>
 <style>
-:root{--paper:#F7F4EE;--sheet:#FFFDF8;--fold:#E6E0D4;--ink:#0E1B2C;--navy:#16304F;--steel:#1E3A5F;--orange:#F07A1A;--orange-ink:#A8480A;--muted:#4A5868;--sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Arial,sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 var(--sans)}button,input,select,textarea{font:inherit}button{cursor:pointer}a{color:var(--steel)}:focus-visible{outline:3px solid var(--orange);outline-offset:3px}[hidden]{display:none!important}.skip{position:absolute;left:-999px;top:8px;background:var(--ink);color:white;padding:8px;z-index:10}.skip:focus{left:8px}.wrap{max-width:1200px;margin:auto;padding:0 clamp(18px,4vw,44px)}
-header{background:var(--navy);color:var(--sheet);border-bottom:3px solid var(--ink)}header .wrap{min-height:78px;display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:12px;color:var(--sheet);text-decoration:none;font-weight:800;letter-spacing:.2em;text-transform:uppercase}.brand svg{width:40px;height:30px}.header-meta{font:600 12px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:#C9D2DC}
-main{padding-top:48px;padding-bottom:90px}.intro{display:flex;align-items:end;justify-content:space-between;gap:24px;margin-bottom:30px}.eyebrow{display:inline-block;border:2px solid var(--ink);background:var(--orange);padding:5px 9px;font:700 11px var(--mono);letter-spacing:.12em;text-transform:uppercase;margin:0 0 15px}.intro h1{font-size:clamp(2.3rem,5vw,4rem);line-height:1.05;letter-spacing:-.04em;margin:0}.intro p:last-child{color:var(--muted);margin:12px 0 0;max-width:44rem}.sheet{background:var(--sheet);border:2px solid var(--ink);box-shadow:6px 6px 0 var(--ink)}.dog{position:relative}.dog:after{content:"";position:absolute;right:-2px;top:-2px;width:25px;height:25px;background:linear-gradient(225deg,var(--paper) 46%,var(--ink) 46% 53%,var(--fold) 53%);border-left:2px solid var(--ink);border-bottom:2px solid var(--ink)}.panel{padding:24px;margin:0 6px 28px 0}.panel h2{font-size:1.4rem;line-height:1.15;margin:0 0 6px;letter-spacing:-.02em}.panel p{margin:0;color:var(--muted)}.panel-head{display:flex;align-items:start;justify-content:space-between;gap:18px;margin-bottom:22px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}.stat{border:2px solid var(--ink);background:var(--paper);padding:17px 18px;min-width:0}.stat span{display:block;color:var(--muted);font:700 11px var(--mono);text-transform:uppercase;letter-spacing:.08em;margin-bottom:7px}.stat strong{display:block;font-size:clamp(1.35rem,2.5vw,1.85rem);line-height:1.2;overflow-wrap:anywhere}.stat small{display:block;color:var(--muted);margin-top:5px}.toolbar{display:flex;align-items:end;gap:12px;flex-wrap:wrap}.btn{min-height:42px;border:2px solid var(--ink);background:var(--sheet);color:var(--ink);box-shadow:3px 3px 0 var(--ink);padding:8px 15px;font-weight:750;line-height:1.2}.btn:hover{background:var(--paper);transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--ink)}.btn:active{transform:translate(3px,3px);box-shadow:none}.btn.primary{background:var(--orange)}.btn.danger{color:#8B2C1A}.btn.small{min-height:34px;padding:5px 10px;font-size:.86rem}.btn:disabled{opacity:.5;cursor:not-allowed}.field{display:flex;flex-direction:column;gap:7px;min-width:0}.field label,.field>span{font-weight:700;font-size:.87rem}.field input,.field select,.field textarea{width:100%;border:2px solid var(--ink);border-radius:0;background:white;color:var(--ink);padding:10px 11px;min-height:43px}.field textarea{min-height:105px;resize:vertical;font:14px/1.6 var(--mono)}.field input[type=checkbox]{width:18px;height:18px;min-height:auto;accent-color:var(--navy)}.check{display:flex;align-items:center;gap:8px;min-height:43px;font-size:.9rem;font-weight:650}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:17px}.form-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:20px}.hint{font-size:.87rem;color:var(--muted)}.error{background:#FFF0E5;border:2px solid #A8480A;color:#783005;padding:11px 13px;margin:12px 0;font-weight:650;white-space:pre-wrap}.notice{background:#E9F0F4;border-left:4px solid var(--steel);padding:10px 13px;margin:12px 0}.nav-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 25px}.nav-tabs button{border:2px solid var(--ink);padding:10px 18px;background:var(--sheet);font-weight:750}.nav-tabs button[aria-pressed=true]{background:var(--orange);box-shadow:3px 3px 0 var(--ink)}.nav-tabs button:hover{background:var(--fold)}.nav-tabs button[aria-pressed=true]:hover{background:var(--orange)}.table-wrap{overflow-x:auto;border:2px solid var(--ink)}table{width:100%;border-collapse:collapse;text-align:left}th{background:var(--navy);color:var(--sheet);font:700 12px var(--mono);letter-spacing:.04em;text-transform:uppercase}th,td{padding:12px 14px;border-bottom:1px solid #CFD1D0;vertical-align:top}tr:last-child td{border-bottom:0}td{overflow-wrap:anywhere}td.mono,pre,.mono{font-family:var(--mono);font-size:.87rem}td button.link{border:0;background:none;color:var(--orange-ink);font:700 .9rem var(--mono);text-decoration:underline;padding:0;text-align:left}pre{overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--paper);border:2px solid var(--ink);padding:16px;margin:12px 0 0}.detail{margin-top:22px}.detail h3{margin:0 0 5px}.collection-picker{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:16px}.collection-picker .field{min-width:min(100%,260px)}.collection-row{display:flex;align-items:center;justify-content:space-between;gap:14px;border-top:1px solid #CFD1D0;padding:12px 0}.collection-row:first-child{border-top:0}.collection-row strong{display:block}.collection-row small{color:var(--muted)}.collection-actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.create{border-top:2px dashed #B9B6B0;margin-top:20px;padding-top:20px}.foot{color:var(--muted);font-size:.85rem;margin-top:42px}.status-line{display:flex;gap:8px;align-items:center;font-weight:700}.dot{width:11px;height:11px;border:2px solid var(--ink);background:var(--orange);display:inline-block}.dot.ok{background:#63B488}.dot.bad{background:#D96846}
-@media(max-width:720px){main{padding-top:30px}.intro{display:block}.intro .btn{margin-top:22px}.grid,.form-grid{grid-template-columns:1fr}.panel{padding:20px}.panel-head{display:block}.panel-head .btn{margin-top:16px}header .wrap{min-height:68px}.header-meta{display:none}}@media(max-width:600px){.collection-row{align-items:flex-start;flex-direction:column}.collection-row strong{overflow-wrap:anywhere}}@media(max-width:400px){.wrap{padding:0 16px}.nav-tabs button{flex:1 1 auto}.toolbar>*{max-width:100%}}@media(prefers-reduced-motion:reduce){.btn{transition:none}}
+:root {
+  color-scheme: light dark;
+  --bg: #f7f8fa; --surface: #fff; --subtle: #f1f3f5; --border: #dce0e5;
+  --ink: #20252c; --muted: #626b77; --orange: #a8480a; --active: #fff3e9;
+  --success: #24834c; --danger: #b42332; --error-bg: #fff1f2;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --surface: #1c2026; --subtle: #252a32; --border: #373e48;
+    --ink: #edf0f4; --muted: #a6afbd; --orange: #f09b60; --active: #34271f;
+    --success: #6bc591; --danger: #ff939e; --error-bg: #342229;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); }
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .55; }
+:focus-visible { outline: 2px solid var(--orange); outline-offset: 3px; }
+a { color: inherit; }
+.wrap { max-width: 1184px; margin: auto; padding: 0 32px; min-width: 0; }
+header { background: var(--surface); border-bottom: 1px solid var(--border); }
+.topbar { min-height: 72px; display: flex; align-items: center; gap: 24px; }
+.brand { font-size: 22px; font-weight: 700; letter-spacing: -.8px; text-decoration: none; }
+.health { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+.dot.ok { background: var(--success); }
+.collection-picker { margin-left: auto; min-width: 0; max-width: 340px; }
+.collection-picker select { max-width: 100%; min-width: 180px; }
+#single-info { color: var(--muted); font-size: 12px; }
+main { padding-top: 28px !important; padding-bottom: 64px !important; }
+.tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--border); margin-bottom: 28px; }
+.tabs button { padding: 0 2px 13px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 600; }
+.tabs button[aria-selected="true"] { color: var(--orange); border-bottom-color: var(--orange); }
+h1, h2, h3, p { margin: 0; }
+h1 { font-size: 22px; letter-spacing: -.5px; line-height: 1.3; }
+h2 { font-size: 16px; letter-spacing: -.2px; }
+h3 { font-size: 13px; margin: 22px 0 8px; }
+.page-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }
+.page-head p { margin-top: 5px; }
+.muted, .hint { color: var(--muted); }
+.hint { font-size: 12px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--ink); font-weight: 600; white-space: nowrap; }
+.btn:hover:not(:disabled) { background: var(--subtle); }
+.btn.primary { background: var(--orange); border-color: var(--orange); color: var(--surface); }
+@media (prefers-color-scheme: dark) { .btn.primary { color: #20160f; } }
+.btn.primary:hover:not(:disabled) { filter: brightness(.94); background: var(--orange); }
+.btn.danger { color: var(--danger); }
+.btn.small { min-height: 30px; padding: 4px 9px; font-size: 12px; }
+.link { border: 0; background: none; padding: 0; color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+input, select, textarea { border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 8px 10px; min-width: 0; }
+textarea { width: 100%; resize: vertical; font: 13px/1.6 var(--mono); min-height: 100px; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+.field { display: grid; gap: 6px; margin-bottom: 16px; }
+.field label { font-size: 12px; font-weight: 600; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+.search-panel { margin-bottom: 24px; }
+.search-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.segment { display: flex; border: 1px solid var(--border); border-radius: 6px; padding: 3px; background: var(--subtle); }
+.segment button { border: 0; border-radius: 4px; padding: 4px 12px; color: var(--muted); background: none; font-size: 12px; }
+.segment button[aria-pressed="true"] { background: var(--surface); color: var(--orange); }
+#query-text { font: 17px/1.5 var(--sans); min-height: 56px; height: 56px; padding: 14px; }
+.options { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-top: 16px; }
+.options .primary { margin-left: auto; }
+.inline-field, .check { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.inline-field input { width: 68px; font-family: var(--mono); }
+.check input { width: 15px; height: 15px; margin: 0; accent-color: var(--muted); }
+.filter { font-size: 12px; }
+summary { cursor: pointer; color: var(--muted); width: fit-content; font-size: 12px; padding: 5px 0; }
+summary:hover { color: var(--ink); }
+.filter[open] { flex-basis: 100%; }
+.filter .field { margin: 8px 0 0; }
+.badge, .chip { display: inline-block; border: 1px solid var(--border); background: var(--subtle); border-radius: 4px; padding: 2px 6px; font-size: 11px; color: var(--muted); max-width: 100%; overflow-wrap: anywhere; }
+.badge { margin-left: 5px; }
+.error { color: var(--danger); background: var(--error-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 12px 0; overflow-wrap: anywhere; }
+.empty { text-align: center; padding: 48px 20px; color: var(--muted); }
+.empty strong { display: block; color: var(--ink); font-weight: 600; margin-bottom: 5px; }
+.empty p { font-size: 13px; }
+#query-summary { font-weight: 600; }
+#query-timing { margin-top: 3px; }
+.results-head { margin-bottom: 14px; }
+.result { display: grid; grid-template-columns: 24px minmax(0,1fr) 100px; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.result:last-child { border-bottom: 0; }
+.result-list { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.rank { color: var(--muted); font: 12px/1.8 var(--mono); }
+.hit-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
+.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.hit-footer { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.hit-footer details[open] { flex-basis: 100%; }
+.id { color: var(--muted); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
+.score { text-align: right; font: 13px/1.8 var(--mono); }
+.score small { display: block; color: var(--muted); font: 11px var(--sans); }
+pre { margin: 8px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--subtle); font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.profile { margin-top: 16px; }
+.table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; text-align: left; font-size: 13px; }
+th { color: var(--muted); font-size: 11px; font-weight: 600; background: var(--subtle); white-space: nowrap; }
+th, td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+#scan-results table { min-width: 660px; table-layout: fixed; }
+#scan-results th:first-child { width: 180px; }
+#scan-results th:last-child { width: 240px; }
+.table-wrap .chips { margin: 0; gap: 4px; }
+#collections-table { min-width: 560px; }
+.point-row { cursor: pointer; }
+.point-row:hover { background: var(--subtle); }
+.point-link { font: 12px var(--mono); border: 0; padding: 0; background: none; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.scan-toolbar { margin: 0 0 18px; }
+.scan-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 16px; }
+.status { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 14px; }
+.stats { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 16px; margin: 12px 0; }
+.stat { min-width: 0; }
+.stat span, .stat small { display: block; color: var(--muted); font-size: 11px; }
+.stat strong { display: block; margin: 4px 0; font: 13px var(--mono); overflow-wrap: anywhere; }
+.status-meta { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 12px; }
+#auth { max-width: 420px; margin: 60px auto; padding: 28px; }
+#auth p { margin: 10px 0 22px; }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.session { display: flex; justify-content: flex-end; margin-top: 24px; }
+dialog { color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; width: min(440px,calc(100% - 32px)); padding: 24px; max-height: calc(100dvh - 32px); overflow: auto; }
+dialog::backdrop { background: rgba(0,0,0,.3); }
+.dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }
+#point-detail { margin: 0 0 0 auto; height: 100dvh; max-height: 100dvh; width: min(480px,100%); max-width: 100%; border-radius: 0; border-width: 0 0 0 1px; }
+.skip { position: absolute; left: -999px; top: 8px; padding: 8px; background: var(--surface); z-index: 10; }
+.skip:focus { left: 8px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 760px) {
+  .wrap { padding: 0 20px; } .topbar { gap: 14px; flex-wrap: wrap; padding-top: 14px; padding-bottom: 14px; }
+  .collection-picker { order: 3; flex-basis: 100%; max-width: none; }
+  .collection-picker select { width: 100%; } #refresh { margin-left: auto; }
+  main { padding-top: 22px !important; } .stats { grid-template-columns: repeat(3,minmax(0,1fr)); }
+}
+@media (max-width: 480px) {
+  .wrap { padding: 0 16px; } .panel { padding: 16px; } .tabs { gap: 22px; }
+  .options { gap: 12px 16px; } .options .primary { width: 100%; margin-left: 0; }
+  .result { grid-template-columns: 18px minmax(0,1fr) 74px; gap: 8px; padding: 16px 12px; }
+  .page-head { align-items: flex-start; } .page-head p { font-size: 12px; }
+  .scan-footer { align-items: flex-start; } .stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  #auth { margin: 28px auto; } .health { font-size: 11px; }
+}
 </style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<header><div class="wrap"><a class="brand" href="/console" aria-label="Glider console home"><svg viewBox="0 0 40 30" aria-hidden="true"><path d="M2 14 38 2 16 18Z" fill="#FFFDF8" stroke="#0E1B2C" stroke-width="2.2"/><path d="M16 18 38 2 22 28Z" fill="#1E3A5F" stroke="#0E1B2C" stroke-width="2.2"/><path d="M2 14 9 11.6 8 16.6Z" fill="#F07A1A" stroke="#0E1B2C" stroke-width="2"/></svg>Glider</a><span class="header-meta">Server console / local workspace</span></div></header>
+<header><div class="wrap topbar">
+  <a class="brand" href="console">Glider</a>
+  <span class="health" role="status"><span id="health-dot" class="dot" aria-hidden="true"></span><span id="health-label">Unavailable</span></span>
+  <div class="collection-picker"><label class="sr-only" for="collection-select">Collection</label><select id="collection-select" hidden></select><span id="single-info" hidden>Single collection</span></div>
+  <button id="refresh" class="btn small" type="button" aria-label="Refresh server and collection status">↻ Refresh</button>
+</div></header>
 <main id="main" class="wrap">
-<div class="intro"><div><p class="eyebrow">Explore your data</p><h1>Console<span style="color:#A8480A">.</span></h1><p>See server state, browse points, and run vector queries.</p></div><button id="refresh" class="btn primary" type="button">↻ Refresh</button></div>
-<section id="auth" class="sheet panel" hidden aria-labelledby="auth-title"><div class="panel-head"><div><h2 id="auth-title">Connect to Glider</h2><p>Enter the API token configured on this server. It stays in this browser tab's session storage.</p></div></div><form id="auth-form" class="toolbar"><div class="field"><label for="token">API token</label><input id="token" type="password" autocomplete="off" required></div><button class="btn primary" type="submit">Connect</button><button class="btn" id="forget-token" type="button">Forget token</button></form><p id="auth-error" class="error" role="alert" hidden></p></section>
-<nav class="nav-tabs" aria-label="Console views"><button type="button" data-view="overview" aria-pressed="true">Overview</button><button type="button" data-view="collection" aria-pressed="false">Collection</button><button type="button" data-view="query" aria-pressed="false">Query</button></nav>
-<p id="global-error" class="error" role="alert" hidden></p>
-<section id="overview" aria-labelledby="overview-title"><div class="sheet panel dog"><div class="panel-head"><div><h2 id="overview-title">At a glance</h2><p>Current server and collection state.</p></div></div><div id="headline" class="grid"></div></div><div id="collection-list" class="sheet panel"><div class="panel-head"><div><h2>Collections</h2><p>Select a collection to explore its points and status.</p></div></div><div id="collections"></div><form id="create-form" class="create"><h3>Create collection</h3><div class="form-grid"><div class="field"><label for="create-name">Name</label><input id="create-name" required pattern="[a-z0-9][a-z0-9-]{0,62}" placeholder="my-collection"></div><div class="field"><label for="create-dimensions">Dimensions</label><input id="create-dimensions" type="number" required min="1" step="1" placeholder="768"></div><div class="field"><label for="create-metric">Distance metric</label><select id="create-metric"><option value="squared_euclidean">Squared Euclidean</option><option value="cosine">Cosine</option><option value="manhattan">Manhattan</option></select></div></div><div class="form-actions"><button class="btn primary" type="submit">Create collection</button></div><p id="create-error" class="error" role="alert" hidden></p></form></div></section>
-<section id="collection" hidden aria-labelledby="collection-title"><div class="sheet panel dog"><div class="panel-head"><div><h2 id="collection-title">Collection</h2><p id="collection-subtitle">Browse acknowledged points.</p></div><button id="collection-refresh" class="btn small" type="button">Refresh status</button></div><div id="collection-picker" class="collection-picker"></div><div id="collection-status" class="grid"></div><p id="collection-error" class="error" role="alert" hidden></p></div><div class="sheet panel"><div class="panel-head"><div><h2>Browse points</h2><p>Scan IDs in order. Each page reads the collection; writes can change later pages.</p></div></div><form id="scan-form"><div class="form-grid"><div class="field"><label for="scan-filter">Filter JSON (optional)</label><textarea id="scan-filter" placeholder='{"color":"red"}' spellcheck="false"></textarea></div><div class="field"><label for="scan-limit">Page size</label><input id="scan-limit" type="number" min="1" max="10000" step="1" value="25"><label class="check" for="scan-metadata"><input id="scan-metadata" type="checkbox" checked> Include metadata</label></div></div><div class="form-actions"><button class="btn primary" type="submit">Browse</button><button id="scan-next" class="btn" type="button" hidden>Next page →</button><span id="scan-count" class="hint"></span></div><p id="scan-error" class="error" role="alert" hidden></p></form><div id="scan-results" class="detail"></div><div id="point-detail" class="detail" hidden><h3>Point detail</h3><p class="hint">The vector preview shows the first 16 values.</p><pre id="point-json"></pre><div class="form-actions"><button id="use-vector" class="btn small" type="button">Use vector in query →</button></div><p id="point-error" class="error" role="alert" hidden></p></div></div></section>
-<section id="query" hidden aria-labelledby="query-title"><div class="sheet panel dog"><div class="panel-head"><div><h2 id="query-title">Vector query</h2><p>Search the selected collection. Exact scans all points; approximate uses the read budget.</p></div></div><form id="query-form"><div id="query-mode" class="nav-tabs" hidden><button type="button" data-query-mode="text" aria-pressed="true">Text</button><button type="button" data-query-mode="vector" aria-pressed="false">Vector</button></div><p id="embedding-hint" class="hint">Text search can be enabled with GLIDER_EMBED_PROVIDER.</p><div id="query-text-field" class="field" hidden><label for="query-text">Search text</label><textarea id="query-text" placeholder="Ask in plain language…" maxlength="32768" disabled></textarea></div><div id="query-vector-field" class="field"><label for="query-vector">Vector JSON array</label><textarea id="query-vector" required placeholder="[0.1, 0.2, 0.3]" spellcheck="false"></textarea></div><div class="form-grid" style="margin-top:17px"><div class="field"><label for="query-k">Results (k)</label><input id="query-k" type="number" min="1" max="1000" step="1" value="10"></div><div class="field"><label for="query-filter">Filter JSON (optional)</label><textarea id="query-filter" placeholder='{"color":"red"}' spellcheck="false"></textarea></div></div><div class="toolbar" style="margin-top:10px"><label class="check" for="query-exact"><input id="query-exact" type="checkbox"> Exact search</label><label class="check" for="query-metadata"><input id="query-metadata" type="checkbox" checked> Include metadata</label></div><div class="form-actions"><button class="btn primary" type="submit">Run query →</button><span id="query-context" class="hint"></span></div><p id="query-error" class="error" role="alert" hidden></p></form></div><div id="query-output" class="sheet panel" hidden><div class="panel-head"><div><h2>Results</h2><p id="query-summary"></p></div></div><div id="query-results"></div><div id="query-profile" hidden class="detail"><h3>Query profile</h3><pre id="profile-json"></pre></div></div></section>
-<p class="foot">Glider serves this page locally. API requests go only to this server.</p>
+  <section id="auth" class="panel" hidden aria-labelledby="auth-title">
+    <h1 id="auth-title">Connect to Glider</h1><p class="muted">Enter this server's API token. It stays in this browser tab's session storage.</p>
+    <form id="auth-form"><div class="field"><label for="token">API token</label><input id="token" type="password" autocomplete="off" required></div>
+      <div class="actions"><button id="connect" class="btn primary" type="submit">Connect</button><button class="btn forget-token" type="button">Forget token</button></div>
+    </form><p id="auth-error" class="error" role="alert" hidden></p>
+  </section>
+  <p id="global-error" class="error" role="alert" hidden></p>
+  <div id="workspace" hidden>
+    <nav class="tabs" role="tablist" aria-label="Console views">
+      <button id="tab-search" type="button" role="tab" data-view="search" aria-controls="search" aria-selected="true">Search</button>
+      <button id="tab-browse" type="button" role="tab" data-view="browse" aria-controls="browse" aria-selected="false" tabindex="-1">Browse</button>
+      <button id="tab-collections" type="button" role="tab" data-view="collections" aria-controls="collections" aria-selected="false" tabindex="-1">Collections</button>
+    </nav>
+    <section id="search" role="tabpanel" aria-labelledby="tab-search">
+      <div class="page-head"><div><h1>Search</h1><p class="muted">Find the points closest to your query.</p></div></div>
+      <form id="query-form" class="panel search-panel">
+        <div class="search-heading"><span id="query-context" class="hint"></span><div id="query-mode" class="segment" aria-label="Query input mode" hidden><button type="button" data-query-mode="text" aria-pressed="true">Text</button><button type="button" data-query-mode="vector" aria-pressed="false">Vector</button></div></div>
+        <div id="query-text-field"><label class="sr-only" for="query-text">Search text</label><textarea id="query-text" placeholder="Search in plain language…" maxlength="32768" rows="1" disabled></textarea></div>
+        <div id="query-vector-field" class="field"><label for="query-vector">Vector JSON array</label><textarea id="query-vector" placeholder="[0.1, 0.2, 0.3]" spellcheck="false" required></textarea></div>
+        <p id="embedding-hint" class="hint">Enable text search on this server with GLIDER_EMBED_PROVIDER.</p>
+        <div class="options">
+          <label class="inline-field" for="query-k">k <input id="query-k" type="number" min="1" max="1000" step="1" value="10" required></label>
+          <label class="check" for="query-exact"><input id="query-exact" type="checkbox">Exact</label>
+          <label class="check" for="query-metadata"><input id="query-metadata" type="checkbox" checked>Include metadata</label>
+          <details class="filter"><summary>Filter <span id="query-filter-badge" class="badge" hidden>Set</span></summary><div class="field"><label for="query-filter">Filter JSON (optional)</label><textarea id="query-filter" placeholder='{"category":"guide"}' spellcheck="false"></textarea></div></details>
+          <button id="run-query" class="btn primary" type="submit">Search</button>
+        </div><p id="query-error" class="error" role="alert" hidden></p>
+      </form>
+      <div id="query-empty" class="empty"><strong>Your data, one query away</strong><p>Enter a query to find relevant points. Press / to focus the input.</p></div>
+      <div id="query-output" hidden><div class="results-head" role="status"><p id="query-summary"></p><p id="query-timing" class="hint"></p><p id="query-sequence" class="hint"></p></div><div id="query-results"></div><details id="query-profile" class="profile" hidden><summary>Profile</summary><pre id="profile-json"></pre></details></div>
+    </section>
+    <section id="browse" role="tabpanel" aria-labelledby="tab-browse" hidden>
+      <div class="page-head"><div><h1>Browse</h1><p class="muted">Points in ID order. Select a row to inspect it.</p></div></div>
+      <form id="scan-form" class="options scan-toolbar">
+        <label class="inline-field" for="scan-limit">Page size <input id="scan-limit" type="number" min="1" max="10000" step="1" value="25" required></label>
+        <label class="check" for="scan-metadata"><input id="scan-metadata" type="checkbox" checked>Include metadata</label>
+        <details class="filter"><summary>Filter <span id="scan-filter-badge" class="badge" hidden>Set</span></summary><div class="field"><label for="scan-filter">Filter JSON (optional)</label><textarea id="scan-filter" placeholder='{"category":"guide"}' spellcheck="false"></textarea></div></details>
+        <button id="run-scan" class="btn" type="submit">Browse points</button>
+      </form><p id="scan-error" class="error" role="alert" hidden></p>
+      <div id="scan-results"><div class="empty"><strong>Explore your collection</strong><p>Browse points to see their metadata and vectors.</p></div></div>
+      <div class="scan-footer"><span id="scan-count" class="hint" role="status"></span><button id="scan-next" class="btn small" type="button" hidden>Next page →</button></div>
+      <p class="hint" style="margin-top:12px">Each page reads the current collection; writes can change later pages.</p>
+    </section>
+    <section id="collections" role="tabpanel" aria-labelledby="tab-collections" hidden>
+      <div class="page-head"><div><h1>Collections</h1><p class="muted">Manage the spaces that hold your vectors.</p></div><button id="new-collection" class="btn primary" type="button">New collection</button></div>
+      <div id="collection-list"></div>
+      <div class="status-meta hint"><span id="collection-count"></span><span id="open-count"></span></div>
+    </section>
+    <section class="status" aria-labelledby="status-title"><details id="status-section"><summary id="status-title">Status <span id="status-context"></span></summary><div id="collection-status" class="stats"></div><p id="collection-error" class="error" role="alert" hidden></p><details><summary>Raw status</summary><pre id="status-json"></pre></details></details></section>
+    <div class="session"><button class="link forget-token" type="button" hidden>Forget token</button></div>
+  </div>
 </main>
+<dialog id="point-detail" aria-labelledby="point-title"><div class="dialog-head"><h2 id="point-title">Point detail</h2><button class="btn small" type="button" data-close="point-detail" aria-label="Close point detail">Close</button></div><p id="point-id" class="id"></p><h3>Metadata</h3><div id="point-metadata"></div><h3>Vector</h3><p id="vector-caption" class="hint">Preview of the first 16 values.</p><pre id="point-vector"></pre><div class="actions" style="margin-top:16px"><button id="use-vector" class="btn" type="button" disabled>Use vector in query →</button></div><details class="profile"><summary>Raw JSON (vector preview)</summary><pre id="point-json"></pre></details><p id="point-error" class="error" role="alert" hidden></p></dialog>
+<dialog id="create-dialog" aria-labelledby="create-title"><div class="dialog-head"><h2 id="create-title">New collection</h2><button class="btn small" type="button" data-close="create-dialog">Cancel</button></div><form id="create-form"><div class="field"><label for="create-name">Name</label><input id="create-name" required pattern="[a-z0-9][a-z0-9-]{0,62}" maxlength="63" placeholder="my-collection"><span class="hint">Lowercase letters, numbers and hyphens. Start with a letter or number.</span></div><div class="field"><label for="create-dimensions">Dimensions</label><input id="create-dimensions" type="number" min="1" step="1" required placeholder="384"></div><div class="field"><label for="create-metric">Distance metric</label><select id="create-metric"><option value="cosine">Cosine</option><option value="squared_euclidean">Squared Euclidean</option><option value="manhattan">Manhattan</option></select></div><button id="create-submit" class="btn primary" type="submit">Create collection</button><p id="create-error" class="error" role="alert" hidden></p></form></dialog>
+<dialog id="delete-dialog" aria-labelledby="delete-title"><div class="dialog-head"><h2 id="delete-title">Delete collection</h2><button class="btn small" type="button" data-close="delete-dialog">Cancel</button></div><p id="delete-description" class="muted"></p><form id="delete-form" style="margin-top:20px"><div class="field"><label for="delete-name">Type the collection name to confirm</label><input id="delete-name" autocomplete="off" required></div><button id="delete-submit" class="btn danger" type="submit">Delete collection</button><p id="delete-error" class="error" role="alert" hidden></p></form></dialog>
 <script>
-(()=>{'use strict';
-const $=id=>document.getElementById(id);const state={mode:null,collections:[],selected:null,token:sessionStorage.getItem('glider-console-token')||'',point:null,next:null,profile:true,embedding:null,queryMode:'vector'};
-function queryMode(mode){state.queryMode=mode;const text=mode==='text';$('query-text-field').hidden=!text;$('query-text').disabled=!text;$('query-text').required=text;$('query-vector-field').hidden=text;$('query-vector').disabled=text;$('query-vector').required=!text;$('query-title').textContent=state.embedding?'Query':'Vector query';for(const button of document.querySelectorAll('[data-query-mode]'))button.setAttribute('aria-pressed',String(button.dataset.queryMode===mode))}
-function embedding(config){const wasEnabled=!!state.embedding;state.embedding=config||null;$('query-mode').hidden=!state.embedding;$('embedding-hint').hidden=!!state.embedding;if(!state.embedding)queryMode('vector');else if(!wasEnabled)queryMode('text')}
-function readableMetadata(metadata){if(metadata===undefined)return '—';if(typeof metadata.text!=='string')return pretty(metadata);const node=el('div');const text=el('p','',metadata.text);text.style.fontFamily='var(--sans)';text.style.whiteSpace='pre-wrap';node.append(text,el('pre','',pretty(metadata)));return node}
-function error(id,message){const el=$(id);el.textContent=message||'';el.hidden=!message}
-function el(tag,cls,content){const node=document.createElement(tag);if(cls)node.className=cls;if(content!==undefined)node.textContent=String(content);return node}
-function stat(label,value,detail){const box=el('div','stat');box.append(el('span','',label),el('strong','',value===undefined||value===null?'—':value));if(detail)box.append(el('small','',detail));return box}
-function format(value){return value===undefined||value===null?'—':String(value)}
-function pretty(value){return JSON.stringify(value,null,2)}
-// Keep u64 point IDs and scan cursors exact even above JavaScript's safe integer limit.
-function parseApiJson(raw){let out='',i=0,key='';while(i<raw.length){if(raw[i]==='"'){const start=i++;while(i<raw.length){if(raw[i]==='\\'){i+=2;continue}if(raw[i++]==='"')break}const token=raw.slice(start,i);out+=token;let j=i;while(/\s/.test(raw[j]||''))j++;key=raw[j]===':'?JSON.parse(token):'';continue}if(raw[i]===':'&&(key==='id'||key==='next'||key==='sequence'||key==='matched')){out+=':';i++;while(/\s/.test(raw[i]||''))out+=raw[i++];const match=/^\d+/.exec(raw.slice(i));if(match&&BigInt(match[0])>BigInt(Number.MAX_SAFE_INTEGER)){out+='"'+match[0]+'"';i+=match[0].length}key='';continue}out+=raw[i++]}return JSON.parse(out)}
-function parseJson(id,fallback){const raw=$(id).value.trim();if(!raw)return fallback;try{return JSON.parse(raw)}catch(e){throw Error('Invalid JSON: '+e.message)}}
-function base(){return state.mode==='multi'?'v1/collections/'+encodeURIComponent(state.selected):'v1'}
-async function api(path,options={}){const headers={...(options.body?{'Content-Type':'application/json'}:{}),...(state.token?{Authorization:'Bearer '+state.token}:{})};let response;try{response=await fetch(path,{...options,headers,cache:'no-store'})}catch(e){throw Error('Cannot reach this server: '+e.message)}const raw=await response.text();let data;try{data=raw?parseApiJson(raw):null}catch{data=raw}if(!response.ok){const message=data&&typeof data==='object'&&data.error?data.error:response.status+' '+response.statusText;const err=Error(String(message));err.status=response.status;if(response.status===401){$('auth').hidden=false;error('auth-error',err.message)}throw err}return data}
-async function metrics(){const response=await fetch('metrics',{cache:'no-store'});if(!response.ok)return{};const text=await response.text();const found={};for(const key of ['glider_committed_sequence','glider_admission_commands','glider_open_collections']){const match=text.match(new RegExp('^'+key+'\\s+([^\\s]+)','m'));if(match)found[key]=match[1]}return found}
-function show(view){for(const button of document.querySelectorAll('[data-view]')){const active=button.dataset.view===view;button.setAttribute('aria-pressed',String(active));$(button.dataset.view).hidden=!active}if(view==='collection')loadCollection();if(view==='query')$('query-context').textContent=state.selected?'Collection: '+state.selected:state.mode==='single'?'Single collection':'Select a collection in Overview first'}
-function renderCollections(){const host=$('collections');host.replaceChildren();if(!state.collections.length){host.append(el('p','hint','No collections yet. Create one below.'));return}for(const c of state.collections){const row=el('div','collection-row');const info=el('div');info.append(el('strong','',c.name),el('small','',`${c.dimensions} dimensions · ${c.metric} · ${c.open?'open':'closed'}`));const actions=el('div','collection-actions');const select=el('button','btn small','Explore');select.type='button';select.addEventListener('click',()=>{state.selected=c.name;state.next=null;$('scan-results').replaceChildren();$('point-detail').hidden=true;show('collection')});const remove=el('button','btn small danger','Delete');remove.type='button';remove.addEventListener('click',()=>confirmDelete(c.name,actions));actions.append(select,remove);row.append(info,actions);host.append(row)}}
-function confirmDelete(name,host){host.replaceChildren();const prompt=el('span','hint','Delete '+name+' and its data?');const yes=el('button','btn small danger','Confirm delete');yes.type='button';const no=el('button','btn small','Cancel');no.type='button';no.addEventListener('click',renderCollections);yes.addEventListener('click',async()=>{error('global-error','');try{await api('v1/collections/'+encodeURIComponent(name),{method:'DELETE'});if(state.selected===name){state.selected=null;state.point=null}await refresh()}catch(e){error('global-error',e.message);renderCollections()}});host.append(prompt,yes,no)}
-function renderOverview(health,m){const host=$('headline');host.replaceChildren(stat('Server health',health?'Healthy':'Unavailable',health?'Accepting requests':'Check server status'));if(state.mode==='multi'){host.append(stat('Collections',state.collections.length),stat('Open collections',m.glider_open_collections||state.collections.filter(c=>c.open).length))}else{const s=state.singleStatus||{};host.append(stat('Committed sequence',s.sequence??m.glider_committed_sequence),stat('Cache',s.cache?.state),stat('Clustering',s.clustering?.state),stat('Queue depth',s.queued_commands??m.glider_admission_commands));$('collection-list').hidden=true}}
-function statusCards(s,description){const host=$('collection-status');host.replaceChildren(stat('Committed sequence',s.sequence),stat('Cache',s.cache?.state,format(s.cache?.warm_bytes)+' / '+format(s.cache?.namespace_bytes)+' bytes warm'),stat('Clustering',s.clustering?.state,s.clustering?.state==='clustered'?format(s.clustering.centroids)+' centroids':s.clustering?.progress?.phase?String(s.clustering.progress.phase):''),stat('Queue depth',s.queued_commands),stat('Worker',s.failed?'Failed':s.closed?'Closed':'Ready'),stat('Configuration',description?description.dimensions+'D · '+description.metric:'Single collection'))}
-async function loadCollection(){error('collection-error','');const picker=$('collection-picker');picker.replaceChildren();if(state.mode==='multi'){if(!state.selected){$('collection-status').replaceChildren();picker.append(el('p','hint','Select a collection in Overview to start.'));return}const label=el('div','field');const text=el('label','','Collection');text.htmlFor='collection-select';const select=el('select');select.id='collection-select';for(const c of state.collections){const option=el('option','',c.name);option.value=c.name;select.append(option)}select.value=state.selected;select.addEventListener('change',()=>{state.selected=select.value;state.next=null;state.point=null;$('scan-results').replaceChildren();$('point-detail').hidden=true;loadCollection()});label.append(text,select);picker.append(label)}else picker.append(el('span','eyebrow','Single collection'));try{if(state.mode==='multi'){const d=await api('v1/collections/'+encodeURIComponent(state.selected));statusCards(d.status,d)}else statusCards(await api('v1/status'))}catch(e){error('collection-error',e.message)}}
-async function refresh(){error('global-error','');let healthy=false;try{healthy=(await fetch('healthz',{cache:'no-store'})).ok}catch{}let m={};try{m=await metrics()}catch{}try{const listing=await api('v1/collections');state.mode='multi';state.collections=listing.collections||[];embedding(listing.embedding);$('collection-list').hidden=false;if(state.selected&&!state.collections.some(c=>c.name===state.selected))state.selected=null;renderCollections();$('auth').hidden=true}catch(e){if(e.status===404){state.mode='single';try{state.singleStatus=await api('v1/status');embedding(state.singleStatus.embedding);$('auth').hidden=true}catch(inner){if(inner.status===401){state.singleStatus=null;$('auth').hidden=false;error('auth-error',inner.message)}else error('global-error',inner.message)}}else if(e.status===401){state.mode=null;embedding(null);state.collections=[];state.selected=null;state.point=null;$('auth').hidden=false;error('auth-error',e.message)}else error('global-error',e.message)}renderOverview(healthy,m);if(!state.mode){$('collection-list').hidden=true}else if(!$('collection').hidden)loadCollection()}
-function table(headers,rows){const wrap=el('div','table-wrap'),tbl=el('table'),head=el('thead'),tr=el('tr');for(const h of headers)tr.append(el('th','',h));head.append(tr);const body=el('tbody');for(const cells of rows){const row=el('tr');for(const cell of cells){const td=el('td','mono');if(cell instanceof Node)td.append(cell);else td.textContent=format(cell);row.append(td)}body.append(row)}tbl.append(head,body);wrap.append(tbl);return wrap}
-async function scan(after){error('scan-error','');if(!state.mode||state.mode==='multi'&&!state.selected){error('scan-error','Select a collection first.');return}try{const filter=parseJson('scan-filter',{});const limit=Number($('scan-limit').value);if(!Number.isInteger(limit)||limit<1||limit>10000)throw Error('Page size must be between 1 and 10000.');const payload={filter,limit,include_metadata:$('scan-metadata').checked};const body=JSON.stringify(payload).slice(0,-1)+(after!==null?',\"after\":'+String(after):'')+'}';const data=await api(base()+'/scan',{method:'POST',body});state.next=data.next;$('scan-next').hidden=data.next===null||data.next===undefined;$('scan-count').textContent=`${data.points.length} on this page · ${data.matched} matched · sequence ${data.sequence}`;const host=$('scan-results');host.replaceChildren();if(!data.points.length){host.append(el('p','hint','No points matched this scan.'));return}const rows=data.points.map(p=>{const link=el('button','link',p.id);link.type='button';link.addEventListener('click',()=>loadPoint(p.id));return[link,p.metadata===undefined?'—':pretty(p.metadata)]});host.append(table(['Point ID','Metadata'],rows))}catch(e){error('scan-error',e.message)}}
-async function loadPoint(id){error('point-error','');state.point=null;$('use-vector').disabled=true;$('point-detail').hidden=false;$('point-json').textContent='Loading…';try{const p=await api(base()+'/points/'+encodeURIComponent(id));state.point=p;$('use-vector').disabled=false;const preview={...p,vector:Array.isArray(p.vector)?p.vector.slice(0,16):p.vector};if(Array.isArray(p.vector)&&p.vector.length>16)preview.vector_more=p.vector.length-16;$('point-json').textContent=pretty(preview)}catch(e){$('point-json').textContent='';error('point-error',e.message)}}
-async function query(){error('query-error','');$('query-output').hidden=true;if(!state.mode||state.mode==='multi'&&!state.selected){error('query-error','Select a collection in Overview first.');return}try{let input;if(state.queryMode==='text'){const text=$('query-text').value;if(!text.trim())throw Error('Enter search text.');input={text}}else{const vector=parseJson('query-vector',null);if(!Array.isArray(vector)||!vector.length||vector.some(v=>typeof v!=='number'||!Number.isFinite(v)))throw Error('Vector must be a nonempty JSON array of finite numbers.');input={vector}}const filter=parseJson('query-filter',{});const k=Number($('query-k').value);if(!Number.isInteger(k)||k<1||k>1000)throw Error('k must be between 1 and 1000.');const payload={...input,k,filter,exact:$('query-exact').checked,include_metadata:$('query-metadata').checked};let data;if(state.profile){try{data=await api(base()+'/query',{method:'POST',body:JSON.stringify({...payload,profile:true})})}catch(e){if(e.status===422&&/unknown field[^\n]*profile|profile[^\n]*unknown field/i.test(e.message)){state.profile=false;data=await api(base()+'/query',{method:'POST',body:JSON.stringify(payload)})}else throw e}}else data=await api(base()+'/query',{method:'POST',body:JSON.stringify(payload)});$('query-output').hidden=false;$('query-summary').textContent=`${data.results.length} results · sequence ${data.sequence}`;const host=$('query-results');host.replaceChildren();if(!data.results.length)host.append(el('p','hint','No results.'));else host.append(table(['Point ID','Distance','Metadata'],data.results.map(hit=>[hit.id,hit.distance,readableMetadata(hit.metadata)])));$('query-profile').hidden=!data.profile;if(data.profile)$('profile-json').textContent=pretty(data.profile)}catch(e){error('query-error',e.message)}}
-for(const button of document.querySelectorAll('[data-query-mode]'))button.addEventListener('click',()=>queryMode(button.dataset.queryMode));
-for(const button of document.querySelectorAll('[data-view]'))button.addEventListener('click',()=>show(button.dataset.view));$('refresh').addEventListener('click',refresh);$('collection-refresh').addEventListener('click',loadCollection);$('auth-form').addEventListener('submit',e=>{e.preventDefault();state.token=$('token').value;sessionStorage.setItem('glider-console-token',state.token);error('auth-error','');refresh()});$('forget-token').addEventListener('click',()=>{state.token='';sessionStorage.removeItem('glider-console-token');$('token').value='';refresh()});$('create-form').addEventListener('submit',async e=>{e.preventDefault();error('create-error','');try{const name=$('create-name').value.trim();const dimensions=Number($('create-dimensions').value);await api('v1/collections',{method:'POST',body:JSON.stringify({name,dimensions,metric:$('create-metric').value})});state.selected=name;$('create-form').reset();await refresh();show('collection')}catch(err){error('create-error',err.message)}});$('scan-form').addEventListener('submit',e=>{e.preventDefault();state.next=null;scan(null)});$('scan-next').addEventListener('click',()=>scan(state.next));$('query-form').addEventListener('submit',e=>{e.preventDefault();query()});$('use-vector').addEventListener('click',()=>{if(state.point){queryMode('vector');$('query-vector').value=JSON.stringify(state.point.vector);show('query');$('query-vector').focus()}});refresh();
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const state = {
+    mode: null, collections: [], selected: null, description: null, embedding: null,
+    token: sessionStorage.getItem('glider-console-token') || '', queryMode: 'vector',
+    view: 'search', next: null, scanOptions: null, point: null, deleting: null,
+    revision: 0, queryRequest: 0, scanRequest: 0, pointRequest: 0
+  };
+  const pretty = value => JSON.stringify(value, null, 2);
+  const format = value => value === undefined || value === null ? '—' : String(value);
+  const metricName = metric => ({cosine: 'Cosine', squared_euclidean: 'Squared Euclidean', manhattan: 'Manhattan'}[metric] || metric);
+  function el(tag, className, content) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (content !== undefined) node.textContent = String(content);
+    return node;
+  }
+  function error(id, message = '') {
+    $(id).textContent = message;
+    $(id).hidden = !message;
+  }
+  function empty(title, message) {
+    const node = el('div', 'empty');
+    node.append(el('strong', '', title), el('p', '', message));
+    return node;
+  }
+  async function busy(id, label, work) {
+    const button = $(id);
+    if (button.disabled) return;
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = label;
+    button.setAttribute('aria-busy', 'true');
+    try { await work(); }
+    finally {
+      button.disabled = false;
+      button.textContent = original;
+      button.removeAttribute('aria-busy');
+    }
+  }
+  // JSON numbers representing u64 IDs/cursors must survive without rounding.
+  // Tokenize outside strings; metadata and decimal/exponent floats remain unchanged.
+  function parseApiJson(raw) {
+    return JSON.parse(raw.replace(/"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, token => {
+      if (/^\d+$/.test(token) && BigInt(token) > BigInt(Number.MAX_SAFE_INTEGER)) return '"' + token + '"';
+      return token;
+    }));
+  }
+  function parseJson(id, fallback) {
+    const raw = $(id).value.trim();
+    if (!raw) return fallback;
+    try { return JSON.parse(raw); }
+    catch { throw Error('Invalid JSON in ' + $(id).labels[0].textContent + '. Check the syntax.'); }
+  }
+  function base() {
+    return state.mode === 'multi' ? 'v1/collections/' + encodeURIComponent(state.selected) : 'v1';
+  }
+  function requireCollection() {
+    if (!state.mode || (state.mode === 'multi' && !state.selected)) throw Error('Select or create a collection first.');
+  }
+  function authRequired(message) {
+    state.revision++;
+    state.point = null;
+    for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
+    $('workspace').hidden = true;
+    $('auth').hidden = false;
+    $('collection-select').hidden = true;
+    $('single-info').hidden = true;
+    error('auth-error', message);
+  }
+  async function api(path, options = {}) {
+    const headers = {
+      ...(options.body ? {'Content-Type': 'application/json'} : {}),
+      ...(state.token ? {Authorization: 'Bearer ' + state.token} : {})
+    };
+    let response;
+    try { response = await fetch(path, {...options, headers, cache: 'no-store'}); }
+    catch { throw Error('Cannot reach this server. Check the connection and refresh.'); }
+    const raw = await response.text();
+    let data;
+    try { data = raw ? parseApiJson(raw) : null; } catch { data = raw; }
+    if (!response.ok) {
+      const err = Error(data && data.error ? String(data.error) : response.status + ' ' + response.statusText);
+      err.status = response.status;
+      if (err.status === 401) authRequired(err.message);
+      throw err;
+    }
+    return data;
+  }
+  function queryMode(mode) {
+    state.queryMode = mode;
+    const text = mode === 'text';
+    $('query-text-field').hidden = !text;
+    $('query-text').disabled = !text;
+    $('query-text').required = text;
+    $('query-vector-field').hidden = text;
+    $('query-vector').disabled = text;
+    $('query-vector').required = !text;
+    for (const button of document.querySelectorAll('[data-query-mode]')) {
+      button.setAttribute('aria-pressed', String(button.dataset.queryMode === mode));
+    }
+  }
+  function embedding(config) {
+    const wasEnabled = !!state.embedding;
+    state.embedding = config || null;
+    $('query-mode').hidden = !config;
+    $('embedding-hint').hidden = !!config;
+    if (!config) queryMode('vector');
+    else if (!wasEnabled) queryMode('text');
+  }
+  function show(view) {
+    state.view = view;
+    for (const button of document.querySelectorAll('[data-view]')) {
+      const active = button.dataset.view === view;
+      button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
+      $(button.dataset.view).hidden = !active;
+    }
+  }
+  function clearCollectionData() {
+    state.revision++;
+    state.next = null;
+    state.scanOptions = null;
+    state.point = null;
+    state.description = null;
+    $('point-detail').close();
+    $('query-output').hidden = true;
+    $('query-empty').hidden = false;
+    $('scan-results').replaceChildren(empty('Explore your collection', 'Browse points to see their metadata and vectors.'));
+    $('scan-count').textContent = '';
+    $('scan-next').hidden = true;
+    $('collection-status').replaceChildren();
+    $('status-json').textContent = '';
+    for (const id of ['query-error', 'scan-error', 'collection-error']) error(id);
+  }
+  function collectionContext() {
+    const description = state.description;
+    $('query-context').textContent = state.mode === 'single' ? 'Single collection' : state.selected || 'No collection selected';
+    if (description) $('query-context').textContent += ' · ' + description.dimensions + ' dimensions · ' + metricName(description.metric);
+    $('single-info').textContent = $('query-context').textContent;
+    $('status-context').textContent = state.selected ? '· ' + state.selected : '';
+  }
+  function stat(label, value, detail) {
+    const node = el('div', 'stat');
+    node.append(el('span', '', label), el('strong', '', format(value)));
+    if (detail) node.append(el('small', '', detail));
+    return node;
+  }
+  function statusCards(status) {
+    $('collection-status').replaceChildren(
+      stat('Committed sequence', status.sequence),
+      stat('Cache', status.cache?.state, format(status.cache?.warm_bytes) + ' / ' + format(status.cache?.namespace_bytes) + ' bytes warm'),
+      stat('Clustering', status.clustering?.state, status.clustering?.state === 'clustered' ? status.clustering.centroids + ' centroids' : status.clustering?.progress?.phase),
+      stat('Queue depth', status.queued_commands),
+      stat('Worker', status.failed ? 'Failed' : status.closed ? 'Closed' : 'Ready'),
+      stat('Configuration', state.description ? state.description.dimensions + 'D · ' + metricName(state.description.metric) : 'Single collection')
+    );
+    $('status-json').textContent = pretty(status);
+  }
+  async function loadStatus() {
+    const revision = state.revision;
+    error('collection-error');
+    if (state.mode === 'multi' && !state.selected) {
+      $('collection-status').replaceChildren(empty('No collection selected', 'Create a collection to start searching.'));
+      collectionContext();
+      return;
+    }
+    try {
+      const data = await api(state.mode === 'multi' ? base() : 'v1/status');
+      if (revision !== state.revision) return;
+      state.description = state.mode === 'multi' ? data : data.configuration || null;
+      statusCards(data.status || data);
+      if (state.mode === 'multi') {
+        const collection = state.collections.find(c => c.name === state.selected);
+        if (collection) collection.open = true;
+        renderCollections();
+      }
+      collectionContext();
+    } catch (err) { if (revision === state.revision) error('collection-error', err.message); }
+  }
+  function table(headers, rows, id) {
+    const wrap = el('div', 'table-wrap');
+    const tbl = el('table');
+    if (id) tbl.id = id;
+    const head = el('thead'), header = el('tr'), body = el('tbody');
+    for (const title of headers) { const th = el('th', '', title); th.scope = 'col'; header.append(th); }
+    head.append(header);
+    for (const row of rows) body.append(row);
+    tbl.append(head, body);
+    wrap.append(tbl);
+    return wrap;
+  }
+  function cell(content, className) {
+    const td = el('td', className);
+    td.append(content instanceof Node ? content : document.createTextNode(format(content)));
+    return td;
+  }
+  function chips(metadata) {
+    const node = el('div', 'chips');
+    for (const [key, value] of Object.entries(metadata || {})) {
+      if (key === 'text') continue;
+      const chip = el('span', 'chip', key + ': ' + value);
+      node.append(chip);
+    }
+    return node;
+  }
+  function renderCollections() {
+    const picker = $('collection-select');
+    picker.replaceChildren();
+    const placeholder = el('option', '', state.collections.length ? 'Select a collection' : 'No collections');
+    placeholder.value = '';
+    picker.append(placeholder);
+    for (const collection of state.collections) {
+      const option = el('option', '', collection.name);
+      option.value = collection.name;
+      picker.append(option);
+    }
+    picker.value = state.selected || '';
+    $('collection-count').textContent = state.collections.length + ' collections';
+    $('open-count').textContent = state.collections.filter(c => c.open).length + ' open';
+    if (!state.collections.length) {
+      $('collection-list').replaceChildren(empty('A fresh start', 'Create your first collection to store and search vectors.'));
+      return;
+    }
+    const rows = state.collections.map(collection => {
+      const row = el('tr');
+      const select = el('button', 'point-link', collection.name);
+      select.type = 'button';
+      select.addEventListener('click', () => selectCollection(collection.name));
+      const remove = el('button', 'btn small danger', 'Delete');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', 'Delete collection ' + collection.name);
+      remove.addEventListener('click', () => {
+        state.deleting = collection.name;
+        $('delete-description').textContent = 'Permanently delete “' + collection.name + '” and all its data.';
+        $('delete-name').value = '';
+        error('delete-error');
+        $('delete-dialog').showModal();
+      });
+      row.append(cell(select), cell(collection.dimensions, 'id'), cell(metricName(collection.metric)), cell(el('span', 'chip', collection.open ? 'Open' : 'Idle')), cell(remove));
+      return row;
+    });
+    $('collection-list').replaceChildren(table(['Name', 'Dimensions', 'Metric', 'State', ''], rows, 'collections-table'));
+  }
+  async function selectCollection(name) {
+    state.selected = name || null;
+    clearCollectionData();
+    $('collection-select').value = state.selected || '';
+    collectionContext();
+    show(state.selected ? 'search' : 'collections');
+    await loadStatus();
+  }
+  async function refresh() {
+    await busy('refresh', 'Refreshing…', async () => {
+      error('global-error');
+      let healthy = false;
+      try { healthy = (await fetch('healthz', {cache: 'no-store'})).ok; } catch {}
+      $('health-label').textContent = healthy ? 'Healthy' : 'Unavailable';
+      $('health-dot').classList.toggle('ok', healthy);
+      try {
+        let listing;
+        try { listing = await api('v1/collections'); }
+        catch (err) { if (err.status !== 404) throw err; }
+        if (listing) {
+          const prior = state.selected;
+          state.mode = 'multi';
+          state.collections = listing.collections || [];
+          if (!state.collections.some(c => c.name === state.selected)) state.selected = state.collections[0]?.name || null;
+          if (prior !== state.selected) {
+            clearCollectionData();
+            if (state.selected) show('search');
+          }
+          embedding(listing.embedding);
+          renderCollections();
+          $('collection-select').hidden = false;
+          $('single-info').hidden = true;
+          $('tab-collections').hidden = false;
+          if (!state.selected) show('collections');
+        } else {
+          const status = await api('v1/status');
+          state.mode = 'single';
+          state.description = status.configuration || null;
+          embedding(status.embedding);
+          statusCards(status);
+          $('collection-select').hidden = true;
+          $('single-info').hidden = false;
+          $('tab-collections').hidden = true;
+          if (state.view === 'collections') show('search');
+        }
+        $('auth').hidden = true;
+        $('workspace').hidden = false;
+        for (const button of document.querySelectorAll('.session .forget-token')) button.hidden = !state.token;
+        collectionContext();
+        if (state.mode === 'multi') await loadStatus();
+      } catch (err) { if (err.status !== 401) error('global-error', err.message); }
+    });
+  }
+  async function query() {
+    await busy('run-query', 'Searching…', async () => {
+      error('query-error');
+      const revision = state.revision, request = ++state.queryRequest;
+      try {
+        requireCollection();
+        let input;
+        const usedText = state.queryMode === 'text';
+        if (usedText) {
+          const text = $('query-text').value;
+          if (!text.trim()) throw Error('Enter search text.');
+          input = {text};
+        } else {
+          const vector = parseJson('query-vector', null);
+          if (!Array.isArray(vector) || !vector.length || vector.some(v => typeof v !== 'number' || !Number.isFinite(v))) throw Error('Enter a nonempty JSON array of finite numbers.');
+          input = {vector};
+        }
+        const k = Number($('query-k').value);
+        if (!Number.isInteger(k) || k < 1 || k > 1000) throw Error('k must be between 1 and 1000.');
+        const payload = {...input, k, filter: parseJson('query-filter', {}), exact: $('query-exact').checked, include_metadata: $('query-metadata').checked, profile: true};
+        const start = performance.now();
+        const data = await api(base() + '/query', {method: 'POST', body: JSON.stringify(payload)});
+        if (revision !== state.revision || request !== state.queryRequest) return;
+        const total = data.profile?.server_ms ?? performance.now() - start;
+        $('query-summary').textContent = data.results.length + ' results · ' + total.toFixed(1) + ' ms';
+        $('query-timing').textContent = usedText && typeof data.embedding_ms === 'number' ? 'embedding ' + data.embedding_ms.toFixed(1) + ' ms · search ' + Math.max(0, total - data.embedding_ms).toFixed(1) + ' ms' : '';
+        $('query-sequence').textContent = 'Sequence ' + data.sequence;
+        renderResults(data.results);
+        $('query-profile').hidden = !data.profile;
+        $('profile-json').textContent = pretty(data.profile);
+        $('query-output').hidden = false;
+        $('query-empty').hidden = true;
+      } catch (err) { if (revision === state.revision) error('query-error', err.message); }
+    });
+  }
+  function renderResults(hits) {
+    if (!hits.length) {
+      $('query-results').replaceChildren(empty('No matching results', 'Try a different query or filter. Exact search scans every point.'));
+      return;
+    }
+    const list = el('div', 'result-list');
+    const cosine = state.description?.metric === 'cosine';
+    hits.forEach((hit, index) => {
+      const row = el('article', 'result'), content = el('div');
+      if (hit.metadata?.text) {
+        const text = el('p', 'hit-text clamped', hit.metadata.text);
+        content.append(text);
+        const more = el('button', 'link', 'Show more');
+        more.type = 'button';
+        more.setAttribute('aria-expanded', 'false');
+        more.addEventListener('click', () => {
+          const expanded = text.classList.toggle('clamped') === false;
+          more.textContent = expanded ? 'Show less' : 'Show more';
+          more.setAttribute('aria-expanded', String(expanded));
+        });
+        // Only offer expansion for text that actually overflows the three-line clamp.
+        content.append(more);
+        requestAnimationFrame(() => { more.hidden = text.scrollHeight <= text.clientHeight; });
+      }
+      const metadata = chips(hit.metadata);
+      content.append(metadata);
+      if (!hit.metadata?.text && !metadata.childElementCount) content.append(el('p', 'hint', hit.metadata === undefined ? 'Metadata not requested' : 'No metadata'));
+      const footer = el('div', 'hit-footer');
+      footer.append(el('p', 'id', 'ID ' + hit.id));
+      const raw = el('details');
+      raw.append(el('summary', '', 'Raw JSON'), el('pre', '', pretty(hit)));
+      footer.append(raw);
+      content.append(footer);
+      const score = el('div', 'score', (cosine ? 1 - hit.distance : hit.distance).toFixed(3));
+      score.append(el('small', '', cosine ? 'similarity' : 'distance'));
+      row.append(el('span', 'rank', index + 1), content, score);
+      list.append(row);
+    });
+    $('query-results').replaceChildren(list);
+  }
+  async function scan(after = null) {
+    const button = after === null ? 'run-scan' : 'scan-next';
+    await busy(button, 'Loading…', async () => {
+      error('scan-error');
+      const revision = state.revision, request = ++state.scanRequest;
+      try {
+        requireCollection();
+        const limit = Number($('scan-limit').value);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 10000) throw Error('Page size must be between 1 and 10000.');
+        // Keep filter and page size bound to the cursor that produced Next page.
+        const options = after === null ? {filter: parseJson('scan-filter', {}), limit, include_metadata: $('scan-metadata').checked} : state.scanOptions;
+        const body = JSON.stringify(options).slice(0, -1) + (after !== null ? ',"after":' + String(after) : '') + '}';
+        const data = await api(base() + '/scan', {method: 'POST', body});
+        if (revision !== state.revision || request !== state.scanRequest) return;
+        state.scanOptions = options;
+        state.next = data.next;
+        const points = data.points || (data.ids || []).map(id => ({id}));
+        $('scan-next').hidden = data.next === null || data.next === undefined;
+        $('scan-count').textContent = points.length + ' on this page · ' + data.matched + ' matched · sequence ' + data.sequence;
+        if (!points.length) {
+          $('scan-results').replaceChildren(empty('No points found', 'Write points to this collection or adjust the filter.'));
+          return;
+        }
+        const rows = points.map(point => {
+          const row = el('tr', 'point-row');
+          const link = el('button', 'point-link', point.id);
+          link.type = 'button';
+          link.setAttribute('aria-label', 'Inspect point ' + point.id);
+          row.addEventListener('click', () => loadPoint(point.id));
+          row.append(cell(link), cell(el('span', 'preview', point.metadata?.text || (point.metadata === undefined ? 'Metadata not requested' : '—'))), cell(chips(point.metadata)));
+          return row;
+        });
+        $('scan-results').replaceChildren(table(['Point ID', 'Text', 'Metadata'], rows));
+      } catch (err) { if (revision === state.revision) error('scan-error', err.message); }
+    });
+  }
+  async function loadPoint(id) {
+    const revision = state.revision, request = ++state.pointRequest;
+    state.point = null;
+    $('use-vector').disabled = true;
+    $('point-id').textContent = 'ID ' + id;
+    $('point-metadata').replaceChildren(el('p', 'hint', 'Loading…'));
+    $('point-vector').textContent = '';
+    $('point-json').textContent = '';
+    error('point-error');
+    if (!$('point-detail').open) $('point-detail').showModal();
+    try {
+      const point = await api(base() + '/points/' + encodeURIComponent(id));
+      if (revision !== state.revision || request !== state.pointRequest || !$('point-detail').open) return;
+      state.point = point;
+      const host = $('point-metadata');
+      host.replaceChildren();
+      if (point.metadata?.text) host.append(el('p', 'hit-text', point.metadata.text));
+      host.append(chips(point.metadata), el('pre', '', pretty(point.metadata)));
+      $('vector-caption').textContent = point.vector.length + ' dimensions · showing first ' + Math.min(16, point.vector.length) + ' values';
+      $('point-vector').textContent = pretty(point.vector.slice(0, 16));
+      $('point-json').textContent = pretty({...point, vector: point.vector.slice(0, 16), vector_more: Math.max(0, point.vector.length - 16)});
+      $('use-vector').disabled = false;
+    } catch (err) {
+      if (revision === state.revision && request === state.pointRequest) {
+        $('point-metadata').replaceChildren();
+        error('point-error', err.message);
+      }
+    }
+  }
+  for (const button of document.querySelectorAll('[data-query-mode]')) button.addEventListener('click', () => queryMode(button.dataset.queryMode));
+  for (const button of document.querySelectorAll('[data-view]')) {
+    button.addEventListener('click', () => show(button.dataset.view));
+    button.addEventListener('keydown', event => {
+      const tabs = [...document.querySelectorAll('[data-view]')].filter(tab => !tab.hidden);
+      let index = tabs.indexOf(button);
+      if (event.key === 'ArrowRight') index = (index + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft') index = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === 'Home') index = 0;
+      else if (event.key === 'End') index = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      show(tabs[index].dataset.view);
+      tabs[index].focus();
+    });
+  }
+  for (const button of document.querySelectorAll('[data-close]')) button.addEventListener('click', () => $(button.dataset.close).close());
+  for (const id of ['query-filter', 'scan-filter']) $(id).addEventListener('input', () => {
+    const value = $(id).value.trim();
+    let set = !!value;
+    try { set = value && Object.keys(JSON.parse(value)).length > 0; } catch {}
+    $(id + '-badge').hidden = !set;
+  });
+  $('refresh').addEventListener('click', refresh);
+  $('collection-select').addEventListener('change', () => selectCollection($('collection-select').value));
+  $('auth-form').addEventListener('submit', event => {
+    event.preventDefault();
+    busy('connect', 'Connecting…', async () => {
+      state.token = $('token').value;
+      sessionStorage.setItem('glider-console-token', state.token);
+      error('auth-error');
+      await refresh();
+    });
+  });
+  for (const button of document.querySelectorAll('.forget-token')) button.addEventListener('click', () => {
+    state.token = '';
+    sessionStorage.removeItem('glider-console-token');
+    $('token').value = '';
+    clearCollectionData();
+    refresh();
+  });
+  $('new-collection').addEventListener('click', () => {
+    error('create-error');
+    if (state.embedding?.dimensions) $('create-dimensions').value = state.embedding.dimensions;
+    $('create-dialog').showModal();
+  });
+  $('create-form').addEventListener('submit', event => {
+    event.preventDefault();
+    busy('create-submit', 'Creating…', async () => {
+      error('create-error');
+      try {
+        const name = $('create-name').value.trim(), dimensions = Number($('create-dimensions').value);
+        if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) throw Error('Use a valid collection name.');
+        if (!Number.isSafeInteger(dimensions) || dimensions < 1) throw Error('Dimensions must be a positive integer.');
+        await api('v1/collections', {method: 'POST', body: JSON.stringify({name, dimensions, metric: $('create-metric').value})});
+        state.selected = name;
+        clearCollectionData();
+        $('create-dialog').close();
+        $('create-form').reset();
+        show('search');
+        await refresh();
+      } catch (err) { error('create-error', err.message); }
+    });
+  });
+  $('delete-form').addEventListener('submit', event => {
+    event.preventDefault();
+    busy('delete-submit', 'Deleting…', async () => {
+      error('delete-error');
+      const name = state.deleting;
+      if ($('delete-name').value !== name) { error('delete-error', 'Type “' + name + '” exactly to confirm.'); return; }
+      try {
+        await api('v1/collections/' + encodeURIComponent(name), {method: 'DELETE'});
+        if (state.selected === name) { state.selected = null; clearCollectionData(); }
+        $('delete-dialog').close();
+        show('collections');
+        await refresh();
+      } catch (err) { error('delete-error', err.message); }
+    });
+  });
+  $('scan-form').addEventListener('submit', event => { event.preventDefault(); scan(); });
+  $('scan-next').addEventListener('click', () => scan(state.next));
+  $('query-form').addEventListener('submit', event => { event.preventDefault(); query(); });
+  $('query-text').addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('query-form').requestSubmit(); }
+  });
+  $('use-vector').addEventListener('click', () => {
+    if (!state.point) return;
+    queryMode('vector');
+    $('query-vector').value = JSON.stringify(state.point.vector);
+    $('point-detail').close();
+    show('search');
+    $('query-vector').focus();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || document.querySelector('dialog[open]') || $('workspace').hidden) return;
+    if (event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+    event.preventDefault();
+    show('search');
+    $(state.queryMode === 'text' ? 'query-text' : 'query-vector').focus();
+  });
+  refresh();
 })();
 </script>
 </body>
