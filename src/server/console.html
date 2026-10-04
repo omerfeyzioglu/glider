@@ -5,20 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Glider Console</title>
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNiIgZmlsbD0iIzE2MzA0RiIvPjxwYXRoIGQ9Ik00IDE1IDI4IDYgMTMgMTlaIiBmaWxsPSIjRkZGREY4IiBzdHJva2U9IiMwRTFCMkMiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTTEzIDE5IDI4IDYgMTcgMjdaIiBmaWxsPSIjQzlEMkRDIiBzdHJva2U9IiMwRTFCMkMiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTTQgMTUgOSAxMy4yIDguMiAxN1oiIGZpbGw9IiNGMDdBMUEiLz48L3N2Zz4K">
 <style>
 :root {
   color-scheme: light dark;
-  --bg: #f7f8fa; --surface: #fff; --subtle: #f1f3f5; --border: #dce0e5;
-  --ink: #20252c; --muted: #626b77; --orange: #a8480a; --active: #fff3e9;
-  --success: #24834c; --danger: #b42332; --error-bg: #fff1f2;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --bg: #fdfdfc; --surface: #fdfdfc; --subtle: #f4f4f2; --border: #e2e2de;
+  --ink: #242522; --muted: #72736c; --orange: #b94f0c;
+  --danger: #b42332; --error-bg: #fff4f3;
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14171b; --surface: #1c2026; --subtle: #252a32; --border: #373e48;
-    --ink: #edf0f4; --muted: #a6afbd; --orange: #f09b60; --active: #34271f;
-    --success: #6bc591; --danger: #ff939e; --error-bg: #342229;
+    --bg: #171816; --surface: #171816; --subtle: #20211e; --border: #343530;
+    --ink: #e7e8e2; --muted: #a0a298; --orange: #ef8b45;
+    --danger: #ff939e; --error-bg: #2c1e1e;
   }
 }
 * { box-sizing: border-box; }
@@ -29,138 +30,163 @@ button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .55; }
 :focus-visible { outline: 2px solid var(--orange); outline-offset: 3px; }
 a { color: inherit; }
-.wrap { max-width: 1184px; margin: auto; padding: 0 32px; min-width: 0; }
-header { background: var(--surface); border-bottom: 1px solid var(--border); }
-.topbar { min-height: 72px; display: flex; align-items: center; gap: 24px; }
-.brand { font-size: 22px; font-weight: 700; letter-spacing: -.8px; text-decoration: none; }
-.health { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
-.dot.ok { background: var(--success); }
+.wrap { max-width: 1240px; margin: auto; padding: 0 40px; min-width: 0; }
+header { border-bottom: 1px solid var(--border); }
+.topbar { min-height: 64px; display: flex; align-items: center; gap: 24px; }
+.brand { display: inline-flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 400; text-decoration: none; }
+.brand svg { width: 21px; height: 21px; }
+.brand-label { border-left: 1px solid var(--border); padding-left: 12px; margin-left: 3px; color: var(--muted); font-size: 13px; }
 .collection-picker { margin-left: auto; min-width: 0; max-width: 340px; }
-.collection-picker select { max-width: 100%; min-width: 180px; }
+.collection-picker select { max-width: 100%; min-width: 180px; font: 12px var(--mono); }
 #single-info { color: var(--muted); font-size: 12px; }
-main { padding-top: 28px !important; padding-bottom: 64px !important; }
-.tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--border); margin-bottom: 28px; }
-.tabs button { padding: 0 2px 13px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 600; }
-.tabs button[aria-selected="true"] { color: var(--orange); border-bottom-color: var(--orange); }
+.connection-notice { color: var(--danger); background: var(--error-bg); border-bottom: 1px solid var(--border); }
+.connection-notice .wrap { display: flex; align-items: center; gap: 16px; padding-top: 9px; padding-bottom: 9px; font-size: 13px; }
+.connection-notice button { color: inherit; }
+main { padding-top: 24px !important; padding-bottom: 64px !important; }
+.tabs { display: flex; gap: 28px; border-bottom: 1px solid var(--border); margin-bottom: 28px; }
+.tabs button { padding: 0 0 12px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 500; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--orange); }
 h1, h2, h3, p { margin: 0; }
-h1 { font-size: 22px; letter-spacing: -.5px; line-height: 1.3; }
-h2 { font-size: 16px; letter-spacing: -.2px; }
-h3 { font-size: 13px; margin: 22px 0 8px; }
-.page-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }
-.page-head p { margin-top: 5px; }
+h1 { font-size: 20px; font-weight: 500; }
+h2 { font-size: 16px; font-weight: 500; }
+h3 { font-size: 12px; font-weight: 500; margin: 24px 0 8px; }
+.page-head { display: flex; justify-content: flex-end; align-items: center; margin-bottom: 20px; }
 .muted, .hint { color: var(--muted); }
 .hint { font-size: 12px; }
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--ink); font-weight: 600; white-space: nowrap; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--ink); font-weight: 500; white-space: nowrap; }
 .btn:hover:not(:disabled) { background: var(--subtle); }
-.btn.primary { background: var(--orange); border-color: var(--orange); color: var(--surface); }
-@media (prefers-color-scheme: dark) { .btn.primary { color: #20160f; } }
+.btn.primary { background: var(--orange); border-color: var(--orange); color: #fff; }
+@media (prefers-color-scheme: dark) { .btn.primary { color: #21170f; } }
 .btn.primary:hover:not(:disabled) { filter: brightness(.94); background: var(--orange); }
 .btn.danger { color: var(--danger); }
-.btn.small { min-height: 30px; padding: 4px 9px; font-size: 12px; }
+.btn.small { min-height: 28px; padding: 3px 8px; font-size: 12px; }
 .link { border: 0; background: none; padding: 0; color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
-input, select, textarea { border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 8px 10px; min-width: 0; }
-textarea { width: 100%; resize: vertical; font: 13px/1.6 var(--mono); min-height: 100px; }
+#refresh { border: 0; color: var(--muted); }
+input, select, textarea { border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--ink); padding: 7px 10px; min-width: 0; }
+textarea { width: 100%; resize: vertical; font: 12px/1.6 var(--mono); min-height: 96px; }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .field { display: grid; gap: 6px; margin-bottom: 16px; }
-.field label { font-size: 12px; font-weight: 600; }
-.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
-.search-panel { margin-bottom: 24px; }
-.search-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.segment { display: flex; border: 1px solid var(--border); border-radius: 6px; padding: 3px; background: var(--subtle); }
-.segment button { border: 0; border-radius: 4px; padding: 4px 12px; color: var(--muted); background: none; font-size: 12px; }
-.segment button[aria-pressed="true"] { background: var(--surface); color: var(--orange); }
-#query-text { font: 17px/1.5 var(--sans); min-height: 56px; height: 56px; padding: 14px; }
-.options { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-top: 16px; }
-.options .primary { margin-left: auto; }
-.inline-field, .check { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.inline-field input { width: 68px; font-family: var(--mono); }
-.check input { width: 15px; height: 15px; margin: 0; accent-color: var(--muted); }
+.field label { font-size: 12px; font-weight: 500; }
+.panel { padding: 0; }
+.search-panel { margin-bottom: 28px; }
+.search-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+.query-mode { display: flex; gap: 12px; }
+.query-mode button { border: 0; padding: 0; color: var(--muted); background: none; font-size: 12px; }
+.query-mode button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+.query-input { display: flex; align-items: flex-start; gap: 8px; }
+.query-input > div { flex: 1; min-width: 0; margin: 0; }
+#query-text, #query-vector { min-height: 38px; height: 38px; padding: 8px 10px; resize: none; max-height: 240px; overflow-y: auto; }
+#query-text { font: 14px/20px var(--sans); }
+#query-vector { font: 12px/20px var(--mono); }
+#run-query { min-height: 38px; padding: 8px 20px; }
+#embedding-hint { margin-top: 8px; }
+.options { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); }
+.inline-field, .check { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.inline-field input { width: 60px; padding: 3px 6px; font: 12px var(--mono); }
+.check input { width: 13px; height: 13px; margin: 0; accent-color: var(--muted); }
 .filter { font-size: 12px; }
 summary { cursor: pointer; color: var(--muted); width: fit-content; font-size: 12px; padding: 5px 0; }
 summary:hover { color: var(--ink); }
 .filter[open] { flex-basis: 100%; }
 .filter .field { margin: 8px 0 0; }
-.badge, .chip { display: inline-block; border: 1px solid var(--border); background: var(--subtle); border-radius: 4px; padding: 2px 6px; font-size: 11px; color: var(--muted); max-width: 100%; overflow-wrap: anywhere; }
-.badge { margin-left: 5px; }
-.error { color: var(--danger); background: var(--error-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 12px 0; overflow-wrap: anywhere; }
-.empty { text-align: center; padding: 48px 20px; color: var(--muted); }
-.empty strong { display: block; color: var(--ink); font-weight: 600; margin-bottom: 5px; }
-.empty p { font-size: 13px; }
-#query-summary { font-weight: 600; }
-#query-timing { margin-top: 3px; }
-.results-head { margin-bottom: 14px; }
-.result { display: grid; grid-template-columns: 24px minmax(0,1fr) 100px; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
-.result:last-child { border-bottom: 0; }
-.result-list { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.badge { margin-left: 5px; font-size: 11px; color: var(--muted); }
+.error { color: var(--danger); background: var(--error-bg); border-left: 2px solid var(--danger); padding: 10px 12px; margin: 12px 0; overflow-wrap: anywhere; }
+.empty { padding: 36px 0; color: var(--muted); font-size: 13px; }
+.empty strong { font-weight: 400; }
+.empty p { margin-top: 4px; font-size: 12px; }
+.results-head { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+.result-list { width: 100%; table-layout: fixed; }
+.result-list th:first-child { width: 36px; }
+.result-list th:nth-child(3) { width: 108px; text-align: right; }
+.result-list th:last-child { width: 96px; text-align: right; }
+.result-list td { padding-top: 18px; padding-bottom: 18px; }
+.result-list th, .result-list td { padding-left: 12px; padding-right: 12px; }
+.result-list th:first-child, .result-list td:first-child { padding-left: 0; }
+.result-list th:last-child, .result-list td:last-child { padding-right: 0; }
 .rank { color: var(--muted); font: 12px/1.8 var(--mono); }
 .hit-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
 .clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
-.hit-footer { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.hit-footer details[open] { flex-basis: 100%; }
-.id { color: var(--muted); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
-.score { text-align: right; font: 13px/1.8 var(--mono); }
-.score small { display: block; color: var(--muted); font: 11px var(--sans); }
-pre { margin: 8px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--subtle); font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.metadata { display: block; margin: 6px 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#point-metadata .metadata { white-space: normal; overflow-wrap: anywhere; }
+.hit-footer { margin-top: 6px; }
+.raw-toggle { border: 0; background: none; color: var(--muted); padding: 0; font-size: 11px; }
+.raw-toggle:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.id { color: var(--muted); font: 12px/1.8 var(--mono); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.result-list .id { text-align: right; }
+.score { text-align: right; font: 12px/1.8 var(--mono); font-variant-numeric: tabular-nums; }
+pre { margin: 8px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: 3px; background: var(--subtle); font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .profile { margin-top: 16px; }
-.table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.table-wrap { overflow: auto; }
 table { border-collapse: collapse; width: 100%; text-align: left; font-size: 13px; }
-th { color: var(--muted); font-size: 11px; font-weight: 600; background: var(--subtle); white-space: nowrap; }
-th, td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
-tr:last-child td { border-bottom: 0; }
-#scan-results table { min-width: 660px; table-layout: fixed; }
-#scan-results th:first-child { width: 180px; }
-#scan-results th:last-child { width: 240px; }
-.table-wrap .chips { margin: 0; gap: 4px; }
+th { color: var(--muted); font-size: 11px; font-weight: 500; white-space: nowrap; }
+th, td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th:first-child, td:first-child { padding-left: 0; }
+th:last-child, td:last-child { padding-right: 0; }
+#scan-results table { min-width: 620px; table-layout: fixed; }
+#scan-results th:first-child { width: 100px; }
+#scan-results th:last-child { width: 260px; }
+.table-wrap .metadata { margin: 0; }
 #collections-table { min-width: 560px; }
 .point-row { cursor: pointer; }
 .point-row:hover { background: var(--subtle); }
 .point-link { font: 12px var(--mono); border: 0; padding: 0; background: none; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
-.preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-.scan-toolbar { margin: 0 0 18px; }
+.preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.6; }
+.scan-toolbar { margin: 0 0 20px; }
 .scan-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 16px; }
-.status { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 14px; }
+.status { margin-top: 32px; border-top: 1px solid var(--border); padding-top: 12px; }
 .stats { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 16px; margin: 12px 0; }
 .stat { min-width: 0; }
 .stat span, .stat small { display: block; color: var(--muted); font-size: 11px; }
 .stat strong { display: block; margin: 4px 0; font: 13px var(--mono); overflow-wrap: anywhere; }
-.status-meta { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 12px; }
-#auth { max-width: 420px; margin: 60px auto; padding: 28px; }
+.status-meta { display: flex; gap: 20px; flex-wrap: wrap; margin: 16px 0 12px; }
+#auth { max-width: 420px; margin: 60px auto; }
 #auth p { margin: 10px 0 22px; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .session { display: flex; justify-content: flex-end; margin-top: 24px; }
-dialog { color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; width: min(440px,calc(100% - 32px)); padding: 24px; max-height: calc(100dvh - 32px); overflow: auto; }
-dialog::backdrop { background: rgba(0,0,0,.3); }
+dialog { color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; width: min(440px,calc(100% - 32px)); padding: 24px; max-height: calc(100dvh - 32px); overflow: auto; }
+dialog::backdrop { background: rgba(0,0,0,.25); }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }
 #point-detail { margin: 0 0 0 auto; height: 100dvh; max-height: 100dvh; width: min(480px,100%); max-width: 100%; border-radius: 0; border-width: 0 0 0 1px; }
 .skip { position: absolute; left: -999px; top: 8px; padding: 8px; background: var(--surface); z-index: 10; }
 .skip:focus { left: 8px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 760px) {
-  .wrap { padding: 0 20px; } .topbar { gap: 14px; flex-wrap: wrap; padding-top: 14px; padding-bottom: 14px; }
+  .wrap { padding: 0 24px; } .topbar { gap: 14px; flex-wrap: wrap; padding-top: 12px; padding-bottom: 12px; }
   .collection-picker { order: 3; flex-basis: 100%; max-width: none; }
   .collection-picker select { width: 100%; } #refresh { margin-left: auto; }
-  main { padding-top: 22px !important; } .stats { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  main { padding-top: 20px !important; } .stats { grid-template-columns: repeat(3,minmax(0,1fr)); }
 }
 @media (max-width: 480px) {
-  .wrap { padding: 0 16px; } .panel { padding: 16px; } .tabs { gap: 22px; }
-  .options { gap: 12px 16px; } .options .primary { width: 100%; margin-left: 0; }
-  .result { grid-template-columns: 18px minmax(0,1fr) 74px; gap: 8px; padding: 16px 12px; }
-  .page-head { align-items: flex-start; } .page-head p { font-size: 12px; }
+  .wrap { padding: 0 16px; } .topbar { padding-top: 12px; padding-bottom: 12px; } .tabs { gap: 24px; margin-bottom: 24px; }
+  .options { gap: 10px 16px; }
+  .search-heading { align-items: flex-start; } #query-context { max-width: 230px; }
+  #run-query { padding: 8px 12px; }
+  .result-list th:first-child { width: 22px; }
+  .result-list th:nth-child(3) { width: 66px; }
+  .result-list th:last-child { width: 34px; }
+  .result-list th, .result-list td { padding-left: 5px; padding-right: 5px; }
+  .result-list th { font-size: 10px; }
+  .result-list .hit-text { font-size: 13px; }
+  .result-list .metadata { font-size: 11px; }
   .scan-footer { align-items: flex-start; } .stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  #auth { margin: 28px auto; } .health { font-size: 11px; }
+  #collections-table { min-width: 0; }
+  #collections-table th, #collections-table td { font-size: 10px; padding-left: 5px; padding-right: 5px; }
+  #collections-table th:first-child, #collections-table td:first-child { padding-left: 0; }
+  #collections-table th:last-child, #collections-table td:last-child { padding-right: 0; }
+  #collections-table .point-link { font-size: 11px; overflow-wrap: anywhere; }
+  #collections-table .btn { font-size: 11px; padding: 3px 5px; }
+  #auth { margin: 28px auto; }
 }
 </style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header><div class="wrap topbar">
-  <a class="brand" href="console">Glider</a>
-  <span class="health" role="status"><span id="health-dot" class="dot" aria-hidden="true"></span><span id="health-label">Unavailable</span></span>
+  <a class="brand" href="console"><svg aria-hidden="true" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#16304F"/><path d="M4 15 28 6 13 19Z" fill="#FFFDF8" stroke="#0E1B2C" stroke-width="1.5" stroke-linejoin="round"/><path d="M13 19 28 6 17 27Z" fill="#C9D2DC" stroke="#0E1B2C" stroke-width="1.5" stroke-linejoin="round"/><path d="M4 15 9 13.2 8.2 17Z" fill="#F07A1A"/></svg><span>Glider</span><span class="brand-label">Console</span></a>
   <div class="collection-picker"><label class="sr-only" for="collection-select">Collection</label><select id="collection-select" hidden></select><span id="single-info" hidden>Single collection</span></div>
-  <button id="refresh" class="btn small" type="button" aria-label="Refresh server and collection status">↻ Refresh</button>
+  <button id="refresh" class="btn small" type="button" aria-label="Refresh server and collection status">Refresh</button>
 </div></header>
+<div id="connection-notice" class="connection-notice" role="alert" hidden><div class="wrap"><span>Cannot reach the server.</span><button id="retry" class="link" type="button">Retry</button></div></div>
 <main id="main" class="wrap">
   <section id="auth" class="panel" hidden aria-labelledby="auth-title">
     <h1 id="auth-title">Connect to Glider</h1><p class="muted">Enter this server's API token. It stays in this browser tab's session storage.</p>
@@ -176,37 +202,34 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
       <button id="tab-collections" type="button" role="tab" data-view="collections" aria-controls="collections" aria-selected="false" tabindex="-1">Collections</button>
     </nav>
     <section id="search" role="tabpanel" aria-labelledby="tab-search">
-      <div class="page-head"><div><h1>Search</h1><p class="muted">Find the points closest to your query.</p></div></div>
       <form id="query-form" class="panel search-panel">
-        <div class="search-heading"><span id="query-context" class="hint"></span><div id="query-mode" class="segment" aria-label="Query input mode" hidden><button type="button" data-query-mode="text" aria-pressed="true">Text</button><button type="button" data-query-mode="vector" aria-pressed="false">Vector</button></div></div>
-        <div id="query-text-field"><label class="sr-only" for="query-text">Search text</label><textarea id="query-text" placeholder="Search in plain language…" maxlength="32768" rows="1" disabled></textarea></div>
-        <div id="query-vector-field" class="field"><label for="query-vector">Vector JSON array</label><textarea id="query-vector" placeholder="[0.1, 0.2, 0.3]" spellcheck="false" required></textarea></div>
+        <div class="search-heading"><span id="query-context" class="hint"></span><div id="query-mode" class="query-mode" aria-label="Query input mode" hidden><button type="button" data-query-mode="text" aria-pressed="true">Text</button><button type="button" data-query-mode="vector" aria-pressed="false">Vector</button></div></div>
+        <div class="query-input"><div id="query-text-field"><label class="sr-only" for="query-text">Search text</label><textarea id="query-text" placeholder="Search in plain language…" maxlength="32768" rows="1" disabled></textarea></div>
+        <div id="query-vector-field" class="field"><label class="sr-only" for="query-vector">Vector JSON array</label><textarea id="query-vector" placeholder="[0.1, 0.2, 0.3]" spellcheck="false" rows="1" required></textarea></div><button id="run-query" class="btn primary" type="submit">Search</button></div>
         <p id="embedding-hint" class="hint">Enable text search on this server with GLIDER_EMBED_PROVIDER.</p>
         <div class="options">
           <label class="inline-field" for="query-k">k <input id="query-k" type="number" min="1" max="1000" step="1" value="10" required></label>
           <label class="check" for="query-exact"><input id="query-exact" type="checkbox">Exact</label>
           <label class="check" for="query-metadata"><input id="query-metadata" type="checkbox" checked>Include metadata</label>
           <details class="filter"><summary>Filter <span id="query-filter-badge" class="badge" hidden>Set</span></summary><div class="field"><label for="query-filter">Filter JSON (optional)</label><textarea id="query-filter" placeholder='{"category":"guide"}' spellcheck="false"></textarea></div></details>
-          <button id="run-query" class="btn primary" type="submit">Search</button>
         </div><p id="query-error" class="error" role="alert" hidden></p>
       </form>
-      <div id="query-empty" class="empty"><strong>Your data, one query away</strong><p>Enter a query to find relevant points. Press / to focus the input.</p></div>
-      <div id="query-output" hidden><div class="results-head" role="status"><p id="query-summary"></p><p id="query-timing" class="hint"></p><p id="query-sequence" class="hint"></p></div><div id="query-results"></div><details id="query-profile" class="profile" hidden><summary>Profile</summary><pre id="profile-json"></pre></details></div>
+      <div id="query-empty" class="empty"><strong>No query yet.</strong></div>
+      <div id="query-output" hidden><div class="results-head" role="status"><p id="query-summary"></p></div><div id="query-results"></div><details id="query-profile" class="profile" hidden><summary>Profile</summary><pre id="profile-json"></pre></details></div>
     </section>
     <section id="browse" role="tabpanel" aria-labelledby="tab-browse" hidden>
-      <div class="page-head"><div><h1>Browse</h1><p class="muted">Points in ID order. Select a row to inspect it.</p></div></div>
       <form id="scan-form" class="options scan-toolbar">
         <label class="inline-field" for="scan-limit">Page size <input id="scan-limit" type="number" min="1" max="10000" step="1" value="25" required></label>
         <label class="check" for="scan-metadata"><input id="scan-metadata" type="checkbox" checked>Include metadata</label>
         <details class="filter"><summary>Filter <span id="scan-filter-badge" class="badge" hidden>Set</span></summary><div class="field"><label for="scan-filter">Filter JSON (optional)</label><textarea id="scan-filter" placeholder='{"category":"guide"}' spellcheck="false"></textarea></div></details>
         <button id="run-scan" class="btn" type="submit">Browse points</button>
       </form><p id="scan-error" class="error" role="alert" hidden></p>
-      <div id="scan-results"><div class="empty"><strong>Explore your collection</strong><p>Browse points to see their metadata and vectors.</p></div></div>
-      <div class="scan-footer"><span id="scan-count" class="hint" role="status"></span><button id="scan-next" class="btn small" type="button" hidden>Next page →</button></div>
+      <div id="scan-results"><div class="empty"><strong>No points loaded.</strong></div></div>
+      <div class="scan-footer"><span id="scan-count" class="hint" role="status"></span><button id="scan-next" class="btn small" type="button" hidden>Next page</button></div>
       <p class="hint" style="margin-top:12px">Each page reads the current collection; writes can change later pages.</p>
     </section>
     <section id="collections" role="tabpanel" aria-labelledby="tab-collections" hidden>
-      <div class="page-head"><div><h1>Collections</h1><p class="muted">Manage the spaces that hold your vectors.</p></div><button id="new-collection" class="btn primary" type="button">New collection</button></div>
+      <div class="page-head"><button id="new-collection" class="btn primary" type="button">New collection</button></div>
       <div id="collection-list"></div>
       <div class="status-meta hint"><span id="collection-count"></span><span id="open-count"></span></div>
     </section>
@@ -214,7 +237,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     <div class="session"><button class="link forget-token" type="button" hidden>Forget token</button></div>
   </div>
 </main>
-<dialog id="point-detail" aria-labelledby="point-title"><div class="dialog-head"><h2 id="point-title">Point detail</h2><button class="btn small" type="button" data-close="point-detail" aria-label="Close point detail">Close</button></div><p id="point-id" class="id"></p><h3>Metadata</h3><div id="point-metadata"></div><h3>Vector</h3><p id="vector-caption" class="hint">Preview of the first 16 values.</p><pre id="point-vector"></pre><div class="actions" style="margin-top:16px"><button id="use-vector" class="btn" type="button" disabled>Use vector in query →</button></div><details class="profile"><summary>Raw JSON (vector preview)</summary><pre id="point-json"></pre></details><p id="point-error" class="error" role="alert" hidden></p></dialog>
+<dialog id="point-detail" aria-labelledby="point-title"><div class="dialog-head"><h2 id="point-title">Point detail</h2><button class="btn small" type="button" data-close="point-detail" aria-label="Close point detail">Close</button></div><p id="point-id" class="id"></p><h3>Metadata</h3><div id="point-metadata"></div><h3>Vector</h3><p id="vector-caption" class="hint">First 16 values.</p><pre id="point-vector"></pre><div class="actions" style="margin-top:16px"><button id="use-vector" class="btn" type="button" disabled>Use vector in query</button></div><details class="profile"><summary>Raw JSON (vector preview)</summary><pre id="point-json"></pre></details><p id="point-error" class="error" role="alert" hidden></p></dialog>
 <dialog id="create-dialog" aria-labelledby="create-title"><div class="dialog-head"><h2 id="create-title">New collection</h2><button class="btn small" type="button" data-close="create-dialog">Cancel</button></div><form id="create-form"><div class="field"><label for="create-name">Name</label><input id="create-name" required pattern="[a-z0-9][a-z0-9-]{0,62}" maxlength="63" placeholder="my-collection"><span class="hint">Lowercase letters, numbers and hyphens. Start with a letter or number.</span></div><div class="field"><label for="create-dimensions">Dimensions</label><input id="create-dimensions" type="number" min="1" step="1" required placeholder="384"></div><div class="field"><label for="create-metric">Distance metric</label><select id="create-metric"><option value="cosine">Cosine</option><option value="squared_euclidean">Squared Euclidean</option><option value="manhattan">Manhattan</option></select></div><button id="create-submit" class="btn primary" type="submit">Create collection</button><p id="create-error" class="error" role="alert" hidden></p></form></dialog>
 <dialog id="delete-dialog" aria-labelledby="delete-title"><div class="dialog-head"><h2 id="delete-title">Delete collection</h2><button class="btn small" type="button" data-close="delete-dialog">Cancel</button></div><p id="delete-description" class="muted"></p><form id="delete-form" style="margin-top:20px"><div class="field"><label for="delete-name">Type the collection name to confirm</label><input id="delete-name" autocomplete="off" required></div><button id="delete-submit" class="btn danger" type="submit">Delete collection</button><p id="delete-error" class="error" role="alert" hidden></p></form></dialog>
 <script>
@@ -242,7 +265,8 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
   }
   function empty(title, message) {
     const node = el('div', 'empty');
-    node.append(el('strong', '', title), el('p', '', message));
+    node.append(el('strong', '', title));
+    if (message) node.append(el('p', '', message));
     return node;
   }
   async function busy(id, label, work) {
@@ -289,15 +313,23 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     $('single-info').hidden = true;
     error('auth-error', message);
   }
+  function unreachable() {
+    $('connection-notice').hidden = false;
+    const err = Error('Cannot reach the server.');
+    err.unreachable = true;
+    return err;
+  }
   async function api(path, options = {}) {
     const headers = {
       ...(options.body ? {'Content-Type': 'application/json'} : {}),
       ...(state.token ? {Authorization: 'Bearer ' + state.token} : {})
     };
-    let response;
-    try { response = await fetch(path, {...options, headers, cache: 'no-store'}); }
-    catch { throw Error('Cannot reach this server. Check the connection and refresh.'); }
-    const raw = await response.text();
+    let response, raw;
+    try {
+      response = await fetch(path, {...options, headers, cache: 'no-store'});
+      raw = await response.text();
+    } catch { throw unreachable(); }
+    if (response.status >= 500) throw unreachable();
     let data;
     try { data = raw ? parseApiJson(raw) : null; } catch { data = raw; }
     if (!response.ok) {
@@ -308,6 +340,10 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     }
     return data;
   }
+  function growInput(input) {
+    input.style.height = '38px';
+    input.style.height = Math.max(38, input.scrollHeight + 2) + 'px';
+  }
   function queryMode(mode) {
     state.queryMode = mode;
     const text = mode === 'text';
@@ -317,6 +353,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     $('query-vector-field').hidden = text;
     $('query-vector').disabled = text;
     $('query-vector').required = !text;
+    growInput($(text ? 'query-text' : 'query-vector'));
     for (const button of document.querySelectorAll('[data-query-mode]')) {
       button.setAttribute('aria-pressed', String(button.dataset.queryMode === mode));
     }
@@ -337,6 +374,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
       button.tabIndex = active ? 0 : -1;
       $(button.dataset.view).hidden = !active;
     }
+    if (view === 'search') growInput($(state.queryMode === 'text' ? 'query-text' : 'query-vector'));
   }
   function clearCollectionData() {
     state.revision++;
@@ -347,7 +385,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     $('point-detail').close();
     $('query-output').hidden = true;
     $('query-empty').hidden = false;
-    $('scan-results').replaceChildren(empty('Explore your collection', 'Browse points to see their metadata and vectors.'));
+    $('scan-results').replaceChildren(empty('No points loaded.'));
     $('scan-count').textContent = '';
     $('scan-next').hidden = true;
     $('collection-status').replaceChildren();
@@ -382,7 +420,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     const revision = state.revision;
     error('collection-error');
     if (state.mode === 'multi' && !state.selected) {
-      $('collection-status').replaceChildren(empty('No collection selected', 'Create a collection to start searching.'));
+      $('collection-status').replaceChildren(empty('No collection selected.'));
       collectionContext();
       return;
     }
@@ -397,7 +435,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         renderCollections();
       }
       collectionContext();
-    } catch (err) { if (revision === state.revision) error('collection-error', err.message); }
+    } catch (err) { if (revision === state.revision) error('collection-error', err.unreachable ? '' : err.message); }
   }
   function table(headers, rows, id) {
     const wrap = el('div', 'table-wrap');
@@ -416,13 +454,26 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     td.append(content instanceof Node ? content : document.createTextNode(format(content)));
     return td;
   }
-  function chips(metadata) {
-    const node = el('div', 'chips');
-    for (const [key, value] of Object.entries(metadata || {})) {
-      if (key === 'text') continue;
-      const chip = el('span', 'chip', key + ': ' + value);
-      node.append(chip);
-    }
+  function rawJson(value, label = 'Raw JSON') {
+    const host = el('div', 'hit-footer');
+    const button = el('button', 'raw-toggle', label), json = el('pre', '', pretty(value));
+    button.type = 'button';
+    button.setAttribute('aria-expanded', 'false');
+    json.hidden = true;
+    button.addEventListener('click', () => {
+      json.hidden = !json.hidden;
+      button.setAttribute('aria-expanded', String(!json.hidden));
+    });
+    host.append(button, json);
+    return host;
+  }
+  function metadataLine(metadata) {
+    const entries = Object.entries(metadata || {}).filter(([key]) => key !== 'text');
+    const label = metadata?.source && metadata?.section
+      ? metadata.source + ' › ' + metadata.section
+      : entries.map(([key, value]) => key + ' ' + value).join(' · ');
+    const node = el('span', 'metadata', label);
+    node.title = label;
     return node;
   }
   function renderCollections() {
@@ -437,10 +488,10 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
       picker.append(option);
     }
     picker.value = state.selected || '';
-    $('collection-count').textContent = state.collections.length + ' collections';
+    $('collection-count').textContent = state.collections.length + (state.collections.length === 1 ? ' collection' : ' collections');
     $('open-count').textContent = state.collections.filter(c => c.open).length + ' open';
     if (!state.collections.length) {
-      $('collection-list').replaceChildren(empty('A fresh start', 'Create your first collection to store and search vectors.'));
+      $('collection-list').replaceChildren(empty('No collections.'));
       return;
     }
     const rows = state.collections.map(collection => {
@@ -458,7 +509,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         error('delete-error');
         $('delete-dialog').showModal();
       });
-      row.append(cell(select), cell(collection.dimensions, 'id'), cell(metricName(collection.metric)), cell(el('span', 'chip', collection.open ? 'Open' : 'Idle')), cell(remove));
+      row.append(cell(select), cell(collection.dimensions, 'id'), cell(metricName(collection.metric)), cell(el('span', 'muted', collection.open ? 'Open' : 'Idle')), cell(remove));
       return row;
     });
     $('collection-list').replaceChildren(table(['Name', 'Dimensions', 'Metric', 'State', ''], rows, 'collections-table'));
@@ -476,8 +527,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
       error('global-error');
       let healthy = false;
       try { healthy = (await fetch('healthz', {cache: 'no-store'})).ok; } catch {}
-      $('health-label').textContent = healthy ? 'Healthy' : 'Unavailable';
-      $('health-dot').classList.toggle('ok', healthy);
+      $('connection-notice').hidden = healthy;
       try {
         let listing;
         try { listing = await api('v1/collections'); }
@@ -513,7 +563,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         for (const button of document.querySelectorAll('.session .forget-token')) button.hidden = !state.token;
         collectionContext();
         if (state.mode === 'multi') await loadStatus();
-      } catch (err) { if (err.status !== 401) error('global-error', err.message); }
+      } catch (err) { if (err.status !== 401) error('global-error', err.unreachable ? '' : err.message); }
     });
   }
   async function query() {
@@ -540,26 +590,25 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         const data = await api(base() + '/query', {method: 'POST', body: JSON.stringify(payload)});
         if (revision !== state.revision || request !== state.queryRequest) return;
         const total = data.profile?.server_ms ?? performance.now() - start;
-        $('query-summary').textContent = data.results.length + ' results · ' + total.toFixed(1) + ' ms';
-        $('query-timing').textContent = usedText && typeof data.embedding_ms === 'number' ? 'embedding ' + data.embedding_ms.toFixed(1) + ' ms · search ' + Math.max(0, total - data.embedding_ms).toFixed(1) + ' ms' : '';
-        $('query-sequence').textContent = 'Sequence ' + data.sequence;
+        const timing = usedText && typeof data.embedding_ms === 'number' ? ' (embedding ' + data.embedding_ms.toFixed(1) + ' · search ' + Math.max(0, total - data.embedding_ms).toFixed(1) + ')' : '';
+        $('query-summary').textContent = data.results.length + ' results · ' + total.toFixed(1) + ' ms' + timing;
         renderResults(data.results);
         $('query-profile').hidden = !data.profile;
-        $('profile-json').textContent = pretty(data.profile);
+        $('profile-json').textContent = pretty({sequence: data.sequence, ...data.profile});
         $('query-output').hidden = false;
         $('query-empty').hidden = true;
-      } catch (err) { if (revision === state.revision) error('query-error', err.message); }
+      } catch (err) { if (revision === state.revision) error('query-error', err.unreachable ? '' : err.message); }
     });
   }
   function renderResults(hits) {
     if (!hits.length) {
-      $('query-results').replaceChildren(empty('No matching results', 'Try a different query or filter. Exact search scans every point.'));
+      $('query-results').replaceChildren(empty('No matching results.'));
       return;
     }
-    const list = el('div', 'result-list');
+    const rows = [];
     const cosine = state.description?.metric === 'cosine';
     hits.forEach((hit, index) => {
-      const row = el('article', 'result'), content = el('div');
+      const row = el('tr'), content = el('div');
       if (hit.metadata?.text) {
         const text = el('p', 'hit-text clamped', hit.metadata.text);
         content.append(text);
@@ -575,20 +624,15 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         content.append(more);
         requestAnimationFrame(() => { more.hidden = text.scrollHeight <= text.clientHeight; });
       }
-      const metadata = chips(hit.metadata);
+      const metadata = metadataLine(hit.metadata);
       content.append(metadata);
-      if (!hit.metadata?.text && !metadata.childElementCount) content.append(el('p', 'hint', hit.metadata === undefined ? 'Metadata not requested' : 'No metadata'));
-      const footer = el('div', 'hit-footer');
-      footer.append(el('p', 'id', 'ID ' + hit.id));
-      const raw = el('details');
-      raw.append(el('summary', '', 'Raw JSON'), el('pre', '', pretty(hit)));
-      footer.append(raw);
-      content.append(footer);
-      const score = el('div', 'score', (cosine ? 1 - hit.distance : hit.distance).toFixed(3));
-      score.append(el('small', '', cosine ? 'similarity' : 'distance'));
-      row.append(el('span', 'rank', index + 1), content, score);
-      list.append(row);
+      if (!hit.metadata?.text && !metadata.textContent) content.append(el('p', 'hint', hit.metadata === undefined ? 'Metadata not requested' : 'No metadata'));
+      content.append(rawJson(hit));
+      row.append(cell(index + 1, 'rank'), cell(content), cell((cosine ? 1 - hit.distance : hit.distance).toFixed(3), 'score'), cell(hit.id, 'id'));
+      rows.push(row);
     });
+    const list = table(['#', 'Result', cosine ? 'Similarity' : 'Distance', 'ID'], rows);
+    list.querySelector('table').className = 'result-list';
     $('query-results').replaceChildren(list);
   }
   async function scan(after = null) {
@@ -609,9 +653,9 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         state.next = data.next;
         const points = data.points || (data.ids || []).map(id => ({id}));
         $('scan-next').hidden = data.next === null || data.next === undefined;
-        $('scan-count').textContent = points.length + ' on this page · ' + data.matched + ' matched · sequence ' + data.sequence;
+        $('scan-count').textContent = points.length + ' on this page · ' + data.matched + ' matched';
         if (!points.length) {
-          $('scan-results').replaceChildren(empty('No points found', 'Write points to this collection or adjust the filter.'));
+          $('scan-results').replaceChildren(empty('No points found.'));
           return;
         }
         const rows = points.map(point => {
@@ -620,11 +664,11 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
           link.type = 'button';
           link.setAttribute('aria-label', 'Inspect point ' + point.id);
           row.addEventListener('click', () => loadPoint(point.id));
-          row.append(cell(link), cell(el('span', 'preview', point.metadata?.text || (point.metadata === undefined ? 'Metadata not requested' : '—'))), cell(chips(point.metadata)));
+          row.append(cell(link), cell(el('span', 'preview', point.metadata?.text || (point.metadata === undefined ? 'Metadata not requested' : '—'))), cell(metadataLine(point.metadata)));
           return row;
         });
         $('scan-results').replaceChildren(table(['Point ID', 'Text', 'Metadata'], rows));
-      } catch (err) { if (revision === state.revision) error('scan-error', err.message); }
+      } catch (err) { if (revision === state.revision) error('scan-error', err.unreachable ? '' : err.message); }
     });
   }
   async function loadPoint(id) {
@@ -644,15 +688,15 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
       const host = $('point-metadata');
       host.replaceChildren();
       if (point.metadata?.text) host.append(el('p', 'hit-text', point.metadata.text));
-      host.append(chips(point.metadata), el('pre', '', pretty(point.metadata)));
+      host.append(metadataLine(point.metadata), rawJson(point.metadata, 'Raw metadata'));
       $('vector-caption').textContent = point.vector.length + ' dimensions · showing first ' + Math.min(16, point.vector.length) + ' values';
-      $('point-vector').textContent = pretty(point.vector.slice(0, 16));
+      $('point-vector').textContent = '[' + point.vector.slice(0, 16).join(', ') + ']';
       $('point-json').textContent = pretty({...point, vector: point.vector.slice(0, 16), vector_more: Math.max(0, point.vector.length - 16)});
       $('use-vector').disabled = false;
     } catch (err) {
       if (revision === state.revision && request === state.pointRequest) {
         $('point-metadata').replaceChildren();
-        error('point-error', err.message);
+        error('point-error', err.unreachable ? '' : err.message);
       }
     }
   }
@@ -680,6 +724,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
     $(id + '-badge').hidden = !set;
   });
   $('refresh').addEventListener('click', refresh);
+  $('retry').addEventListener('click', refresh);
   $('collection-select').addEventListener('change', () => selectCollection($('collection-select').value));
   $('auth-form').addEventListener('submit', event => {
     event.preventDefault();
@@ -717,7 +762,7 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         $('create-form').reset();
         show('search');
         await refresh();
-      } catch (err) { error('create-error', err.message); }
+      } catch (err) { error('create-error', err.unreachable ? '' : err.message); }
     });
   });
   $('delete-form').addEventListener('submit', event => {
@@ -732,12 +777,13 @@ dialog::backdrop { background: rgba(0,0,0,.3); }
         $('delete-dialog').close();
         show('collections');
         await refresh();
-      } catch (err) { error('delete-error', err.message); }
+      } catch (err) { error('delete-error', err.unreachable ? '' : err.message); }
     });
   });
   $('scan-form').addEventListener('submit', event => { event.preventDefault(); scan(); });
   $('scan-next').addEventListener('click', () => scan(state.next));
   $('query-form').addEventListener('submit', event => { event.preventDefault(); query(); });
+  for (const id of ['query-text', 'query-vector']) $(id).addEventListener('input', () => growInput($(id)));
   $('query-text').addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('query-form').requestSubmit(); }
   });

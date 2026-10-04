@@ -67,6 +67,16 @@ async fn assert_console(app: &Router) {
     assert!(csp.contains("default-src 'none'"));
     assert!(csp.contains("connect-src 'self'"));
     assert!(body.contains("Glider"));
+    assert!(body.contains("viewBox=\"0 0 32 32\""));
+    assert!(body.contains("id=\"connection-notice\""));
+    assert!(body.contains("id=\"retry\""));
+    assert!(!body.contains("health-dot"));
+    assert!(!body.contains("Healthy"));
+    assert!(!body.contains("class=\"chip\""));
+    assert!(!body.contains("query-sequence"));
+    for heading in ["Search", "Browse", "Collections"] {
+        assert!(!body.contains(&format!("<h1>{heading}</h1>")));
+    }
     assert!(body.contains("data-query-mode=\"text\""));
     assert!(body.contains("Search in plain language…"));
     assert!(body.contains("GLIDER_EMBED_PROVIDER"));
