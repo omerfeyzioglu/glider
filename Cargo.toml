@@ -16,6 +16,8 @@ default = []
 s3 = ["dep:object_store", "dep:tokio", "dep:futures", "dep:async-trait"]
 # HTTP service binary over the segmented engine.
 server = ["s3", "dep:axum", "tokio/signal", "tokio/macros"]
+embed-local = ["server", "dep:fastembed"]
+embed-openai = ["server", "dep:reqwest"]
 
 [dependencies]
 object_store = { version = "0.14.1", default-features = false, features = ["aws"], optional = true }
@@ -29,6 +31,9 @@ thiserror = "2"
 getrandom = "0.2"
 zstd = { version = "0.13", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "original-uri"], optional = true }
+
+fastembed = { version = "=5.13.3", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"], optional = true }
 
 [dev-dependencies]
 bytes = "1"

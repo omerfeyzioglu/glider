@@ -1,5 +1,6 @@
 use super::{
     catalog::CreateCollection,
+    embedding::{Embedder, Kind},
     error::{bad_request, json_errors, ApiError},
     metrics::{
         cache_status, clustering_status, record_metrics, render_http_metrics, render_metrics,
@@ -65,6 +66,7 @@ struct AppState {
     client: Option<Client<Engine0>>,
     token: Option<Arc<str>>,
     metrics: Arc<HttpMetrics>,
+    embedder: Arc<Embedder>,
 }
 
 /// Run blocking admission work off the async executor.
@@ -207,7 +209,8 @@ async fn write(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryBody {
-    vector: Vec<f32>,
+    vector: Option<Vec<f32>>,
+    text: Option<String>,
     #[serde(default = "default_k")]
     k: usize,
     #[serde(default = "empty_filter")]
@@ -244,6 +247,22 @@ async fn query(
         return Err(bad_request("k must be between 1 and 1000"));
     }
     let filter = Filter::parse(&body.filter).map_err(bad_request)?;
+    let vector = match (body.vector, body.text) {
+        (Some(vector), None) => vector,
+        (None, Some(text)) => {
+            let embedded = state.embedder.embed(vec![text], Kind::Query).await?;
+            let vector = embedded.vectors.into_iter().next().unwrap();
+            let dimensions = client.config().dimensions;
+            if vector.len() != dimensions {
+                return Err(bad_request(format!(
+                    "embedding dimension {} differs from collection dimension {dimensions}",
+                    vector.len()
+                )));
+            }
+            vector
+        }
+        _ => return Err(bad_request("provide exactly one of vector or text")),
+    };
     let client = client.clone();
     blocking(move || {
         let options = QueryOptions {
@@ -251,7 +270,7 @@ async fn query(
             include_vector: body.include_vector,
         };
         let timed = client
-            .query_with_mode_filter(body.vector, body.k, filter, options, body.exact)?
+            .query_with_mode_filter(vector, body.k, filter, options, body.exact)?
             .wait()?;
         let server_ms = start.elapsed().as_secs_f64() * 1000.0;
         let mut response = json!({
@@ -454,7 +473,7 @@ async fn status(
     blocking(move || {
         let engine = client.metrics()?.wait()?.value;
         let queue = client.status();
-        Ok(Json(json!({
+        let mut response = json!({
             "sequence": engine.sequence,
             "queued_commands": queue.commands,
             "queued_bytes": queue.bytes,
@@ -463,7 +482,11 @@ async fn status(
             "maintenance_errors": queue.maintenance_errors,
             "cache": cache_status(&engine),
             "clustering": clustering_status(&engine),
-        })))
+        });
+        if !state.embedder.status().is_null() {
+            response["embedding"] = state.embedder.status();
+        }
+        Ok(Json(response))
     })
     .await
 }
@@ -499,6 +522,22 @@ async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
     .await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmbedBody {
+    input: Vec<String>,
+    #[serde(default)]
+    kind: Kind,
+}
+async fn embed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<EmbedBody>,
+) -> Result<Json<super::embedding::Embeddings>, ApiError> {
+    authorize(&state, &headers)?;
+    Ok(Json(state.embedder.embed(body.input, body.kind).await?))
+}
+
 fn data_routes() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
@@ -532,15 +571,27 @@ pub fn router_with_console(
     token: Option<String>,
     enabled: bool,
 ) -> Router {
+    router_with_embedder(client, token, enabled, Arc::new(Embedder::disabled()))
+}
+
+/// Configure a server-wide embedder independently of storage.
+pub fn router_with_embedder(
+    client: Client<Engine0>,
+    token: Option<String>,
+    enabled: bool,
+    embedder: Arc<Embedder>,
+) -> Router {
     let http_metrics = Arc::new(HttpMetrics::new());
     let state = AppState {
         client: Some(client),
         token: token.map(Arc::from),
         metrics: http_metrics.clone(),
+        embedder: embedder.clone(),
     };
     with_console(Router::new(), enabled)
         .route("/healthz", get(health))
         .route("/metrics", get(metrics))
+        .route("/v1/embed", post(embed))
         .nest(
             "/v1",
             data_routes().layer(middleware::from_fn_with_state(state.clone(), single_client)),
@@ -572,6 +623,7 @@ struct MultiState {
     manager: Multi,
     token: Option<Arc<str>>,
     metrics: Arc<HttpMetrics>,
+    embedder: Arc<Embedder>,
 }
 impl FromRef<MultiState> for AppState {
     fn from_ref(state: &MultiState) -> Self {
@@ -579,6 +631,7 @@ impl FromRef<MultiState> for AppState {
             client: None,
             token: state.token.clone(),
             metrics: state.metrics.clone(),
+            embedder: state.embedder.clone(),
         }
     }
 }
@@ -588,6 +641,7 @@ fn authorize_multi(state: &MultiState, headers: &HeaderMap) -> Result<(), ApiErr
             client: None,
             token: state.token.clone(),
             metrics: state.metrics.clone(),
+            embedder: state.embedder.clone(),
         },
         headers,
     )
@@ -619,7 +673,11 @@ async fn list_collections(
     for record in records {
         descriptions.push(record.description(state.manager.is_open(&record.name).await));
     }
-    Ok(Json(json!({"collections":descriptions})))
+    let mut response = json!({"collections":descriptions});
+    if !state.embedder.status().is_null() {
+        response["embedding"] = state.embedder.status();
+    }
+    Ok(Json(response))
 }
 async fn get_collection(
     State(state): State<MultiState>,
@@ -656,6 +714,10 @@ async fn get_collection(
         )
     })
     .await?;
+    let mut status = status;
+    if !state.embedder.status().is_null() {
+        status["embedding"] = state.embedder.status();
+    }
     let mut description = record.description(true);
     description
         .as_object_mut()
@@ -724,17 +786,29 @@ pub fn multi_router(manager: Multi, token: Option<String>) -> Router {
 
 /// Configure the public browser console independently of API authentication.
 pub fn multi_router_with_console(manager: Multi, token: Option<String>, enabled: bool) -> Router {
+    multi_router_with_embedder(manager, token, enabled, Arc::new(Embedder::disabled()))
+}
+
+/// Configure a shared embedder for all collections.
+pub fn multi_router_with_embedder(
+    manager: Multi,
+    token: Option<String>,
+    enabled: bool,
+    embedder: Arc<Embedder>,
+) -> Router {
     let http_metrics = Arc::new(HttpMetrics::new());
     let token = token.map(Arc::from);
     let state = AppState {
         client: None,
         token: token.clone(),
         metrics: http_metrics.clone(),
+        embedder: embedder.clone(),
     };
     let multi_state = MultiState {
         manager,
         token,
         metrics: http_metrics.clone(),
+        embedder: embedder.clone(),
     };
     let collection_routes =
         data_routes()
@@ -746,6 +820,7 @@ pub fn multi_router_with_console(manager: Multi, token: Option<String>, enabled:
     with_console(Router::new(), enabled)
         .route("/healthz", get(health))
         .route("/metrics", get(multi_metrics))
+        .route("/v1/embed", post(embed))
         .route("/v1/write", post(legacy_route))
         .route("/v1/query", post(legacy_route))
         .route("/v1/points/get", post(legacy_route))

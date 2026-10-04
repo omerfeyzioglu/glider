@@ -1364,6 +1364,11 @@ cache, warm-up, writer epoch and sketch values on the committer; `/v1/status` re
 the same cache warm-up state. Queue state is sampled separately;
 metrics are observational and do not change publication or recovery semantics.
 
+Embedding is an optional server-side convenience outside the storage engine.
+The server embeds query text before normal query admission; clients embed
+documents separately and write vectors. Stored and acknowledged data is
+always vectors; embedding changes no durability or recovery guarantees.
+
 ### Collection catalog and lifecycle
 
 With `GLIDER_DIMENSIONS` set, the server continues to use the configured base

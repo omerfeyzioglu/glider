@@ -16,6 +16,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Optional server-side local ONNX or OpenAI-compatible text embedding, global
+  `/v1/embed`, text queries, console Text/Vector mode and Python client support.
+
 - Built-in web console at `/console` for server status, collection management,
   point browsing and vector queries; set `GLIDER_CONSOLE=0` to disable it.
 - Optional query profiles report the executed search mode, latency, queue wait and remote I/O.

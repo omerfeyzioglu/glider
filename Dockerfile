@@ -6,7 +6,10 @@ COPY src ./src
 COPY benches ./benches
 COPY examples ./examples
 COPY tests ./tests
-RUN cargo build --locked --release --features server --bin glider-server --bin glider-admin
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo build --locked --release --features server,embed-local,embed-openai --bin glider-server --bin glider-admin
 
 FROM debian:bookworm-slim
 RUN apt-get update \

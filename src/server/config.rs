@@ -74,6 +74,8 @@ pub struct ServerConfig {
     pub token: Option<String>,
     /// Serve the built-in browser console on `/console` and redirect `/` to it.
     pub console: bool,
+    /// Optional server-wide text embedding; never changes stored data.
+    pub embedding: super::embedding::EmbedConfig,
     /// Writer lease duration: a restart after a crash waits at most this
     /// long before taking over. It never affects correctness.
     pub lease: Duration,
@@ -224,6 +226,8 @@ impl ServerConfig {
         if max_open_collections == 0 {
             return Err(invalid("GLIDER_MAX_OPEN_COLLECTIONS"));
         }
+        let embedding =
+            super::embedding::EmbedConfig::from_lookup(|name| std::env::var(name).ok(), &store)?;
         Ok(Self {
             listen: env("GLIDER_LISTEN")
                 .unwrap_or_else(|| "127.0.0.1:8080".into())
@@ -242,6 +246,7 @@ impl ServerConfig {
             },
             token: env("GLIDER_API_TOKEN"),
             console,
+            embedding,
             lease: match env("GLIDER_LEASE_SECONDS") {
                 Some(seconds) => seconds
                     .parse()

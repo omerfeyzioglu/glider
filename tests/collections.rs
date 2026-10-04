@@ -36,6 +36,7 @@ fn config(path: &Path, max: usize) -> ServerConfig {
         limits: Limits::default(),
         token: None,
         console: true,
+        embedding: Default::default(),
         lease: Duration::from_millis(100),
         multi: true,
         max_open_collections: max,

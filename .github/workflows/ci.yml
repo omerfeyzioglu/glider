@@ -53,6 +53,9 @@ jobs:
           node --check site/sim-view.mjs
           node --test site/sim-model.test.mjs
 
+      - name: Check server without embedding
+        run: cargo check --all-targets --locked --features server
+
       - name: Check S3 and segmented features
         run: |
           cargo clippy --all-targets --all-features --locked -- -D warnings
