@@ -287,16 +287,14 @@ impl Catalog {
         if generation_limit == 0 || object_limit == 0 {
             return Err(Error::Invalid("sweep limits must be positive".into()));
         }
-        let mut checked = 0;
         let mut removed = 0;
         let generations = self.base.data_generations()?;
         let start =
             generations.partition_point(|entry| after.as_ref().is_some_and(|after| entry <= after));
-        for (name, generation) in generations.into_iter().skip(start) {
+        for (checked, (name, generation)) in generations.into_iter().skip(start).enumerate() {
             if checked == generation_limit || removed == object_limit {
                 return Ok(());
             }
-            checked += 1;
             check_name(&name)?;
             if generation.len() != 32
                 || !generation
