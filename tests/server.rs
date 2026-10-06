@@ -375,6 +375,24 @@ fn every_error_response_is_json_with_an_unchanged_status() {
     };
     let json = Some("application/json");
     let cases = [
+        (
+            "POST",
+            "/v1/write",
+            json,
+            serde_json::to_vec(&serde_json::json!({
+                "delete": [1],
+                "request_id": {"boundary": 1, "nonce": format!("0é{}", "0".repeat(29))}
+            }))
+            .unwrap(),
+            400,
+        ),
+        (
+            "GET",
+            "/v1/requests/1/0%C3%A900000000000000000000000000000",
+            None,
+            Vec::new(),
+            400,
+        ),
         ("POST", "/v1/write", json, b"{not json".to_vec(), 400),
         (
             "POST",

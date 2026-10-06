@@ -114,7 +114,12 @@ impl RequestIdJson {
 
     fn to_id(&self) -> Result<RequestId, ApiError> {
         let invalid = || bad_request("request_id.nonce must be 32 lowercase hex digits");
-        if self.nonce.len() != 32 || self.nonce.bytes().any(|b| b.is_ascii_uppercase()) {
+        if self.nonce.len() != 32
+            || !self
+                .nonce
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(invalid());
         }
         let mut nonce = [0; 16];
