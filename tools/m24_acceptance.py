@@ -5,6 +5,10 @@ Loads the verified 250,000-row SIFT1M prefix, measures fresh readiness,
 static quality and independent read/write traffic in a new process, then
 verifies restart state, update-wave quality, cache loss and backup in another
 process. Gates are the M21 declarations; nothing here relaxes them.
+
+Optional soak flags revisit a fixed hot set with rotating deletions, stream
+queue/index/maintenance progress, sample current RSS, and SIGKILL the live
+service before clearing its cache and checking acknowledged state.
 """
 import argparse
 import hashlib
@@ -13,6 +17,8 @@ import os
 from pathlib import Path
 import platform
 import secrets
+import shutil
+import signal
 import tempfile
 import time
 
@@ -121,9 +127,21 @@ def main():
     parser.add_argument("--clustered", action="store_true",
                         help="convert to an M37 clustered view after load (GLIDER_M24_CLUSTERED=1)")
     parser.add_argument("--index-bytes", type=int, help="explicit write-admission watermark; default is the selected profile")
+    parser.add_argument("--delete-percent", type=int, default=0,
+                        help="deterministic delete fraction per batch; cohort rotates on revisit")
+    parser.add_argument("--hot-rows", type=int, help="IDs revisited across four disjoint writer subsets")
+    parser.add_argument("--soak-metrics", action="store_true",
+                        help="sample current RSS and stream engine/queue progress every 10 seconds")
+    parser.add_argument("--crash-after-serve", action="store_true",
+                        help="SIGKILL with service alive, then remove cache before full-state verification")
     args = parser.parse_args()
     if args.index_bytes is not None and args.index_bytes < 1:
         parser.error("--index-bytes must be positive")
+    if args.rounds < 1 or not 0 <= args.delete_percent < 100:
+        parser.error("--rounds must be positive and --delete-percent in 0..99")
+    hot = args.rows if args.hot_rows is None else args.hot_rows
+    if hot < 400 or hot > args.rows or hot % 400:
+        parser.error("--hot-rows must be a multiple of 400 within the dataset")
     envelope = ENVELOPES[args.rows]
     for name, expected in envelope["data"].items():
         if digest(args.data / name) != expected:
@@ -131,7 +149,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     # Identify the measured code before building it.
     sources = {path: digest(Path(path)) for path in (
-        "examples/m24_acceptance.rs", "src/segmented.rs", "src/segmented/sketch.rs",
+        "examples/m24_acceptance.rs", "tools/m24_acceptance.py", "tools/minio_harness.py",
+        "src/segmented.rs", "src/segmented/sketch.rs",
         "src/segmented/serving.rs", "src/segmented/cache.rs", "src/segmented/directory.rs",
         "src/segmented/clustered.rs", "src/segmented/convert.rs", "src/segmented/merge.rs",
         "src/admission.rs", "src/store.rs", "src/store/s3.rs")}
@@ -145,6 +164,16 @@ def main():
     if args.index_bytes is not None:
         env["GLIDER_M24_INDEX_BYTES"] = str(args.index_bytes)
     env.pop("GLIDER_M24_CLUSTERED", None)
+    for key in ("GLIDER_M24_DELETE_PERCENT", "GLIDER_M24_HOT_ROWS",
+                "GLIDER_M24_CRASH_AFTER_SERVE", "GLIDER_M24_PROGRESS_FILE"):
+        env.pop(key, None)
+    env["GLIDER_M24_DELETE_PERCENT"] = str(args.delete_percent)
+    env["GLIDER_M24_HOT_ROWS"] = str(hot)
+    if args.crash_after_serve:
+        env["GLIDER_M24_CRASH_AFTER_SERVE"] = "1"
+    progress_path = args.output.resolve() / "progress.jsonl"
+    if args.soak_metrics:
+        env["GLIDER_M24_PROGRESS_FILE"] = str(progress_path)
     if args.clustered:
         env["GLIDER_M24_CLUSTERED"] = "1"
     env.update(MINIO_ROOT_USER="glider-" + secrets.token_hex(8), MINIO_ROOT_PASSWORD=secrets.token_hex(24))
@@ -175,10 +204,13 @@ def main():
         load = json.loads(run(binary, "load", base, namespace, env=env, capture=True, timeout=1800))
         with tempfile.TemporaryDirectory(prefix="glider-m24-cache-") as cache:
             raw = run(binary, "serve", query, base, namespace, cache, oracle, str(args.rounds),
-                      env=env, capture=True, timeout=args.rounds + 1800)
+                      env=env, capture=True, timeout=args.rounds + 1800,
+                      expected_returncode=-signal.SIGKILL if args.crash_after_serve else 0)
             serve = json.loads(raw)
             serve_path = Path(cache) / "serve.json"
             serve_path.write_text(raw)
+            if args.crash_after_serve:
+                shutil.rmtree(Path(cache) / "glider-block-cache-v1", ignore_errors=False)
             usage = json.loads(run("docker", "exec", name, "mc", "du", "--json",
                                    f"test/glider-test/{namespace}", capture=True))
             verify = json.loads(run(binary, "verify", query, base, namespace, cache, str(serve_path),
@@ -190,6 +222,13 @@ def main():
     result = {
         "version": 1, "dataset": envelope["dataset"], "rows": args.rows, "dimensions": 128,
         "clustered": args.clustered,
+        "measurement_protocol": "m24-soak-v1" if
+        (args.soak_metrics or args.crash_after_serve or args.delete_percent or args.hot_rows is not None)
+        else "m24-acceptance",
+        "delete_percent": args.delete_percent, "hot_rows": hot,
+        "crash_after_serve": args.crash_after_serve,
+        "progress": [json.loads(line) for line in progress_path.read_text().splitlines()]
+        if args.soak_metrics else [],
         "index_bytes": args.index_bytes or (24 if args.rows == 250000 else 128) * MIB,
         "metric": "squared_euclidean", "k": 10, "filter": "cohort=one-percent (id % 100 == 0)",
         "backend": "loopback-minio", "minio_image": IMAGE, "dataset_sha256": envelope["data"],

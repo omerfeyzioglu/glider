@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BinaryHeap},
     env, fs,
+    io::Write as _,
     os::unix::fs::FileExt,
     path::PathBuf,
     sync::{
@@ -225,8 +226,74 @@ fn vector(base: &Rows, id: u64, generation: u64) -> Result<Vec<f32>> {
 
 /// Writer c, round r overwrites 100 IDs in its own quarter with generation r+1.
 fn batch_ids(client: u64, round: u64) -> impl Iterator<Item = u64> {
-    let slot = round % (rows() / 4 / 100);
+    batch_ids_with_hot(client, round, hot_rows())
+}
+
+fn hot_rows() -> u64 {
+    env::var("GLIDER_M24_HOT_ROWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(rows())
+}
+
+fn batch_ids_with_hot(client: u64, round: u64, hot: u64) -> impl Iterator<Item = u64> {
+    let slot = round % (hot / 4 / 100);
     (0..100).map(move |n| client * (rows() / 4) + slot * 100 + n)
+}
+
+fn delete_percent() -> Result<u64> {
+    let percent = env::var("GLIDER_M24_DELETE_PERCENT")
+        .unwrap_or_else(|_| "0".into())
+        .parse::<u64>()?;
+    if percent >= 100 {
+        return Err("delete percent must be in 0..99".into());
+    }
+    Ok(percent)
+}
+
+fn deletes(id: u64, round: u64, percent: u64, hot: u64) -> bool {
+    // Rotate the deleted cohort on each revisit so later rounds reinsert it.
+    (id % 100 + 17 * (round / (hot / 400)) % 100) % 100 < percent
+}
+
+fn acknowledged_state(report: &Value, percent: u64) -> Result<BTreeMap<u64, (u64, bool)>> {
+    let mut state = BTreeMap::new();
+    let hot = report["hot_rows"].as_u64().unwrap_or(rows());
+    if hot < 400 || hot > rows() || !hot.is_multiple_of(400) {
+        return Err("hot rows must be a multiple of 400 within the dataset".into());
+    }
+    for pair in report["acknowledged_batches"]
+        .as_array()
+        .ok_or("missing batches")?
+    {
+        let (writer, round) = (
+            pair[0].as_u64().ok_or("invalid writer")?,
+            pair[1].as_u64().ok_or("invalid round")?,
+        );
+        for id in batch_ids_with_hot(writer, round, hot) {
+            let previous = state.insert(id, (round + 1, deletes(id, round, percent, hot)));
+            if previous.is_some_and(|(generation, _)| generation > round + 1) {
+                return Err("overwrite rounds are not monotonic".into());
+            }
+        }
+    }
+    Ok(state)
+}
+
+fn current_rss() -> Option<u64> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|kib| kib * 1024)
 }
 
 fn rss() -> u64 {
@@ -541,7 +608,15 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for Profiled<S> {
         result
     }
     fn metrics(&self) -> glider::Result<glider::admission::EngineMetrics> {
-        self.inner.metrics()
+        let mut metrics = self.inner.metrics()?;
+        metrics.samples.extend([
+            (
+                "probe_tail_objects",
+                self.inner.database().tail_objects() as u64,
+            ),
+            ("probe_runs", self.inner.database().run_count() as u64),
+        ]);
+        Ok(metrics)
     }
     fn idle_step(&mut self) -> glider::Result<bool> {
         let peak = peak_footprint().unwrap_or(0);
@@ -678,6 +753,21 @@ fn serve(args: &[String]) -> Result<Value> {
         Some(serde_json::from_slice(&fs::read(oracle)?)?)
     };
     let rounds: u64 = rounds.parse()?;
+    let delete_percent = delete_percent()?;
+    let hot = hot_rows();
+    if hot < 400 || hot > rows() || !hot.is_multiple_of(400) {
+        return Err("hot rows must be a multiple of 400 within the dataset".into());
+    }
+    let crash = env::var("GLIDER_M24_CRASH_AFTER_SERVE").is_ok_and(|v| v == "1");
+    let progress = env::var("GLIDER_M24_PROGRESS_FILE")
+        .ok()
+        .map(|path| {
+            fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(path)
+        })
+        .transpose()?;
     let rss_before_open = rss();
     let (mut db, handles, open) = open_serving(namespace, Some(PathBuf::from(cache)), true)?;
     let rss_after_open = rss();
@@ -729,6 +819,9 @@ fn serve(args: &[String]) -> Result<Value> {
                     }
                     let mutations = batch_ids(writer, round)
                         .map(|id| {
+                            if deletes(id, round, delete_percent, hot) {
+                                return Ok(Mutation::Delete { id });
+                            }
                             Ok(Mutation::Put {
                                 id,
                                 vector: vector(&base, id, round + 1)?,
@@ -831,13 +924,39 @@ fn serve(args: &[String]) -> Result<Value> {
     let sampler_stop = Arc::new(AtomicU64::new(0));
     let sampler = {
         let stop = sampler_stop.clone();
-        std::thread::spawn(move || {
+        let client = client.clone();
+        std::thread::spawn(move || -> Result<_> {
             let mut series = Vec::new();
+            let mut current = Vec::new();
+            let mut progress = progress;
+            let mut last_probe = Instant::now() - Duration::from_secs(10);
             while stop.load(Ordering::Acquire) == 0 {
                 std::thread::sleep(Duration::from_secs(1));
                 series.push(rss());
+                if let Some(file) = &mut progress {
+                    let resident = current_rss();
+                    current.push(resident);
+                    if last_probe.elapsed() >= Duration::from_secs(10) {
+                        let status = client.status();
+                        let metrics = match client.metrics() {
+                            Ok(ticket) => Some(ticket.wait()?.value),
+                            Err(glider::admission::Error::Overloaded) => None,
+                            Err(error) => return Err(error.into()),
+                        };
+                        let record = json!({"elapsed_seconds":began.elapsed().as_secs_f64(),
+                            "current_rss_bytes":resident,"peak_rss_bytes":rss(),
+                            "commands":status.commands,"admitted_bytes":status.bytes,
+                            "maintenance_errors":status.maintenance_errors,
+                            "probe_overloaded":metrics.is_none(),
+                            "sequence":metrics.as_ref().map(|m|m.sequence),
+                            "engine_metrics":metrics.map(|m|m.samples)});
+                        writeln!(file, "{}", serde_json::to_string(&record)?)?;
+                        file.flush()?;
+                        last_probe = Instant::now();
+                    }
+                }
             }
-            series
+            Ok((series, current))
         })
     };
     let (mut writes, mut queries_done) = (Vec::new(), Vec::new());
@@ -859,7 +978,7 @@ fn serve(args: &[String]) -> Result<Value> {
     }
     let elapsed = began.elapsed().as_secs_f64();
     sampler_stop.store(1, Ordering::Release);
-    let rss_series = sampler.join().map_err(|_| "sampler panic")?;
+    let (rss_series, current_rss_series) = sampler.join().map_err(|_| "sampler panic")??;
     let idle = client.idle_maintenance_samples();
     let status = client.status();
     let after = handles.metrics.snapshot();
@@ -876,7 +995,9 @@ fn serve(args: &[String]) -> Result<Value> {
         .collect();
     let engine_metrics = client.metrics()?.wait()?.value;
     let peak_rss_bytes = rss();
-    service.shutdown(Shutdown::Drain)?;
+    if !crash {
+        service.shutdown(Shutdown::Drain)?;
+    }
     let classes = |filtered: Option<bool>, remote: Option<bool>, field: fn(&QueryEvent) -> f64| {
         stats(
             queries_done
@@ -889,8 +1010,7 @@ fn serve(args: &[String]) -> Result<Value> {
     };
     let mut acknowledged = acknowledged.lock().unwrap().clone();
     acknowledged.sort_unstable();
-    Ok(
-        json!({"rounds":rounds,"clustered":clustered(),"open":open,"static_quality":static_quality,
+    let mut report = json!({"rounds":rounds,"clustered":clustered(),"open":open,"static_quality":static_quality,
         "offered":{"write_batches":rounds*4,"logical_mutations":rounds*400,"queries":rounds*40},
         "acknowledged":{"write_batches":writes.len(),"queries":queries_done.len()},
         "overloaded":{"writes":losses[0],"queries":losses[2]},
@@ -925,8 +1045,26 @@ fn serve(args: &[String]) -> Result<Value> {
         "peak_rss_per_second":rss_series,
         "peak_rss_stages":{"before_open":rss_before_open,"after_open":rss_after_open,
             "after_static_quality":rss_after_static},
-        "acknowledged_batches":acknowledged}),
-    )
+    "acknowledged_batches":acknowledged});
+    report["delete_percent"] = json!(delete_percent);
+    report["hot_rows"] = json!(hot);
+    report["termination"] = json!(if crash { "SIGKILL" } else { "graceful" });
+    report["current_rss_per_second"] = json!(current_rss_series);
+    report["retained_event_storage_floor_bytes"] = json!(
+        writes.len() * std::mem::size_of::<Write>()
+            + queries_done.len() * std::mem::size_of::<QueryEvent>()
+    );
+    if crash {
+        // Emit the completed acknowledgement oracle while the service is still
+        // alive; maintenance may be in flight. No drain or destructor runs.
+        println!("{}", serde_json::to_string(&report)?);
+        std::io::stdout().flush()?;
+        unsafe {
+            libc::kill(std::process::id() as i32, libc::SIGKILL);
+        }
+        return Err("SIGKILL did not terminate the process".into());
+    }
+    Ok(report)
 }
 
 struct TopK {
@@ -944,19 +1082,10 @@ fn verify(args: &[String]) -> Result<Value> {
     let queries = Rows::open(queries)?;
     let base = Rows::open(base)?;
     let report: Value = serde_json::from_slice(&fs::read(serve_report)?)?;
-    let mut generation = BTreeMap::new();
-    for pair in report["acknowledged_batches"]
-        .as_array()
-        .ok_or("missing batches")?
-    {
-        let (writer, round) = (pair[0].as_u64().unwrap(), pair[1].as_u64().unwrap());
-        for id in batch_ids(writer, round) {
-            let previous = generation.insert(id, round + 1).unwrap_or(0);
-            if previous > round + 1 {
-                return Err("overwrite rounds are not monotonic".into());
-            }
-        }
-    }
+    let delete_percent = report["delete_percent"].as_u64().unwrap_or(0);
+    let generation = acknowledged_state(&report, delete_percent)?;
+    let expected_documents =
+        rows() - generation.values().filter(|(_, deleted)| *deleted).count() as u64;
     let cache = PathBuf::from(cache);
     let (db, _handles, reopen) = open_serving(namespace, Some(cache.clone()), true)?;
     // One authenticated scan checks every acknowledged value and computes
@@ -975,9 +1104,10 @@ fn verify(args: &[String]) -> Result<Value> {
     let mut mismatches = 0_u64;
     db.database().scan_live(|id, vector, found| {
         seen += 1;
-        let expected = self::vector(&base, id, generation.get(&id).copied().unwrap_or(0))
+        let (version, deleted) = generation.get(&id).copied().unwrap_or((0, false));
+        let expected = self::vector(&base, id, version)
             .map_err(|error| glider::Error::Invalid(error.to_string()))?;
-        if vector != expected.as_slice() || *found != metadata(id) {
+        if deleted || id >= rows() || vector != expected.as_slice() || *found != metadata(id) {
             mismatches += 1;
         }
         for oracle in &mut oracles {
@@ -1181,7 +1311,8 @@ fn verify(args: &[String]) -> Result<Value> {
     db.close()?;
     Ok(
         json!({"clustered":clustered(),"reopen":reopen,"scan_ms":scan_ms,"live_documents":seen,
-        "expected_documents":rows(),"value_mismatches":mismatches,
+        "expected_documents":expected_documents,"value_mismatches":mismatches,
+        "expected_deleted_ids":rows()-expected_documents,
         "overwritten_ids":generation.len(),"update_wave_quality":quality_cold,
         "unfiltered_mean_recall_by_block_budget":budgets,"warm_up":warm_up,
         "update_wave_quality_warm":quality_warm,
@@ -1272,6 +1403,39 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acknowledged_delete_reinsert_oracle_ignores_unacknowledged_rounds() {
+        let report = json!({"hot_rows":400,"acknowledged_batches":[[0,0],[0,1]]});
+        let state = acknowledged_state(&report, 10).unwrap();
+        assert_eq!(state[&0], (2, false)); // Deleted, then reinserted.
+        assert_eq!(state[&83], (2, true)); // Put, then deleted.
+        assert_eq!(state.len(), 100);
+        let rejected_second = json!({"hot_rows":400,"acknowledged_batches":[[0,0]]});
+        let state = acknowledged_state(&rejected_second, 10).unwrap();
+        assert_eq!(state[&0], (1, true));
+        assert_eq!(state[&83], (1, false));
+        let unordered = json!({"hot_rows":400,"acknowledged_batches":[[0,1],[0,0]]});
+        assert!(acknowledged_state(&unordered, 10).is_err());
+    }
+
+    #[test]
+    fn mixed_batches_have_exact_delete_fraction_and_disjoint_writer_ids() {
+        for round in [0, 1, 250, 500, 1750] {
+            let mut all = std::collections::BTreeSet::new();
+            for writer in 0..4 {
+                let ids: Vec<_> = batch_ids_with_hot(writer, round, 100_000).collect();
+                assert_eq!(
+                    ids.iter()
+                        .filter(|&&id| deletes(id, round, 10, 100_000))
+                        .count(),
+                    10
+                );
+                assert!(ids.into_iter().all(|id| all.insert(id)));
+            }
+            assert_eq!(all.len(), 400);
+        }
+    }
 
     #[derive(Clone, Default)]
     struct Memory(Arc<Mutex<BTreeMap<String, Vec<u8>>>>);
