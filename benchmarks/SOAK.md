@@ -71,3 +71,14 @@ On hosts without `caffeinate`, prevent host/VM sleep using the host's normal
 power controls. Use a fresh output directory. Dataset/oracle and source hashes,
 Git revision, compiler, hardware, the full progress trace and all gates are
 recorded with the result.
+
+Summarize five-minute trace windows and the descriptive current-RSS trend:
+
+```sh
+python3 tools/soak_summary.py target/soak-new/run.json
+```
+
+The trend is ordinary least squares of current MiB against elapsed minutes,
+using ten-second observations at or after minute 10. Missing probes stay unknown,
+window boundaries are half-open, and the summary preserves every failed historical
+gate. It introduces no new stability threshold or longer-duration extrapolation.
