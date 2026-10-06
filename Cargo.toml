@@ -88,3 +88,7 @@ required-features = ["server"]
 [[bin]]
 name = "glider-admin"
 required-features = ["server"]
+
+[[example]]
+name = "catalog_sweep_seed"
+required-features = ["server"]
