@@ -198,17 +198,6 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
             config.console,
             embedder,
         );
-        let sweeper = multi.clone();
-        let sweep_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            interval.tick().await; // Multi::new starts the first sweep.
-            loop {
-                interval.tick().await;
-                if let Err(error) = sweeper.sweep().await {
-                    eprintln!("collection orphan sweep failed: {error}");
-                }
-            }
-        });
         let served = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let interrupt = tokio::signal::ctrl_c();
@@ -225,7 +214,6 @@ pub async fn run(config: ServerConfig) -> crate::Result<()> {
                 }
             })
             .await;
-        sweep_task.abort();
         let stopped = multi.shutdown().await;
         served?;
         return stopped;

@@ -1411,7 +1411,17 @@ still complete and must be resolved through a fresh catalog read. A crash before
 publication leaves the preceding state; after it, recovery selects the complete
 state, including a publication with a lost response. The server removes the old
 data generation as best effort; a crash can leave unreachable objects. A
-background sweep rechecks authoritative state before generation removal.
+single background sweeper starts without delaying serving and runs every 60
+seconds, skipping missed ticks. Each batch checks at most 64 data generations
+and deletes at most 64 objects; a cursor resumes partial generations and wraps
+so new earlier names are eventually visited. Checks read authoritative per-name
+state directly, without loading every catalog entry. Deletion cleans only its
+own generation instead of triggering another global scan. Discovery still lists
+the complete data prefix, and listing an orphan still inventories its keys:
+LIST pages, discovery memory and wall-clock time are not bounded by these
+budgets. Large orphan backlogs therefore take more batches to drain. The explicit
+library sweep remains a complete synchronous sweep. Every batch rechecks
+authoritative state before generation removal.
 Data keys and catalog history slots are never reused. Serving and recovery do
 not depend on data cleanup. Tombstones and older states are retained permanently:
 each delete/recreate adds one small object and per-name history listing grows

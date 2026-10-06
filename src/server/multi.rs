@@ -93,11 +93,22 @@ impl Multi {
         let mut sweep_stopped = multi.inner.idle_stop.subscribe();
         let sweep_task = runtime.spawn(async move {
             let mut ticks = tokio::time::interval(Duration::from_secs(60));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut after = None;
             loop {
                 tokio::select! {
                     _ = ticks.tick() => {
                         let Some(inner) = weak.upgrade() else { break };
-                        if let Err(error) = (Multi { inner }).sweep().await {
+                        let base = inner.config.store.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            let result = Catalog::new(base).sweep_batch(&mut after, 64, 64);
+                            (after, result)
+                        }).await;
+                        let error = match result {
+                            Ok((cursor, result)) => { after = cursor; result.err() }
+                            Err(error) => { after = None; Some(Error::Invalid(error.to_string())) }
+                        };
+                        if let Some(error) = error {
                             eprintln!("collection orphan sweep failed: {error}");
                         }
                     }
@@ -385,7 +396,6 @@ impl Multi {
             }
             // A failed cleanup leaves an invisible orphan for the next sweep.
             let _ = catalog.remove_data(&record);
-            let _ = catalog.sweep();
             Ok::<(), Error>(())
         })
         .await
