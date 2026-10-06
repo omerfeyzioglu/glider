@@ -7,8 +7,10 @@ and the pinned disposable MinIO image. No AWS requests were made.
 The full Rust release/server run at `23df585` passed 295 tests (34 ignored).
 The final MinIO runner passed 32 checks in eight suites, including abrupt server
 restart and the pinned conditional-DELETE capability test. Python: 66
-passed. Formatting and release/server Clippy with all targets and warnings as
-errors passed. Optional embedding providers and AWS/1M-scale workloads were not
+passed; the Python client suite additionally passed 81 tests (17 integration
+tests skipped). Formatting, default Clippy and release/server Clippy with all
+targets and warnings as errors passed. Generated benchmark summaries and local
+documentation links also checked successfully. Optional embedding providers and AWS/1M-scale workloads were not
 exercised by this change.
 
 ## Cleanup requests
