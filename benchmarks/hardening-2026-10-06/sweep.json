@@ -1,0 +1,41 @@
+{
+  "environment": "macOS-26.6.2-arm64-arm-64bit",
+  "minio_image": "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9",
+  "fixture": {
+    "active_generations": 100,
+    "orphan_generations": 100,
+    "objects_per_generation": 1,
+    "dimensions": 128,
+    "seed": "deterministic ascending names and generation IDs"
+  },
+  "measurement": "62 seconds from process spawn, includes startup and first minute tick; setup excluded",
+  "runs": [
+    {
+      "phase": "before",
+      "binary_sha256": "a2350735880a9e4b83bd9c6425400999a37a699f0d14c425cd1bd5b4745707df",
+      "elapsed_s": 62.122152416000006,
+      "requests": {
+        "list_catalog": 3,
+        "get_catalog": 400,
+        "list_data": 103,
+        "delete_data": 100
+      }
+    },
+    {
+      "phase": "after",
+      "binary_sha256": "831da5c94a3b908501468f921597744a757a5d5750e059047c3cf54faca18f6d",
+      "elapsed_s": 62.186874042,
+      "requests": {
+        "list_data": 30,
+        "get_catalog": 128,
+        "list_history": 100,
+        "delete_data": 28
+      }
+    }
+  ],
+  "source_refs": {
+    "before": "10aa3ad",
+    "after": "396d1c3"
+  },
+  "limitations": "Counts include fewer orphan deletions after bounding (28 vs 100 in 62 seconds); this measures the rate limit, not equal-work throughput. Full data LIST discovery remains unbounded."
+}

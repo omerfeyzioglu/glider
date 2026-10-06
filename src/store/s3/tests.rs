@@ -1504,6 +1504,46 @@ fn minio_late_catalog_tombstone_cannot_replace_recreated_state() {
         recreated
     );
 }
+
+/// Pin the observed reason that catalog deletion uses immutable PUT slots.
+/// This is a capability regression for tools/test_s3.py's pinned image,
+/// not a conditional-delete requirement on arbitrary S3 providers.
+#[test]
+#[ignore = "requires the pinned disposable MinIO from tools/test_s3.py"]
+fn minio_presigned_delete_ignores_if_match_in_the_pinned_fixture() {
+    use object_store::{client::HttpRequestBody, signer::Signer};
+    let store = minio("delete-precondition-capability");
+    store
+        .create("object", b"must survive a conditional mismatch")
+        .unwrap();
+    let method = "DELETE".parse().unwrap();
+    let url = store
+        .run(store.remote.signed_url(
+            method,
+            &store.path("object").unwrap(),
+            std::time::Duration::from_secs(60),
+        ))
+        .unwrap();
+    let mut request = HttpRequest::new(HttpRequestBody::empty());
+    *request.method_mut() = "DELETE".parse().unwrap();
+    *request.uri_mut() = url.as_str().parse().unwrap();
+    request
+        .headers_mut()
+        .insert("if-match", "\"never-the-object-etag\"".parse().unwrap());
+    let client = ReqwestConnector::default()
+        .connect(&ClientOptions::new().with_allow_http(true))
+        .unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    let response = rt
+        .block_on(client.execute(request))
+        .unwrap_or_else(|_| panic!("capability request failed"));
+    assert_eq!(
+        response.status(),
+        204,
+        "fixture capability changed; reassess the documented alternative"
+    );
+    assert_eq!(store.get("object").unwrap(), None);
+}
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_delayed_delete_never_targets_a_new_authoritative_object() {
