@@ -65,6 +65,7 @@ def gates(load, serve, verify, visible_bytes, envelope):
         "cache_occupancy_le_256MiB": serve["cache"]["nvme_bytes"] <= 256 * MIB,
         "zero_lost_acknowledged_writes": verify["value_mismatches"] == 0
         and verify["live_documents"] == verify["expected_documents"],
+        "zero_capacity_rejections": serve.get("capacity_rejected_writes", 0) == 0,
         "zero_overload": serve["overloaded"]["writes"] == 0 and serve["overloaded"]["queries"] == 0,
         "zero_late_skips": serve["late_slots_skipped"]["writes"] == 0
         and serve["late_slots_skipped"]["queries"] == 0,
@@ -119,7 +120,10 @@ def main():
     parser.add_argument("--rows", type=int, default=250000, choices=sorted(ENVELOPES))
     parser.add_argument("--clustered", action="store_true",
                         help="convert to an M37 clustered view after load (GLIDER_M24_CLUSTERED=1)")
+    parser.add_argument("--index-bytes", type=int, help="explicit write-admission watermark; default is the selected profile")
     args = parser.parse_args()
+    if args.index_bytes is not None and args.index_bytes < 1:
+        parser.error("--index-bytes must be positive")
     envelope = ENVELOPES[args.rows]
     for name, expected in envelope["data"].items():
         if digest(args.data / name) != expected:
@@ -137,6 +141,9 @@ def main():
     oracle = envelope["oracle"]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "GLIDER_S3_", "MINIO_"))}
     env["GLIDER_M24_ROWS"] = str(args.rows)
+    env.pop("GLIDER_M24_INDEX_BYTES", None)
+    if args.index_bytes is not None:
+        env["GLIDER_M24_INDEX_BYTES"] = str(args.index_bytes)
     env.pop("GLIDER_M24_CLUSTERED", None)
     if args.clustered:
         env["GLIDER_M24_CLUSTERED"] = "1"
@@ -183,6 +190,7 @@ def main():
     result = {
         "version": 1, "dataset": envelope["dataset"], "rows": args.rows, "dimensions": 128,
         "clustered": args.clustered,
+        "index_bytes": args.index_bytes or (24 if args.rows == 250000 else 128) * MIB,
         "metric": "squared_euclidean", "k": 10, "filter": "cohort=one-percent (id % 100 == 0)",
         "backend": "loopback-minio", "minio_image": IMAGE, "dataset_sha256": envelope["data"],
         "oracle": oracle, "oracle_sha256": digest(Path(oracle)),

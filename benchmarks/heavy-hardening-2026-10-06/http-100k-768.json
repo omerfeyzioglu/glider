@@ -1,0 +1,94 @@
+{
+  "auto_cluster_rows": 0,
+  "backend": "loopback-minio",
+  "batch": 100,
+  "dimensions": 768,
+  "environment": "macOS-26.6.2-arm64-arm-64bit",
+  "git_revision": "687250c96364ea09b5403a318f073207ff5c62c6",
+  "index_bytes": 134217728,
+  "local_blocks": 0,
+  "minio_image": "ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9",
+  "passed": true,
+  "phases": [
+    {
+      "checked_ids": 50000,
+      "live": 50000,
+      "phase": "ingest_sigkill_cache_loss",
+      "restart_seconds": 1.6640644579999986,
+      "seconds": 23.069571999999994,
+      "vector_metadata_mismatches": 0
+    },
+    {
+      "acknowledged_batches": 1000,
+      "p50_ms": 35.233292000000915,
+      "p95_ms": 47.6932500000018,
+      "p99_ms": 59.46254200000567,
+      "phase": "load",
+      "seconds": 83.836093416
+    },
+    {
+      "phase": "mixed",
+      "reads": [
+        {
+          "http_429": 0,
+          "p50_ms": 50.25324999999725,
+          "p95_ms": 90.61375000001703,
+          "p99_ms": 107.38804200002505,
+          "queries": 2075
+        },
+        {
+          "http_429": 0,
+          "p50_ms": 51.573666999985335,
+          "p95_ms": 89.73904199999083,
+          "p99_ms": 103.49787500001639,
+          "queries": 2070
+        }
+      ],
+      "seconds": 120.13959700000001,
+      "writes": [
+        {
+          "acknowledged_batches": 838,
+          "http_429": 0,
+          "p50_ms": 98.43637500000568,
+          "p95_ms": 170.00666699999556,
+          "p99_ms": 212.81062500000303
+        },
+        {
+          "acknowledged_batches": 835,
+          "http_429": 0,
+          "p50_ms": 98.55008400000997,
+          "p95_ms": 168.1872080000062,
+          "p99_ms": 217.54404099999647
+        }
+      ]
+    },
+    {
+      "checked_ids": 100000,
+      "exact_top10_queries_preserved": 5,
+      "live": 92014,
+      "phase": "mixed_sigkill_cache_loss",
+      "restart_seconds": 1.9950040410000156,
+      "seconds": 52.14751041700001,
+      "vector_metadata_mismatches": 0
+    }
+  ],
+  "protocol": "hardening-http-v1",
+  "readers": 2,
+  "rows": 100000,
+  "rss_note": "RSS sampled with ps every second; includes server only, not an exact peak",
+  "sample_recall_at_10": [
+    0.7,
+    0.8,
+    0.8,
+    0.8,
+    0.9
+  ],
+  "sampled_server_peak_rss_bytes": 166854656,
+  "seconds": 120,
+  "seed": 42,
+  "server_sha256": "39d9fbdf36c6c6a970bb28e081cff346c145126d980310ceaad63c77b6d076d8",
+  "source_sha256": "1891c95e63cab0f85e3083e9bf6f46d7c0d6926233dfca6bf1cce5caceae1399",
+  "startup_seconds": 0.5929779170000002,
+  "version": 1,
+  "writers": 2
+}
