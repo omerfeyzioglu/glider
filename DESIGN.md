@@ -608,13 +608,14 @@ puts; packing sharing is credited only after sealing. A put exceeding the
 watermark returns `CapacityExceeded`/HTTP 429, consumes no sequence or retry receipt and
 publishes nothing. Retained duplicates, conditional conflicts and delete-only
 requests still resolve normally. Pressure starts a seal below the normal log
-threshold so deletes and packing can release routing reservations. While pressure remains, each write group
-advances one bounded maintenance unit before its decision, even with a full
-queue; otherwise rejected puts would never reach the hard log-tail bound and
-could starve capacity recovery. The pressure latch survives seal planning until
+threshold so deletes and packing can release routing reservations. While
+pressure remains, each write group with a new request advances one bounded
+maintenance unit before its decision, even with a full queue; otherwise rejected
+puts would never reach the hard log-tail bound and could starve capacity recovery. The pressure latch survives seal planning until
 the seal publishes. This work is charged as command maintenance and can add
-one unit's latency to a pressured write; ordinary admission adds no unit. The
-unbounded raw segmented library path keeps its existing behavior.
+one unit's latency to a pressured write; ordinary admission and groups consisting
+only of retained retries add no unit. The unbounded raw segmented library path
+keeps its existing behavior.
 
 Recovery never rejects already-durable data solely for exceeding this watermark:
 reads, retained retries and deletes remain available while new puts are refused.

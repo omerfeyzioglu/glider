@@ -399,6 +399,54 @@ fn index_reservation_keeps_versions_displaced_by_a_staged_seal() {
     assert!(engine.database().get(3).unwrap().is_some());
 }
 
+#[test]
+fn retained_retry_does_not_schedule_pressure_maintenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut limits = serving(&temp.path().join("cache"));
+    limits.cache = None;
+    limits.max_index_bytes = 4096;
+    limits.seal_tail_objects = 32;
+    let mut engine = SegmentedServing::open(
+        LocalStore::open(temp.path()).unwrap(),
+        config(),
+        SegmentedOptions::default(),
+        limits,
+    )
+    .unwrap();
+    let make = |nonce, ids: Vec<u64>| Request {
+        id: RequestId {
+            boundary: 1,
+            nonce: [nonce; 16],
+        },
+        conditions: vec![],
+        mutations: ids
+            .into_iter()
+            .map(|id| Mutation::Put {
+                id,
+                vector: vector(id, 0),
+                metadata: BTreeMap::new(),
+            })
+            .collect(),
+    };
+    let first = make(1, vec![1, 2]);
+    let ack = engine.apply_request(first.clone()).unwrap();
+    assert!(matches!(
+        engine.apply_request(make(2, vec![3])),
+        Err(glider::Error::CapacityExceeded(_))
+    ));
+    for _ in 0..3 {
+        assert_eq!(engine.apply_request(first.clone()).unwrap(), ack);
+        assert_eq!(
+            engine.apply_requests(vec![first.clone()])[0]
+                .as_ref()
+                .unwrap(),
+            &ack
+        );
+    }
+    assert_eq!(engine.counters().seal_starts, 0);
+    assert_eq!(engine.maintenance_time(), Duration::ZERO);
+}
+
 /// Keep a successor queued at every write boundary, so idle maintenance
 /// cannot make the conservative tail reservations fit by accident.
 #[test]
