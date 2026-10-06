@@ -130,6 +130,20 @@ impl Collection {
 pub struct Catalog {
     base: StoreConfig,
 }
+/// Full state at an immutable per-name sequence. Conditional create of the
+/// next slot is the compare-and-append decision, including deletion.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogState {
+    version: u8,
+    sequence: u64,
+    collection: Option<Collection>,
+}
+
+fn state_key(sequence: u64) -> String {
+    format!("state-{sequence:020}")
+}
+
 impl Catalog {
     pub fn new(base: StoreConfig) -> Self {
         Self { base }
@@ -137,15 +151,59 @@ impl Catalog {
     fn store(&self) -> Result<super::Store> {
         self.base.child("catalog").open()
     }
-    pub fn get(&self, name: &str) -> Result<Option<Collection>> {
+    fn history(&self, name: &str) -> Result<super::Store> {
+        self.base.child(&format!("catalog-history/{name}")).open()
+    }
+    fn read_state(&self, name: &str, initial: Collection) -> Result<(Option<Collection>, u64)> {
+        let history = self.history(name)?;
+        let mut keys = history.list()?;
+        keys.sort();
+        for (index, key) in keys.iter().enumerate() {
+            if key != &state_key(index as u64 + 1) {
+                return Err(Error::Corrupt(format!("invalid catalog history: {name}")));
+            }
+        }
+        let sequence = keys.len() as u64;
+        let Some(key) = keys.last() else {
+            return Ok((Some(initial), 0));
+        };
+        let bytes = history
+            .get(key)?
+            .ok_or_else(|| Error::Corrupt(format!("missing catalog state: {name}")))?;
+        let state: CatalogState = serde_json::from_slice(&bytes)
+            .map_err(|error| Error::Corrupt(format!("catalog history {name}: {error}")))?;
+        if state.version != 1 || state.sequence != sequence {
+            return Err(Error::Corrupt(format!("invalid catalog state: {name}")));
+        }
+        if let Some(value) = &state.collection {
+            value.validate(name)?;
+        }
+        Ok((state.collection, sequence))
+    }
+    fn observed(&self, name: &str) -> Result<(Option<Collection>, u64)> {
         check_name(name)?;
         let Some(bytes) = self.store()?.get(name)? else {
-            return Ok(None);
+            return Ok((None, 0));
         };
-        let value: Collection = serde_json::from_slice(&bytes)
+        let initial: Collection = serde_json::from_slice(&bytes)
             .map_err(|error| Error::Corrupt(format!("catalog {name}: {error}")))?;
-        value.validate(name)?;
-        Ok(Some(value))
+        initial.validate(name)?;
+        self.read_state(name, initial)
+    }
+    fn append(&self, name: &str, sequence: u64, collection: Option<Collection>) -> Result<()> {
+        let sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("catalog sequence exhausted".into()))?;
+        let bytes = serde_json::to_vec(&CatalogState {
+            version: 1,
+            sequence,
+            collection,
+        })
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+        self.history(name)?.create(&state_key(sequence), &bytes)
+    }
+    pub fn get(&self, name: &str) -> Result<Option<Collection>> {
+        self.observed(name).map(|(value, _)| value)
     }
     pub fn list(&self) -> Result<Vec<Collection>> {
         let store = self.store()?;
@@ -160,38 +218,50 @@ impl Catalog {
             let value: Collection = serde_json::from_slice(&bytes)
                 .map_err(|error| Error::Corrupt(format!("catalog {key}: {error}")))?;
             value.validate(&key)?;
-            result.push(value);
+            if let Some(current) = self.read_state(&key, value)?.0 {
+                result.push(current);
+            }
         }
         result.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(result)
     }
     pub fn create(&self, request: CreateCollection) -> Result<(Collection, bool)> {
         let value = request.normalize()?;
+        let (existing, sequence) = self.observed(&value.name)?;
+        if let Some(existing) = existing {
+            return same_configuration(existing, &value);
+        }
+        if sequence > 0 {
+            return match self.append(&value.name, sequence, Some(value.clone())) {
+                Ok(()) => Ok((value, true)),
+                Err(Error::Exists(_)) => same_configuration(
+                    self.get(&value.name)?.ok_or(Error::RequestConflict)?,
+                    &value,
+                ),
+                Err(error) => Err(error),
+            };
+        }
         let bytes =
             serde_json::to_vec(&value).map_err(|error| Error::Invalid(error.to_string()))?;
         match self.store()?.create(&value.name, &bytes) {
             Ok(()) => Ok((value, true)),
             Err(Error::Exists(_)) => {
                 let existing = self.get(&value.name)?.ok_or(Error::RecoveryRequired)?;
-                if existing.dimensions == value.dimensions
-                    && existing.metric == value.metric
-                    && existing.resident_filter == value.resident_filter
-                    && existing.routed_keys == value.routed_keys
-                {
-                    Ok((existing, false))
-                } else {
-                    Err(Error::RequestConflict)
-                }
+                same_configuration(existing, &value)
             }
             Err(error) => Err(error),
         }
     }
-    /// Removing the catalog record is the authoritative deletion point.
+    /// The next immutable state is the authoritative deletion point.
     pub fn delete(&self, value: &Collection) -> Result<()> {
-        if self.get(&value.name)?.as_ref() != Some(value) {
+        let (current, sequence) = self.observed(&value.name)?;
+        if current.as_ref() != Some(value) {
             return Err(Error::RequestConflict);
         }
-        self.store()?.remove(&value.name)
+        match self.append(&value.name, sequence, None) {
+            Err(Error::Exists(_)) => Err(Error::RequestConflict),
+            result => result,
+        }
     }
     pub fn data_store(&self, value: &Collection) -> StoreConfig {
         self.base
@@ -234,5 +304,17 @@ impl Catalog {
             }
         }
         Ok(())
+    }
+}
+
+fn same_configuration(existing: Collection, requested: &Collection) -> Result<(Collection, bool)> {
+    if existing.dimensions == requested.dimensions
+        && existing.metric == requested.metric
+        && existing.resident_filter == requested.resident_filter
+        && existing.routed_keys == requested.routed_keys
+    {
+        Ok((existing, false))
+    } else {
+        Err(Error::RequestConflict)
     }
 }

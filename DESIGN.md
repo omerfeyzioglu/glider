@@ -1392,30 +1392,42 @@ A crash before catalog publication leaves no collection; after publication,
 recovery lists the catalog and lazily opens its generation. LIST of `catalog/`
 is complete and strongly consistent and returns names in sorted order.
 
-Deletion first stops admission for that collection, drains in-flight work and
-releases its lease. The successful removal of `catalog/<name>` is the deletion
-acknowledgement and authoritative absence point. After that, every new request
-for the name returns `404`; a later create chooses a fresh generation, so its
-engine cannot read old data. The server then removes the old generation's
-objects as best effort. A crash before catalog removal leaves the collection
-intact (possibly closed); a crash after removal but before cleanup leaves
-unreachable objects. A background sweep starts after startup without delaying
-serving, then runs periodically; later deletes also reclaim orphaned generations.
-Each sweep rechecks the catalog entry before removing a generation. Serving and
-recovery never depend on cleanup because recreated names use new generations.
-An uncertain catalog removal must be resolved by a fresh GET before reporting
-an outcome. Generation object keys are never reused, so delayed cleanup
-cannot affect a recreated collection.
+Deletion first stops admission, drains in-flight work and releases the lease.
+The initial `catalog/<name>` record remains immutable and is never removed or
+reused. It supplies the name inventory and initial live state (sequence zero).
+Subsequent lifecycle decisions conditionally create
+`catalog-history/<name>/state-{sequence:020}`, starting at 1. Each is version 1
+JSON with `version`, `sequence` and `collection`: a complete catalog entry for
+recreation, or null for deletion. The highest complete state is authoritative;
+readers require contiguous numbered keys and validate the selected payload.
+A next-slot conditional-create conflict returns a conflict, without retrying
+an old deletion against a newer generation. Concurrent creates return the
+current winner if its configuration matches. A delayed delete can only target
+its already occupied slot, so it cannot hide a recreated collection.
 
-The catalog name key itself is reused. The current object-store interface has
-unconditional DELETE, so a delete whose outcome is uncertain can remain in
-flight while another delete removes the old entry and a create publishes a
-new one. That late first DELETE could remove the new entry. A fresh GET alone
-does not rule out this race. Until conditional deletion of the observed
-catalog generation (or non-reused catalog keys) is available, operators must
-quiesce uncertain catalog DELETE requests before retrying deletion or reusing
-the name after a crash; this is a limitation of the multi-collection catalog
-protocol, not of the segmented engine's generation namespaces.
+The successful tombstone PUT acknowledges deletion and authoritative absence;
+a recreation PUT acknowledges its fresh generation. An uncertain create may
+still complete and must be resolved through a fresh catalog read. A crash before
+publication leaves the preceding state; after it, recovery selects the complete
+state, including a publication with a lost response. The server removes the old
+data generation as best effort; a crash can leave unreachable objects. A
+background sweep rechecks authoritative state before generation removal.
+Data keys and catalog history slots are never reused. Serving and recovery do
+not depend on data cleanup. Tombstones and older states are retained permanently:
+each delete/recreate adds one small object and per-name history listing grows
+with lifecycle changes, not vector writes. Opening a name adds one history LIST
+and, after its first deletion, one state GET; already-open query/write paths
+add no catalog requests. Collection listing also consults each name's history.
+
+This protocol uses the existing atomic conditional PUT contract. Conditional
+DELETE was rejected: the pinned MinIO service ignores `If-Match` on DELETE,
+allowing an old request to remove a new object. A mutable conditional-PUT head
+would require a separate local atomic-replacement protocol. Immutable full-state
+slots keep ordinary object publication and recovery semantics on both backends.
+Legacy version 1 entries are sequence zero without an in-place migration. Stop
+older servers before upgrade and quiesce their outstanding unconditional
+catalog DELETEs; older binaries do not understand history and could expose
+stale entries or remove the initial record. History is never reclaimed.
 
 First use acquires that generation's lease, takes over through the normal
 segmented fence path, then starts its admission service. A per-name async lock
