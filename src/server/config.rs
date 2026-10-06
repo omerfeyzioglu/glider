@@ -123,6 +123,8 @@ impl ServerConfig {
     ///   locally beyond its remote budget, default 24; 0 makes results
     ///   independent of cache contents)
     /// - `GLIDER_LEASE_SECONDS` (default 10): writer lease duration
+    /// - `GLIDER_INDEX_BYTES` (default 128 MiB): per-collection sketch write
+    ///   admission watermark; recovery/read/delete remain available above it
     /// - `GLIDER_COLLECTION_IDLE_SECONDS` (default 60): close unused collections
     ///   in multi mode; 0 disables
     /// - `GLIDER_AUTO_CLUSTER_ROWS` (default 250,000): live sealed rows at
@@ -199,6 +201,12 @@ impl ServerConfig {
             let bytes = bytes.parse().map_err(|_| invalid("GLIDER_CACHE_BYTES"))?;
             if let Some(cache) = serving.cache.as_mut() {
                 cache.2 = bytes;
+            }
+        }
+        if let Some(bytes) = env("GLIDER_INDEX_BYTES") {
+            serving.max_index_bytes = bytes.parse().map_err(|_| invalid("GLIDER_INDEX_BYTES"))?;
+            if serving.max_index_bytes == 0 {
+                return Err(invalid("GLIDER_INDEX_BYTES"));
             }
         }
         if let Some(blocks) = env("GLIDER_LOCAL_BLOCKS") {

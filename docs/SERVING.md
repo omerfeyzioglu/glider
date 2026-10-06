@@ -31,6 +31,21 @@ In multi mode, shutdown drains all open collections and releases each lease.
 If one lease is deposed, only that collection closes. Startup sweeps orphaned
 generations left by interrupted deletes.
 
+Catalog lifecycle history is immutable: deletion publishes a tombstone and
+recreation publishes a fresh generation. Before upgrading from a server that
+used unconditional catalog DELETE, stop it and quiesce outstanding catalog
+deletes. Do not run older binaries against the new lifecycle history.
+
+`GLIDER_INDEX_BYTES` limits write admission per collection (default 128 MiB),
+including conservative reservations for pending puts. A budget rejection is
+`429` and was not committed; reads, retained retries and deletes still work.
+Allow maintenance to seal/compact, delete unwanted data, or increase the limit
+after measuring RAM headroom. Smaller batches can reduce conservative reserve
+pressure. Reopening always recovers durable data even above the watermark.
+Monitor `glider_sketch_index_bytes`, `glider_index_admission_bytes` and
+`glider_index_limit_bytes`; pinned views, directories and conversion buffers
+also consume RAM outside this watermark.
+
 ### Backup and restore
 
 `glider-admin` uses the server's environment variables and takes the same

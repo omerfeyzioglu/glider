@@ -50,6 +50,8 @@ pub enum Error {
     Exists(String),
     #[error("storage namespace already has an owner: {0}")]
     Busy(String),
+    #[error("write capacity exceeded: {0}")]
+    CapacityExceeded(String),
     #[error("maintenance required before more writes; compact the database")]
     MaintenanceRequired,
     #[error("request ID reused with a different payload")]

@@ -58,6 +58,198 @@ fn ids(results: &[glider::Neighbor]) -> Vec<u64> {
 }
 
 #[test]
+fn index_admission_rejects_before_commit_and_keeps_group_retry_decisions() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut limits = serving(&temp.path().join("cache"));
+    limits.cache = None;
+    limits.max_index_bytes = 4096;
+    let mut engine = SegmentedServing::open(
+        LocalStore::open(temp.path()).unwrap(),
+        config(),
+        options(),
+        limits,
+    )
+    .unwrap();
+    let make = |nonce: u8, mutations| Request {
+        id: RequestId {
+            boundary: 1,
+            nonce: [nonce; 16],
+        },
+        conditions: vec![],
+        mutations,
+    };
+    let first = make(
+        1,
+        vec![Mutation::Put {
+            id: 1,
+            vector: vector(1, 0),
+            metadata: BTreeMap::new(),
+        }],
+    );
+    let rejected = make(
+        2,
+        (10..110)
+            .map(|id| Mutation::Put {
+                id,
+                vector: vector(id, 0),
+                metadata: BTreeMap::new(),
+            })
+            .collect(),
+    );
+    let mut conditional = rejected.clone();
+    conditional.id.nonce = [3; 16];
+    conditional.conditions = vec![glider::retry::Revision { id: 1, boundary: 1 }];
+    let delete = make(4, vec![Mutation::Delete { id: 1 }]);
+    let results = engine.apply_requests(vec![
+        first.clone(),
+        rejected.clone(),
+        first.clone(),
+        conditional,
+        delete,
+    ]);
+    assert_eq!(results[0].as_ref().unwrap(), results[2].as_ref().unwrap());
+    assert!(matches!(
+        results[1],
+        Err(glider::Error::CapacityExceeded(_))
+    ));
+    assert_eq!(
+        results[4].as_ref().unwrap().sequence,
+        results[0].as_ref().unwrap().sequence + 2
+    );
+    assert!(results[3].as_ref().unwrap().conflict.is_some());
+    assert_eq!(
+        engine.lookup_request(rejected.id).unwrap(),
+        glider::retry::Lookup::Unknown
+    );
+    assert!(!engine.recovery_required());
+    assert!(engine.database().get(1).unwrap().is_none());
+    assert!(engine.database().get(10).unwrap().is_none());
+    engine.close().unwrap();
+    let db = SegmentedDatabase::open_with_options(
+        LocalStore::open(temp.path()).unwrap(),
+        config(),
+        options(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.lookup_request(first.id).unwrap(),
+        glider::retry::Lookup::Retained(*results[0].as_ref().unwrap())
+    );
+    assert_eq!(
+        db.lookup_request(rejected.id).unwrap(),
+        glider::retry::Lookup::Unknown
+    );
+    assert!(db.search_exact(&vector(0, 0), 100, &[]).unwrap().is_empty());
+}
+
+#[test]
+fn oversized_recovery_allows_reads_retries_and_deletes_then_restores_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        dimensions: 128,
+        metric: Metric::SquaredEuclidean,
+    };
+    let mut db = SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), cfg).unwrap();
+    let request = Request {
+        id: RequestId {
+            boundary: 0,
+            nonce: [1; 16],
+        },
+        conditions: vec![],
+        mutations: (0..100)
+            .map(|id| Mutation::Put {
+                id,
+                vector: vec![id as f32; 128],
+                metadata: BTreeMap::new(),
+            })
+            .collect(),
+    };
+    let ack = db.apply_request(request.clone()).unwrap();
+    db.seal_delta().unwrap();
+    assert!(db.selective_index_bytes() > 8192);
+    drop(db);
+    let mut limits = serving(&temp.path().join("cache"));
+    limits.cache = None;
+    limits.max_index_bytes = 8192;
+    limits.seal_tail_objects = 32; // pressure must seal even below the normal threshold
+    let mut engine = SegmentedServing::open(
+        LocalStore::open(temp.path()).unwrap(),
+        cfg,
+        SegmentedOptions::default(),
+        limits.clone(),
+    )
+    .unwrap();
+    assert_eq!(engine.apply_request(request).unwrap(), ack);
+    assert_eq!(
+        engine
+            .database()
+            .search_exact(&vec![0.; 128], 100, &[])
+            .unwrap()
+            .len(),
+        100
+    );
+    let rejected = Request {
+        id: RequestId {
+            boundary: engine.sequence(),
+            nonce: [2; 16],
+        },
+        conditions: vec![],
+        mutations: vec![Mutation::Put {
+            id: 101,
+            vector: vec![1.; 128],
+            metadata: BTreeMap::new(),
+        }],
+    };
+    let before = engine.sequence();
+    assert!(matches!(
+        engine.apply_request(rejected),
+        Err(glider::Error::CapacityExceeded(_))
+    ));
+    assert_eq!(engine.sequence(), before);
+    engine
+        .apply_request(Request {
+            id: RequestId {
+                boundary: engine.sequence(),
+                nonce: [3; 16],
+            },
+            conditions: vec![],
+            mutations: (0..100).map(|id| Mutation::Delete { id }).collect(),
+        })
+        .unwrap();
+    for step in 0..1000 {
+        if !engine.maintenance_step().unwrap() {
+            break;
+        }
+        assert!(step < 999, "maintenance failed to settle");
+    }
+    assert!(engine.database().selective_index_bytes() < 8192);
+    engine
+        .apply_request(Request {
+            id: RequestId {
+                boundary: engine.sequence(),
+                nonce: [4; 16],
+            },
+            conditions: vec![],
+            mutations: vec![Mutation::Put {
+                id: 101,
+                vector: vec![1.; 128],
+                metadata: BTreeMap::new(),
+            }],
+        })
+        .unwrap();
+    engine.close().unwrap();
+    let reopened = SegmentedServing::open(
+        LocalStore::open(temp.path()).unwrap(),
+        cfg,
+        SegmentedOptions::default(),
+        limits,
+    )
+    .unwrap();
+    assert!(reopened.database().get(101).unwrap().is_some());
+    assert!(reopened.database().get(1).unwrap().is_none());
+}
+
+#[test]
 fn resident_fields_charge_only_final_hit_block_reads() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("db");
@@ -152,6 +344,59 @@ fn resident_fields_charge_only_final_hit_block_reads() {
         .value;
     assert_eq!(result.remote_reads, 1);
     service.shutdown(Shutdown::Drain).unwrap();
+}
+
+#[test]
+fn index_reservation_keeps_versions_displaced_by_a_staged_seal() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut limits = serving(&temp.path().join("cache"));
+    limits.cache = None;
+    limits.seal_tail_objects = 1;
+    limits.max_index_bytes = 4096;
+    let mut engine = SegmentedServing::open(
+        LocalStore::open(temp.path()).unwrap(),
+        config(),
+        SegmentedOptions::default(),
+        limits,
+    )
+    .unwrap();
+    let put = |id| Mutation::Put {
+        id,
+        vector: vector(id, 0),
+        metadata: BTreeMap::new(),
+    };
+    let make = |boundary, nonce, mutations| Request {
+        id: RequestId {
+            boundary,
+            nonce: [nonce; 16],
+        },
+        conditions: vec![],
+        mutations,
+    };
+    engine
+        .apply_request(make(engine.sequence(), 1, vec![put(1), put(2)]))
+        .unwrap();
+    engine.maintenance_step().unwrap(); // freeze both versions before publishing a pack
+    assert_eq!(engine.last_unit(), "seal_plan");
+    engine
+        .apply_request(make(engine.sequence(), 2, vec![Mutation::Delete { id: 1 }]))
+        .unwrap();
+    assert!(matches!(
+        engine.apply_request(make(engine.sequence(), 3, vec![put(3)])),
+        Err(glider::Error::CapacityExceeded(_))
+    ));
+    for step in 0..1000 {
+        if !engine.maintenance_step().unwrap() {
+            break;
+        }
+        assert!(step < 999);
+    }
+    engine
+        .apply_request(make(engine.sequence(), 4, vec![put(3)]))
+        .unwrap();
+    assert!(engine.database().get(1).unwrap().is_none());
+    assert!(engine.database().get(2).unwrap().is_some());
+    assert!(engine.database().get(3).unwrap().is_some());
 }
 
 #[test]
@@ -832,7 +1077,7 @@ fn queries_do_not_wait_for_a_warm_up_read() {
                     .collect(),
             })
             .unwrap();
-            db.maintenance_step().unwrap();
+            while db.maintenance_step().unwrap() {}
         }
         while db.maintenance_step().unwrap() {}
         db.close().unwrap();
@@ -1166,7 +1411,7 @@ fn idle_maintenance_warms_the_cache_and_survives_its_loss() {
                     .collect(),
             })
             .unwrap();
-            db.maintenance_step().unwrap();
+            while db.maintenance_step().unwrap() {}
         }
         while db.maintenance_step().unwrap() {}
         let blocks = db.database().block_count();

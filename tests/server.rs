@@ -17,8 +17,10 @@ fn config(directory: &std::path::Path) -> ServerConfig {
     std::env::set_var("GLIDER_RESIDENT_FILTER", "color=red");
     std::env::set_var("GLIDER_DATA_DIR", "unused");
     std::env::set_var("GLIDER_CACHE_BYTES", "1048576");
+    std::env::set_var("GLIDER_INDEX_BYTES", "134217728");
     std::env::set_var("GLIDER_LOCAL_BLOCKS", "32");
     let mut config = ServerConfig::from_env().unwrap();
+    assert_eq!(config.serving.max_index_bytes, 134217728);
     assert!(matches!(config.store, StoreConfig::Local(_)));
     assert_eq!(config.serving.read_budget.local_blocks, 32);
     assert_eq!(config.serving.cache.as_ref().unwrap().2, 1_048_576);
@@ -194,6 +196,39 @@ fn http_service_writes_queries_and_survives_restart() {
     service
         .shutdown(glider::admission::Shutdown::Drain)
         .unwrap();
+}
+
+#[test]
+fn index_budget_returns_json_429_without_committing_the_write() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut setup = config(temp.path());
+    setup.serving.max_index_bytes = 1;
+    let (service, address, runtime) = serve(&setup);
+    let (status, body) = call(
+        address,
+        "POST",
+        "/v1/write",
+        r#"{"upsert":[{"id":1,"vector":[1,2,3]}]}"#,
+        "secret",
+    );
+    assert_eq!(status, 429, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(error["error"].as_str().unwrap().contains("index budget"));
+    let (status, body) = call(address, "GET", "/v1/status", "", "secret");
+    assert_eq!(status, 200);
+    let snapshot: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(snapshot["sequence"], 1);
+    assert_eq!(call(address, "GET", "/v1/points/1", "", "secret").0, 404);
+    service
+        .shutdown(glider::admission::Shutdown::Drain)
+        .unwrap();
+    drop(runtime);
+    let (service, address, runtime) = serve(&setup);
+    assert_eq!(call(address, "GET", "/v1/points/1", "", "secret").0, 404);
+    service
+        .shutdown(glider::admission::Shutdown::Drain)
+        .unwrap();
+    drop(runtime);
 }
 
 #[test]

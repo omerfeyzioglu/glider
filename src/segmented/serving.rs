@@ -82,7 +82,9 @@ pub struct SegmentedServingOptions {
     pub read_budget: ReadBudget,
     /// Obsolete objects removed by one cleanup unit.
     pub cleanup_objects: usize,
-    /// Opening fails if loaded sketches charge more than this many bytes.
+    /// Write admission watermark for loaded sketches plus conservative pending
+    /// put reservations. Recovered data can exceed it; reads/deletes remain
+    /// available. This is not a hard process RSS limit.
     pub max_index_bytes: usize,
     /// Optional disposable block cache: directory, RAM bytes, NVMe bytes.
     pub cache: Option<(PathBuf, usize, usize)>,
@@ -219,6 +221,8 @@ pub struct SegmentedServing<S: ObjectStore> {
     /// A seal or merge changed the clustered catalog since the last merge
     /// plan found nothing due.
     merge_pending: bool,
+    /// Remains set after compaction until pending data gets sealed.
+    index_pressure: bool,
     /// Root generation whose live row count the automatic conversion
     /// trigger last checked.
     auto_checked: Option<u64>,
@@ -244,6 +248,7 @@ impl<S: ObjectStore> SegmentedServing<S> {
             || options.read_budget.blocks == 0
             || options.read_budget.requests == 0
             || options.cleanup_objects == 0
+            || options.max_index_bytes == 0
         {
             return Err(Error::Invalid(
                 "segmented serving bounds are invalid".into(),
@@ -265,19 +270,16 @@ impl<S: ObjectStore> SegmentedServing<S> {
                 "clustered view unavailable ({error}); run glider-admin convert"
             )));
         }
-        if db.selective_index_bytes() > options.max_index_bytes {
-            return Err(Error::Invalid(
-                "segmented sketches exceed the serving index budget".into(),
-            ));
-        }
         db = db.with_query_threads(options.query_threads);
         db.set_cluster_probes(options.cluster_probes);
+        let index_pressure = db.index_admission_bytes() > options.max_index_bytes;
         Ok(Self {
             db,
             options,
             maintenance_time: Duration::ZERO,
             scan_pending: true,
             merge_pending: true,
+            index_pressure,
             auto_checked: None,
             auto_failed: false,
             counters: ServingCounters::default(),
@@ -291,6 +293,16 @@ impl<S: ObjectStore> SegmentedServing<S> {
 
     pub fn counters(&self) -> ServingCounters {
         self.counters
+    }
+
+    fn apply_admitted(&mut self, requests: Vec<Request>) -> Vec<Result<Outcome>> {
+        let results = self
+            .db
+            .apply_requests_with_index_budget(requests, Some(self.options.max_index_bytes));
+        self.index_pressure |= results
+            .iter()
+            .any(|result| matches!(result, Err(Error::CapacityExceeded(_))));
+        results
     }
 
     /// Whether the namespace has no clustered view, is converting or is
@@ -402,9 +414,14 @@ impl<S: ObjectStore> SegmentedServing<S> {
             counters.sketch_compactions += 1;
             return Ok(true);
         }
-        if db.tail_objects >= self.options.seal_tail_objects {
+        if db.tail_objects >= self.options.seal_tail_objects
+            || (!db.tail.is_empty()
+                && (self.index_pressure
+                    || db.index_admission_bytes() >= self.options.max_index_bytes))
+        {
             self.last_unit = "seal_plan";
             db.start_seal()?;
+            self.index_pressure = false;
             counters.seal_starts += 1;
             return Ok(true);
         }
@@ -812,7 +829,7 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
     }
     fn apply_request(&mut self, request: Request) -> Result<Outcome> {
         self.make_room()?;
-        self.db.apply_request(request)
+        self.apply_admitted(vec![request]).pop().unwrap()
     }
     fn apply_requests(&mut self, requests: Vec<Request>) -> Vec<Result<Outcome>> {
         if let Err(error) = self.make_room() {
@@ -822,7 +839,7 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
                 .map(|_| Err(Error::Io(std::io::Error::other(message.clone()))))
                 .collect();
         }
-        self.db.apply_requests(requests)
+        self.apply_admitted(requests)
     }
     fn revision(&self, id: u64) -> Revision {
         self.db.revision(id)
@@ -1028,6 +1045,14 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
                 (
                     "glider_sketch_index_bytes",
                     self.db.selective_index_bytes() as u64,
+                ),
+                (
+                    "glider_index_admission_bytes",
+                    self.db.index_admission_bytes() as u64,
+                ),
+                (
+                    "glider_index_limit_bytes",
+                    self.options.max_index_bytes as u64,
                 ),
             ],
         })
