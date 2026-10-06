@@ -300,6 +300,12 @@ fn serving_options(cache: Option<PathBuf>) -> SegmentedServingOptions {
     {
         options.cluster_probes = probes;
     }
+    if let Some(limit) = env::var("GLIDER_M24_INDEX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        options.max_index_bytes = limit;
+    }
     options
 }
 
@@ -534,6 +540,9 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for Profiled<S> {
         entry.2 += raised;
         result
     }
+    fn metrics(&self) -> glider::Result<glider::admission::EngineMetrics> {
+        self.inner.metrics()
+    }
     fn idle_step(&mut self) -> glider::Result<bool> {
         let peak = peak_footprint().unwrap_or(0);
         let started = Instant::now();
@@ -709,8 +718,8 @@ fn serve(args: &[String]) -> Result<Value> {
             base.clone(),
         );
         writers.push(std::thread::spawn(
-            move || -> Result<(Vec<Write>, u64, u64)> {
-                let (mut events, mut overloaded, mut skipped) = (Vec::new(), 0, 0);
+            move || -> Result<(Vec<Write>, u64, u64, u64)> {
+                let (mut events, mut overloaded, mut skipped, mut capacity) = (Vec::new(), 0, 0, 0);
                 barrier.wait();
                 for round in 0..rounds {
                     let late = wait_until(began + Duration::from_secs(round));
@@ -743,7 +752,16 @@ fn serve(args: &[String]) -> Result<Value> {
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    let result = ticket.wait()?;
+                    let result = match ticket.wait() {
+                        Ok(result) => result,
+                        Err(glider::admission::Error::Database(
+                            glider::Error::CapacityExceeded(_),
+                        )) => {
+                            capacity += 1;
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
                     if result.value.conflict.is_some() {
                         return Err("unexpected conditional conflict".into());
                     }
@@ -757,7 +775,7 @@ fn serve(args: &[String]) -> Result<Value> {
                         late,
                     });
                 }
-                Ok((events, overloaded, skipped))
+                Ok((events, overloaded, skipped, capacity))
             },
         ));
     }
@@ -824,8 +842,11 @@ fn serve(args: &[String]) -> Result<Value> {
     };
     let (mut writes, mut queries_done) = (Vec::new(), Vec::new());
     let mut losses = [0_u64; 4];
+    let mut capacity_rejected = 0_u64;
     for writer in writers {
-        let (events, overloaded, skipped) = writer.join().map_err(|_| "writer panic")??;
+        let (events, overloaded, skipped, capacity) =
+            writer.join().map_err(|_| "writer panic")??;
+        capacity_rejected += capacity;
         writes.extend(events);
         losses[0] += overloaded;
         losses[1] += skipped;
@@ -853,6 +874,7 @@ fn serve(args: &[String]) -> Result<Value> {
             (kind.clone(), json!({"put":puts - p,"delete":deletes - d}))
         })
         .collect();
+    let engine_metrics = client.metrics()?.wait()?.value;
     let peak_rss_bytes = rss();
     service.shutdown(Shutdown::Drain)?;
     let classes = |filtered: Option<bool>, remote: Option<bool>, field: fn(&QueryEvent) -> f64| {
@@ -872,6 +894,7 @@ fn serve(args: &[String]) -> Result<Value> {
         "offered":{"write_batches":rounds*4,"logical_mutations":rounds*400,"queries":rounds*40},
         "acknowledged":{"write_batches":writes.len(),"queries":queries_done.len()},
         "overloaded":{"writes":losses[0],"queries":losses[2]},
+        "capacity_rejected_writes":capacity_rejected,
         "late_slots_skipped":{"writes":losses[1],"queries":losses[3]},
         "elapsed_seconds":elapsed,
         "write_ms":stats(writes.iter().map(|w|w.e2e).collect()),
@@ -894,6 +917,7 @@ fn serve(args: &[String]) -> Result<Value> {
         "maintenance_errors":status.maintenance_errors,
         "http":counts(&before,&after),"requests_by_kind":kinds,"get_payload_bytes":downloaded,
         "peak_rss_bytes":peak_rss_bytes,"peak_physical_footprint_bytes":peak_footprint(),
+        "final_engine_metrics":engine_metrics.samples,
         "engine_profile":profile.lock().unwrap().iter().map(|(kind, (count, max_ms, raised))| {
             (kind.to_string(), json!({"count":count,"max_ms":max_ms,"peak_footprint_raised_bytes":raised}))
         }).collect::<BTreeMap<_, _>>(),
