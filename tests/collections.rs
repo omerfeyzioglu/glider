@@ -231,6 +231,77 @@ fn late_catalog_deletion_is_fenced_by_immutable_history_and_survives_restart() {
     ));
 }
 
+#[test]
+fn bounded_sweep_resumes_partial_generations_and_wraps_for_new_orphans() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = StoreConfig::Local(temp.path().to_path_buf());
+    let catalog = Catalog::new(base.clone());
+    let mut orphan_stores = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        let (old, _) = catalog.create(request(name, 2)).unwrap();
+        let data = catalog.data_store(&old).open().unwrap();
+        for index in 0..5 {
+            data.create(&format!("object-{index}"), b"orphan").unwrap();
+        }
+        catalog.delete(&old).unwrap();
+        orphan_stores.push(data);
+    }
+    let (live, _) = catalog.create(request("beta", 2)).unwrap();
+    let live_data = catalog.data_store(&live).open().unwrap();
+    live_data.create("point", b"live").unwrap();
+    let mut cursor = None;
+    for _ in 0..50 {
+        let before: usize = orphan_stores.iter().map(|s| s.list().unwrap().len()).sum();
+        catalog.sweep_batch(&mut cursor, 2, 3).unwrap();
+        let after: usize = orphan_stores.iter().map(|s| s.list().unwrap().len()).sum();
+        assert!(before - after <= 3);
+        if after == 0 {
+            break;
+        }
+    }
+    assert!(orphan_stores.iter().all(|s| s.list().unwrap().is_empty()));
+    let behind = base
+        .child("data/aaa/00000000000000000000000000000000")
+        .open()
+        .unwrap();
+    behind.create("new-orphan", b"after cursor").unwrap();
+    for _ in 0..50 {
+        catalog.sweep_batch(&mut cursor, 2, 3).unwrap();
+        if behind.list().unwrap().is_empty() {
+            break;
+        }
+    }
+    assert!(behind.list().unwrap().is_empty());
+    assert_eq!(live_data.get("point").unwrap().unwrap(), b"live");
+    assert!(catalog.sweep_batch(&mut cursor, 0, 3).is_err());
+}
+
+#[test]
+fn bounded_sweep_stops_catalog_checks_at_the_generation_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = StoreConfig::Local(temp.path().to_path_buf());
+    let catalog = Catalog::new(base.clone());
+    let (live, _) = catalog.create(request("aaa", 2)).unwrap();
+    catalog
+        .data_store(&live)
+        .open()
+        .unwrap()
+        .create("point", b"live")
+        .unwrap();
+    base.child("data/zzz/invalid-generation")
+        .open()
+        .unwrap()
+        .create("point", b"invalid")
+        .unwrap();
+    let mut cursor = None;
+    catalog.sweep_batch(&mut cursor, 1, 1).unwrap();
+    assert_eq!(cursor, Some((live.name, live.generation)));
+    assert!(matches!(
+        catalog.sweep_batch(&mut cursor, 1, 1),
+        Err(glider::Error::Corrupt(_))
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_background_sweep_eventually_removes_orphan() {
     let temp = tempfile::tempdir().unwrap();

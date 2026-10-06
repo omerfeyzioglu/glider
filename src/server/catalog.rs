@@ -273,12 +273,28 @@ impl Catalog {
     }
     /// Reclaim generations with no matching authoritative catalog record.
     pub fn sweep(&self) -> Result<()> {
-        let live = self
-            .list()?
-            .into_iter()
-            .map(|value| (value.name, value.generation))
-            .collect::<std::collections::BTreeSet<_>>();
-        for (name, generation) in self.base.data_generations()? {
+        self.sweep_batch(&mut None, usize::MAX, usize::MAX)
+    }
+    /// One bounded cleanup batch. Discovery still lists the data prefix;
+    /// limits cover generation checks and object deletions, not LIST pages.
+    /// A partially removed generation is revisited before advancing.
+    pub fn sweep_batch(
+        &self,
+        after: &mut Option<(String, String)>,
+        generation_limit: usize,
+        object_limit: usize,
+    ) -> Result<()> {
+        if generation_limit == 0 || object_limit == 0 {
+            return Err(Error::Invalid("sweep limits must be positive".into()));
+        }
+        let mut removed = 0;
+        let generations = self.base.data_generations()?;
+        let start =
+            generations.partition_point(|entry| after.as_ref().is_some_and(|after| entry <= after));
+        for (checked, (name, generation)) in generations.into_iter().skip(start).enumerate() {
+            if checked == generation_limit || removed == object_limit {
+                return Ok(());
+            }
             check_name(&name)?;
             if generation.len() != 32
                 || !generation
@@ -289,20 +305,25 @@ impl Catalog {
                     "invalid data generation: {name}/{generation}"
                 )));
             }
-            if !live.contains(&(name.clone(), generation.clone())) {
-                if self
-                    .get(&name)?
-                    .is_some_and(|value| value.generation == generation)
-                {
-                    continue;
-                }
+            if !self
+                .get(&name)?
+                .is_some_and(|value| value.generation == generation)
+            {
                 let store = self
                     .base
                     .child(&format!("data/{name}/{generation}"))
                     .open()?;
-                store.remove_many(&store.list()?)?;
+                let keys = store.list()?;
+                let count = keys.len().min(object_limit - removed);
+                store.remove_many(&keys[..count])?;
+                removed += count;
+                if count < keys.len() {
+                    return Ok(());
+                }
             }
+            *after = Some((name, generation));
         }
+        *after = None;
         Ok(())
     }
 }
