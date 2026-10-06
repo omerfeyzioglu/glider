@@ -189,9 +189,10 @@ Do not omit these skips or turn this single changed-watermark run into a
 statistically established performance improvement. The server default is unchanged.
 
 The larger tests therefore support the correctness fixes, but do **not** pass
-the complete million-row resource/arrival envelope. The conditional merge is
-withheld; production and validation PRs remain reviewable. The next single-node
-work should measure total serving allocations and cold-open reads, then reduce
+the complete million-row resource/arrival envelope. The correctness fixes and
+validation artifacts have been merged separately from that unmet performance
+target. The [sustained mutation soak](SOAK.md) measures longer-term serving
+stability. Further single-node work should measure total allocations and cold-open reads, then reduce
 directory/view/maintenance allocation peaks and recovery I/O. Simply raising the
 index watermark masks neither the measured RSS nor the reopen target. The 23
 query skips also require controlled repeat/profiling before attributing them to

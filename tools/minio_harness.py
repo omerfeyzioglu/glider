@@ -37,8 +37,9 @@ def record(event):
         output.write(redact(json.dumps(event)) + "\n")
 
 
-def run(*args, env=None, capture=False, timeout=None, stage=None, retain_output=False):
-    """Kill the command's process group on timeout; retain sanitized failure output."""
+def run(*args, env=None, capture=False, timeout=None, stage=None, retain_output=False,
+        expected_returncode=0):
+    """Require the exact exit code; kill the group on timeout and redact failures."""
     for key, value in (os.environ if env is None else env).items():
         if value and any(part in key.upper() for part in
                          ("SECRET", "TOKEN", "PASSWORD", "ACCESS_KEY", "MINIO_ROOT_USER")):
@@ -72,7 +73,7 @@ def run(*args, env=None, capture=False, timeout=None, stage=None, retain_output=
                 err.seek(0)
                 stdout = out.read().decode(errors="replace")
                 stderr = err.read().decode(errors="replace")
-            if process.returncode:
+            if process.returncode != expected_returncode:
                 raise HarnessFailure(stage, f"exit {process.returncode}", process.returncode)
             status = "passed"
     except subprocess.TimeoutExpired:

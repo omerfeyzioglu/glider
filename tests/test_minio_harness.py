@@ -104,6 +104,16 @@ class MinioHarnessTests(unittest.TestCase):
         command.assert_called_once_with("docker", "rm", "-fv", "test", capture=True,
                                         timeout=h.CLEANUP_SECONDS, stage="MinIO cleanup test")
 
+    def test_expected_sigkill_requires_that_signal_and_preserves_report(self):
+        script = ("import os,signal; print('acknowledged-report',flush=True); "
+                  "os.kill(os.getpid(),signal.SIGKILL)")
+        result = h.run(sys.executable, "-c", script, capture=True, expected_returncode=-9)
+        self.assertEqual(result.strip(), "acknowledged-report")
+        self.assertEqual(self.events()[-1]["status"], "passed")
+        for script in ("raise SystemExit(0)", "raise SystemExit(7)"):
+            with self.assertRaises(h.HarnessFailure):
+                h.run(sys.executable, "-c", script, expected_returncode=-9)
+
     def test_secrets_are_removed_from_output_and_artifacts(self):
         secret = 'private-test-credential'
         env = dict(os.environ, AWS_SESSION_TOKEN=secret)

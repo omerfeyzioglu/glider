@@ -123,7 +123,9 @@ jobs:
           python3 tools/m16_benchmark.py target/m16-comparison --smoke
 
       - name: Verify capacity workload and recovery smoke
-        run: python3 tools/m19_benchmark.py target/m19-study --smoke --m20
+        run: |
+          cargo test --release --locked --features s3 --example m24_acceptance
+          python3 tools/m19_benchmark.py target/m19-study --smoke --m20
 
       - name: Retain benchmark reports
         if: always()
