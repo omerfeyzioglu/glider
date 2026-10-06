@@ -199,6 +199,38 @@ fn catalog_list_reads_many_collections_in_name_order() {
     assert!(matches!(catalog.list(), Err(glider::Error::Corrupt(_))));
 }
 
+#[test]
+fn late_catalog_deletion_is_fenced_by_immutable_history_and_survives_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = StoreConfig::Local(temp.path().to_path_buf());
+    let catalog = Catalog::new(base.clone());
+    let (first, _) = catalog.create(request("alpha", 2)).unwrap();
+    // The first deletion has read the original entry and prepared slot 1,
+    // then pauses before its conditional publication.
+    let delayed = br#"{"version":1,"sequence":1,"collection":null}"#;
+    catalog.delete(&first).unwrap();
+    let (second, _) = catalog.create(request("alpha", 3)).unwrap();
+    let history = base.child("catalog-history/alpha").open().unwrap();
+    assert!(matches!(
+        history.create("state-00000000000000000001", delayed),
+        Err(glider::Error::Exists(_))
+    ));
+    let restarted = Catalog::new(base.clone());
+    assert_eq!(restarted.get("alpha").unwrap(), Some(second.clone()));
+    assert_eq!(restarted.list().unwrap(), vec![second.clone()]);
+    assert!(matches!(
+        restarted.delete(&first),
+        Err(glider::Error::RequestConflict)
+    ));
+    restarted.delete(&second).unwrap();
+    assert!(Catalog::new(base.clone()).get("alpha").unwrap().is_none());
+    history.remove("state-00000000000000000002").unwrap();
+    assert!(matches!(
+        Catalog::new(base).get("alpha"),
+        Err(glider::Error::Corrupt(_))
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_background_sweep_eventually_removes_orphan() {
     let temp = tempfile::tempdir().unwrap();

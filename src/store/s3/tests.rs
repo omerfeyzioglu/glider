@@ -1477,6 +1477,35 @@ impl HttpService for DeferredDeleteService {
 }
 #[test]
 #[ignore = "requires isolated MinIO; run tools/test_s3.py"]
+fn minio_late_catalog_tombstone_cannot_replace_recreated_state() {
+    let namespace = "catalog-history/alpha";
+    let deferred = DeferredPut::default();
+    let late = S3Store::with_connector(minio_builder(), namespace, deferred.clone()).unwrap();
+    let tombstone = br#"{"version":1,"sequence":1,"collection":null}"#;
+    assert!(late
+        .create("state-00000000000000000001", tombstone)
+        .is_err());
+    let request = deferred.0.lock().unwrap().take().unwrap();
+    let store = minio(namespace);
+    store
+        .create("state-00000000000000000001", tombstone)
+        .unwrap();
+    let recreated = b"recreated full catalog state";
+    store
+        .create("state-00000000000000000002", recreated)
+        .unwrap();
+    let client = ReqwestConnector::default()
+        .connect(&ClientOptions::new().with_allow_http(true))
+        .unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    assert_eq!(rt.block_on(client.execute(request)).unwrap().status(), 412);
+    assert_eq!(
+        store.get("state-00000000000000000002").unwrap().unwrap(),
+        recreated
+    );
+}
+#[test]
+#[ignore = "requires isolated MinIO; run tools/test_s3.py"]
 fn minio_delayed_delete_never_targets_a_new_authoritative_object() {
     let namespace = "late-compact-delete";
     let mut db = Database::open(minio(namespace), config()).unwrap();
