@@ -1426,6 +1426,51 @@ impl SketchSet {
 }
 
 impl<S: ObjectStore> SegmentedDatabase<S> {
+    /// Reserve a separate single-row pack for each pending put. This deliberately
+    /// overcounts shared codebooks and block metadata; it is an admission
+    /// estimate, not a process RSS bound or a persisted-format limit.
+    pub(super) fn pending_row_charge(&self, metadata: &BTreeMap<String, String>) -> usize {
+        let mut bytes = size_of::<PackSketch>()
+            + size_of::<LoadedSketch>()
+            + size_of::<SketchBlock>()
+            + size_of::<BlockRef>()
+            + 128 + 128 + 64 // pack/reference identities and digest
+            + 8 + 8 + 24 + 24 // row ID, liveness, root and location slots
+            + 4 + 32 + 8 // posting cluster, fingerprint and sequence
+            + self.config.dimensions.saturating_mul(8)
+            + self.config.dimensions.saturating_mul(5).div_ceil(8);
+        if self
+            .options
+            .resident_filter
+            .as_ref()
+            .is_some_and(|(key, value)| metadata.get(key) == Some(value))
+        {
+            bytes = bytes
+                .saturating_add(4)
+                .saturating_add(self.config.dimensions.saturating_mul(4));
+        }
+        for key in &self.options.routed_keys {
+            bytes = bytes.saturating_add(size_of::<RoutedKey>() + key.len() + 1);
+            if let Some(value) = metadata.get(key) {
+                bytes = bytes.saturating_add(size_of::<String>() + value.len());
+            }
+        }
+        // Leave room for vector/string capacity growth in pack construction.
+        bytes.saturating_mul(2)
+    }
+
+    pub(super) fn index_admission_bytes(&self) -> usize {
+        let documents = self
+            .tail
+            .values()
+            .chain(self.seal.iter().flat_map(|seal| seal.displaced.values()));
+        documents
+            .filter_map(|(_, document)| document.as_ref())
+            .fold(self.selective_index_bytes(), |bytes, document| {
+                bytes.saturating_add(self.pending_row_charge(&document.metadata))
+            })
+    }
+
     /// Charged bytes of the loaded sketches, including resident vectors.
     pub fn selective_index_bytes(&self) -> usize {
         self.sketches.charged_bytes()
@@ -2203,6 +2248,81 @@ mod tests {
         Config, Metric, Mutation,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn pending_reservation_covers_dense_sparse_and_resident_sketches() {
+        for dimensions in [1, 128, 768] {
+            for sparse in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let options = super::super::SegmentedOptions {
+                    resident_filter: Some(("resident".into(), "yes".into())),
+                    routed_keys: vec!["group".into(), "resident".into()],
+                };
+                let mut db = SegmentedDatabase::open_with_options(
+                    LocalStore::open(temp.path()).unwrap(),
+                    Config {
+                        dimensions,
+                        metric: Metric::SquaredEuclidean,
+                    },
+                    options,
+                )
+                .unwrap();
+                for batch in 0..2_u64 {
+                    let mutations = (batch * 100..(batch + 1) * 100)
+                        .map(|row| Mutation::Put {
+                            id: if sparse { row << 40 } else { row },
+                            vector: (0..dimensions)
+                                .map(|axis| ((row * 11 + axis as u64) % 128) as f32)
+                                .collect(),
+                            metadata: BTreeMap::from([
+                                ("group".into(), format!("{row:04}{}", "x".repeat(100))),
+                                (
+                                    "resident".into(),
+                                    if row % 2 == 0 {
+                                        "yes".into()
+                                    } else {
+                                        "no".into()
+                                    },
+                                ),
+                            ]),
+                        })
+                        .collect();
+                    db.apply_request(Request {
+                        id: RequestId {
+                            boundary: db.sequence(),
+                            nonce: [batch as u8 + 1; 16],
+                        },
+                        conditions: vec![],
+                        mutations,
+                    })
+                    .unwrap();
+                }
+                let reserved = db.index_admission_bytes();
+                db.seal_delta().unwrap();
+                assert!(
+                    db.selective_index_bytes() <= reserved,
+                    "dimensions={dimensions}, sparse={sparse}"
+                );
+                drop(db);
+                let db = SegmentedDatabase::open_with_options(
+                    LocalStore::open(temp.path()).unwrap(),
+                    Config {
+                        dimensions,
+                        metric: Metric::SquaredEuclidean,
+                    },
+                    super::super::SegmentedOptions {
+                        resident_filter: Some(("resident".into(), "yes".into())),
+                        routed_keys: vec!["group".into(), "resident".into()],
+                    },
+                )
+                .unwrap();
+                assert!(
+                    db.selective_index_bytes() <= reserved,
+                    "reopen dimensions={dimensions}, sparse={sparse}"
+                );
+            }
+        }
+    }
 
     struct Rng(u64);
 

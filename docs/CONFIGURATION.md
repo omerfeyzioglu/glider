@@ -39,6 +39,7 @@ single-collection mode.
 | `GLIDER_LEASE_SECONDS` | `10` | Writer lease duration (fractions allowed). After a crash, the next start waits at most this long before taking over. |
 | `GLIDER_CACHE_DIR` | `glider-cache` | Local block cache directory, relative to the working directory (`/var/lib/glider/cache` in the Docker image). Any local disk works: instance-store NVMe, EBS or a container volume. |
 | `GLIDER_CACHE_BYTES` | `268435456` (256 MiB) | Local cache limit. While idle the server copies the collection into the cache up to this limit; set it above `cache.namespace_bytes` from `/v1/status` to keep everything local. |
+| `GLIDER_INDEX_BYTES` | `134217728` (128 MiB) | Positive per-collection write-admission watermark for loaded sketches plus conservative pending-put reservations. Growth above it returns `429` before commit. Recovery, reads, retained retries and deletes remain available; this is not a process RSS limit. |
 | `GLIDER_MAX_OPEN_COLLECTIONS` | `64` | Maximum open collections in multi mode. Opening another closes the least recently used idle collection. Per-collection cache budget is `max(16 MiB, GLIDER_CACHE_BYTES / GLIDER_MAX_OPEN_COLLECTIONS)` under `<GLIDER_CACHE_DIR>/<name>-<generation>/`. |
 | `GLIDER_COLLECTION_IDLE_SECONDS` | `60` | Close unused collections in multi mode to avoid idle S3 lease renewal requests. Fractions allowed; `0` disables. |
 | `GLIDER_LOCAL_BLOCKS` | `24` | Cached blocks a query may rerank in addition to its remote budget. `0` makes results independent of the cache contents. |

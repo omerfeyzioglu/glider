@@ -21,7 +21,10 @@ impl IntoResponse for ApiError {
 impl From<admission::Error> for ApiError {
     fn from(error: admission::Error) -> Self {
         let status = match &error {
-            admission::Error::Overloaded => StatusCode::TOO_MANY_REQUESTS,
+            admission::Error::Overloaded
+            | admission::Error::Database(Error::CapacityExceeded(_)) => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             admission::Error::Database(Error::Invalid(_)) => StatusCode::BAD_REQUEST,
             admission::Error::Database(Error::RequestConflict | Error::RequestExpired) => {
                 StatusCode::CONFLICT

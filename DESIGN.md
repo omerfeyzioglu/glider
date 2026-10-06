@@ -576,7 +576,7 @@ log-object, tail and backup bookkeeping count objects, not sequences.
 ### Segmented serving
 
 `SegmentedServing` takes the namespace over with fencing (below), opens
-it with a sketch byte budget and an optional block cache, and implements the
+it with a sketch write-admission watermark and an optional block cache, and implements the
 `admission::Engine` trait, so `admission::Service` runs its commands and
 maintenance on the single committer thread and its queries on published
 views (M34 below). Queries use `search_selective_within` with a fixed read
@@ -596,6 +596,31 @@ idle time allows the seal, the next write finishes any staged prune/reclaim/merg
 and a full seal synchronously, reported as that command's maintenance time.
 A failed idle read leaves state unchanged, is counted and retried after the
 next command; an uncertain write poisons the engine and fails the service.
+
+`max_index_bytes` (`GLIDER_INDEX_BYTES`, default 128 MiB in the server) is a
+per-collection write-admission watermark: current loaded sketch charges plus a
+conservative reservation for each pending put, including versions displaced by
+a staged seal. Each reservation assumes its own pack/codebook/block, includes
+resident vectors and routed metadata when declared, and allows allocation
+capacity slack. A group adds reservations in decision order before publishing its
+log. Overwrites and repeated IDs in one group are conservatively charged as new
+puts; packing sharing is credited only after sealing. A put exceeding the
+watermark returns `CapacityExceeded`/HTTP 429, consumes no sequence or retry receipt and
+publishes nothing. Retained duplicates, conditional conflicts and delete-only
+requests still resolve normally. Pressure starts an idle seal below the normal
+log threshold so deletes can release obsolete routing state. The unbounded raw
+segmented library path keeps its existing behavior.
+
+Recovery never rejects already-durable data solely for exceeding this watermark:
+reads, retained retries and deletes remain available while new puts are refused.
+A smaller configured limit therefore reduces writable capacity without creating
+a restart trap. Maintenance may transiently exceed the watermark, and recovery
+or a changed derived layout may load more than it. This bounds write admission,
+not total process RSS, pinned views, latest-ID directory, conversion buffers or
+transport allocations. Operators must budget those separately and can raise the
+watermark after measuring available RAM. Metrics expose actual sketch bytes,
+estimated admission bytes and the configured limit. No persisted format, query
+ranking, log acknowledgement or recovery authority changes.
 
 Automatic conversion (`auto_cluster_rows`, `GLIDER_AUTO_CLUSTER_ROWS`,
 default 250,000; 0 disables): when the selected root has no clustered view

@@ -2856,6 +2856,14 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
     /// visible before the shared create succeeds; if it fails, every
     /// accepted request's outcome is uncertain and the handle is poisoned.
     pub fn apply_requests(&mut self, requests: Vec<retry::Request>) -> Vec<Result<retry::Outcome>> {
+        self.apply_requests_with_index_budget(requests, None)
+    }
+
+    pub(super) fn apply_requests_with_index_budget(
+        &mut self,
+        requests: Vec<retry::Request>,
+        budget: Option<usize>,
+    ) -> Vec<Result<retry::Outcome>> {
         if self.poisoned {
             return requests
                 .iter()
@@ -2867,6 +2875,7 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
         let mut retry = self.retry.clone();
         let mut sequence = self.sequence;
         let mut accepted = Vec::new();
+        let mut reserved = budget.map(|_| self.index_admission_bytes()).unwrap_or(0);
         for (index, request) in requests.iter().enumerate() {
             let decided = (|| {
                 request.validate(self.config)?;
@@ -2895,8 +2904,25 @@ impl<S: ObjectStore> SegmentedDatabase<S> {
                 } else {
                     &[]
                 };
+                let put_charge = if budget.is_some() {
+                    applied
+                        .iter()
+                        .fold(0_usize, |bytes, mutation| match mutation {
+                            Mutation::Put { metadata, .. } => {
+                                bytes.saturating_add(self.pending_row_charge(metadata))
+                            }
+                            Mutation::Delete { .. } => bytes,
+                        })
+                } else {
+                    0
+                };
+                let projected = reserved.saturating_add(put_charge);
+                if put_charge > 0 && budget.is_some_and(|budget| projected > budget) {
+                    return Err(Error::CapacityExceeded("serving index budget exhausted; request not committed; delete data, allow maintenance, or increase GLIDER_INDEX_BYTES".into()));
+                }
                 retry.advance(next, applied);
                 retry.retain(request, outcome)?;
+                reserved = projected;
                 sequence = next;
                 Ok((outcome, true))
             })();
