@@ -421,7 +421,6 @@ impl<S: ObjectStore> SegmentedServing<S> {
         {
             self.last_unit = "seal_plan";
             db.start_seal()?;
-            self.index_pressure = false;
             counters.seal_starts += 1;
             return Ok(true);
         }
@@ -510,7 +509,19 @@ impl<S: ObjectStore> SegmentedServing<S> {
 
     /// At the hard log-tail bound, finish any staged maintenance and a seal
     /// synchronously before publishing; that time is command maintenance.
-    fn make_room(&mut self) -> Result<()> {
+    fn make_room(&mut self, progress_index: bool) -> Result<()> {
+        // Rejected puts do not grow the tail, so the hard tail bound cannot
+        // rescue a saturated queue. Advance one bounded pressure unit before
+        // each write group until its seal publishes and credits packing.
+        if progress_index && self.index_pressure && !self.db.poisoned {
+            if !self.db.tail.is_empty() || self.db.seal.is_some() {
+                self.maintenance_step()?;
+            }
+            if self.db.seal.is_none() && (self.db.tail.is_empty() || self.last_unit == "seal_step")
+            {
+                self.index_pressure = false;
+            }
+        }
         if self.db.tail_objects < super::MAX_TAIL_OBJECTS || self.db.poisoned {
             return Ok(());
         }
@@ -828,11 +839,17 @@ impl<S: ObjectStore + Send + Sync + 'static> Engine for SegmentedServing<S> {
         self.maintenance_time
     }
     fn apply_request(&mut self, request: Request) -> Result<Outcome> {
-        self.make_room()?;
+        let progress = self.index_pressure
+            && !matches!(self.db.lookup_request(request.id), Ok(Lookup::Retained(_)));
+        self.make_room(progress)?;
         self.apply_admitted(vec![request]).pop().unwrap()
     }
     fn apply_requests(&mut self, requests: Vec<Request>) -> Vec<Result<Outcome>> {
-        if let Err(error) = self.make_room() {
+        let progress = self.index_pressure
+            && requests.iter().any(|request| {
+                !matches!(self.db.lookup_request(request.id), Ok(Lookup::Retained(_)))
+            });
+        if let Err(error) = self.make_room(progress) {
             let message = error.to_string();
             return requests
                 .iter()
