@@ -226,6 +226,10 @@ No implementation tuning was performed from these measurements.
 
 ## S3 benchmarks
 
+The [sustained mutation soak](benchmarks/SOAK.md) records a 30-minute,
+million-row MinIO workload, memory/maintenance trace and live-process crash
+recovery. Its historical acceptance gates remain separate from observed stability.
+
 ### Multi-tenant server scenario
 
 Latest result ([raw](benchmarks/tenants/aws-10k/run.json)): 10,000

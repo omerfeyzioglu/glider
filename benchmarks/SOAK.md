@@ -39,7 +39,7 @@ total RSS. Compare five-minute windows and the late-run trend, and report this
 harness overhead before attributing growth to the engine. A 30-minute plateau
 does not prove indefinite bounded memory.
 
-After the final write responses, the live service prints/flushed its complete
+After the final write responses, the live service writes and flushes its complete
 acknowledgement oracle, then sends itself SIGKILL without draining or running
 destructors. Maintenance may be in flight. The driver requires that exact
 signal termination, removes the complete block/routing cache directory, then
@@ -82,3 +82,82 @@ The trend is ordinary least squares of current MiB against elapsed minutes,
 using ten-second observations at or after minute 10. Missing probes stay unknown,
 window boundaries are half-open, and the summary preserves every failed historical
 gate. It introduces no new stability threshold or longer-duration extrapolation.
+
+## Measured 30-minute result
+
+[Raw report](soak-2026-10-07/minio-1m-30min.json) and
+[window summary](soak-2026-10-07/summary.json): Apple M4, macOS 26.6.2,
+rustc 1.98.1, pinned loopback MinIO, measured revision `300a64a`. Production
+sources match the merged hardening stack; later commits add only summary tooling
+and CI coverage. Normal foreground applications were present; no CPU pinning or
+exclusive-host control was used. This is sustained correctness/maintenance
+stress, not an isolated paired speed comparison.
+
+| Measurement/check | Result |
+|---|---:|
+| Mixed traffic duration | 1,799.93 s |
+| Offered / acknowledged 100-op batches | 7,200 / 7,198 |
+| Offered / completed queries | 72,000 / 72,000 |
+| Index-capacity rejections | 0 |
+| Workload queue overload, writes / queries | 2 / 0 |
+| Skipped arrival slots, writes / queries | 0 / 0 |
+| Acknowledged write p95 / p99 | 29.92 / 41.55 ms |
+| Warm unfiltered query p95 / p99 | 36.82 / 41.42 ms |
+| Cold unfiltered query p95 | 34.60 ms |
+| Filtered query p95 | 15.31 ms |
+| Native serving/benchmark peak RSS | 236.09 MiB |
+| Live timing-event storage floor | 4.12 MiB |
+| Sampled maximum tail objects / runs | 33 / 22 |
+| Sampled maximum index admission charge | 138.21 MiB |
+| Seal steps by last observation | 2,830 |
+| Maintenance errors | 0 |
+| Initial serving open / crash-and-cache-loss reopen | 1.78 / 2.04 s |
+| Second cache-loss open | 1.92 s |
+| Expected / recovered live IDs | 990,000 / 990,000 |
+| Expected deleted IDs | 10,000 |
+| Full-state vector/metadata/unexpected-live mismatches | 0 |
+| Cache-loss query results / backup restored view equal | yes / yes |
+| Post-update unfiltered mean / p5 recall@10 | 0.971 / 0.80 |
+| Filtered recall / short results | 1.0 / 0 |
+| Historical acceptance | **false** |
+
+| Traffic minutes | Current RSS median (MiB) | Sampled max tail objects |
+|---|---:|---:|
+| 0–5 | 213.56 | 31 |
+| 5–10 | 228.57 | 31 |
+| 10–15 | 225.98 | 32 |
+| 15–20 | 205.64 | 33 |
+| 20–25 | 202.13 | 32 |
+| 25–30 | 205.70 | 32 |
+
+The recorded high-water mark reaches 236.09 MiB before minute 10 and stays
+there through the remaining traffic. Current-RSS OLS after minute 10 is
+-0.82 MiB/minute over 119 observations. This window shows no positive memory
+trend or continuously accumulating log tail; it does not establish an indefinite
+bound, cover growing ID cardinality, automatic conversion/reclustering, or
+many concurrently open collections. The absolute 192 MiB RSS target still fails.
+
+The sampler is a ninth producer sharing the eight-command admission limit with
+four writers and four readers. One metrics probe and two workload writes are
+overloaded; each is retained in the report, not retried or removed from gates.
+Given the eight workload producers each wait for their preceding ticket and
+admission releases its charge before response delivery, probe contention is a
+plausible source of these overloads; rejection times were not logged, so this is
+an inference rather than a measured attribution. Do not use these counts as an
+uninstrumented engine rejection rate. A future latency/admission comparison
+should observe without adding competing admission commands.
+
+Three historical gates fail: peak RSS, zero overload, and fresh open/reopen
+(the post-crash reopen is 2,043 ms against 2,000 ms). All other recorded gates
+pass, including capacity, arrival completeness, latency, quality, durability,
+cache, backup and physical request limits. The default server watermark remains
+128 MiB; 192 MiB is this collection's measured configuration, not a global RAM
+bound or a new default. No AWS resources were provisioned. The disposable MinIO
+container and temporary cache were removed successfully.
+
+Validation of the runner: three native example tests, 70 root Python tests,
+release/server all-target Clippy with warnings denied, formatting, generated
+summary and documentation-link checks. A 4,000-row clustered smoke checks
+12 acknowledged mixed batches and 40 deleted IDs through SIGKILL/cache loss
+and backup restore. CI checks, audit, MinIO (including the three native
+regressions), recovery drills and Docker passed on `cb1c59e`.
