@@ -2,7 +2,9 @@
 
 The HTTP request-ID validation, immutable catalog lifecycle, bounded orphan
 sweep and segmented index write-admission changes are validated on local storage
-and the pinned disposable MinIO image. No AWS requests were made.
+and the pinned disposable MinIO image. These initial runs made no AWS requests;
+[the heavier follow-up](HEAVY_HARDENING.md) records larger workloads and provider
+validation separately.
 
 The full Rust release/server run at `23df585` passed 295 tests (34 ignored).
 The final MinIO runner passed 32 checks in eight suites, including abrupt server

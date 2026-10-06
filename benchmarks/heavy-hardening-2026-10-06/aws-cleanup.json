@@ -1,0 +1,24 @@
+{
+  "checked_at_utc": "2026-10-06T20:59:59.118055+00:00",
+  "termination_previously_verified": true,
+  "termination_evidence": [
+    "aws_acceptance.py explicit termination and successful ec2 wait instance-terminated",
+    "independent ec2 DescribeInstances returned terminated immediately after completion"
+  ],
+  "instance_type": "c7g.xlarge",
+  "current_instance_inventory_states": [],
+  "current_inventory_note": "Terminated instance no longer returned by DescribeInstances at this later check.",
+  "root_volume_delete_on_termination_requested": true,
+  "owned_prefix_visible_objects": 0,
+  "inventory_truncated": false,
+  "account_plan_after": {
+    "type": "PAID",
+    "credits": {
+      "amount": 115.04,
+      "unit": "USD"
+    }
+  },
+  "volume_inventory_independently_verified": false,
+  "volume_inventory_limitation": "ec2:DescribeVolumes denied by the existing test identity",
+  "billing_note": "Credits can lag usage; no actual charge inferred from the unchanged balance."
+}
