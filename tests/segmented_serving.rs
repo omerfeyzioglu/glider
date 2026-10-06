@@ -399,6 +399,128 @@ fn index_reservation_keeps_versions_displaced_by_a_staged_seal() {
     assert!(engine.database().get(3).unwrap().is_some());
 }
 
+/// Keep a successor queued at every write boundary, so idle maintenance
+/// cannot make the conservative tail reservations fit by accident.
+#[test]
+fn sustained_write_queue_releases_index_reservations_without_idle_time() {
+    use glider::retry::{Lookup, Outcome, Revision};
+    struct Gated {
+        inner: SegmentedServing<LocalStore>,
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    }
+    impl Engine for Gated {
+        fn close(self) -> glider::Result<()> {
+            self.inner.close()
+        }
+        fn idle_step(&mut self) -> glider::Result<bool> {
+            self.inner.idle_step()
+        }
+        fn config(&self) -> Config {
+            self.inner.config()
+        }
+        fn sequence(&self) -> u64 {
+            self.inner.sequence()
+        }
+        fn recovery_required(&self) -> bool {
+            self.inner.recovery_required()
+        }
+        fn maintenance_time(&self) -> Duration {
+            self.inner.maintenance_time()
+        }
+        fn apply_request(&mut self, request: Request) -> glider::Result<Outcome> {
+            self.entered.send(()).unwrap();
+            self.release.recv_timeout(Duration::from_secs(10)).unwrap();
+            self.inner.apply_request(request)
+        }
+        fn revision(&self, id: u64) -> Revision {
+            self.inner.revision(id)
+        }
+        fn request_id(&self) -> glider::Result<RequestId> {
+            self.inner.request_id()
+        }
+        fn lookup_request(&self, id: RequestId) -> glider::Result<Lookup> {
+            self.inner.lookup_request(id)
+        }
+        fn get(&self, id: u64) -> glider::Result<Option<glider::streaming::OwnedDocument>> {
+            self.inner.get(id)
+        }
+        fn query(
+            &mut self,
+            query: &[f32],
+            k: usize,
+            filter: &[(&str, &str)],
+        ) -> glider::Result<Vec<glider::Neighbor>> {
+            self.inner.query(query, k, filter)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut limits = serving(&temp.path().join("cache"));
+    limits.cache = None;
+    limits.max_index_bytes = 4096;
+    limits.seal_tail_objects = 32;
+    let mut engine = SegmentedServing::open(
+        LocalStore::open(temp.path()).unwrap(),
+        config(),
+        SegmentedOptions::default(),
+        limits,
+    )
+    .unwrap();
+    let request = |nonce: u8, ids: Vec<u64>| Request {
+        id: RequestId {
+            boundary: 1,
+            nonce: [nonce; 16],
+        },
+        conditions: vec![],
+        mutations: ids
+            .into_iter()
+            .map(|id| Mutation::Put {
+                id,
+                vector: vector(id, 0),
+                metadata: BTreeMap::new(),
+            })
+            .collect(),
+    };
+    engine.apply_request(request(1, vec![1, 2])).unwrap();
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let service = Service::start(
+        Gated {
+            inner: engine,
+            entered: entered_tx,
+            release: release_rx,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let client = service.client();
+    let mut ticket = client.write(request(2, vec![3])).unwrap();
+    let mut accepted = false;
+    for nonce in 3..=18 {
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let next = client.write(request(nonce, vec![3])).unwrap();
+        release_tx.send(()).unwrap();
+        match ticket.wait() {
+            Ok(_) => accepted = true,
+            Err(glider::admission::Error::Database(glider::Error::CapacityExceeded(_))) => {}
+            result => panic!("unexpected pressure result: {result:?}"),
+        }
+        ticket = next;
+    }
+    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    release_tx.send(()).unwrap();
+    accepted |= ticket.wait().is_ok();
+    service.shutdown(Shutdown::Drain).unwrap();
+    assert!(
+        accepted,
+        "queued writes permanently starved capacity recovery"
+    );
+    let db = SegmentedDatabase::open(LocalStore::open(temp.path()).unwrap(), config()).unwrap();
+    for id in 1..=3 {
+        assert!(db.get(id).unwrap().is_some());
+    }
+}
+
 #[test]
 fn service_interleaves_maintenance_and_backup_restores_the_committed_view() {
     let temp = tempfile::tempdir().unwrap();

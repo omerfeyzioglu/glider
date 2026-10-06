@@ -421,7 +421,6 @@ impl<S: ObjectStore> SegmentedServing<S> {
         {
             self.last_unit = "seal_plan";
             db.start_seal()?;
-            self.index_pressure = false;
             counters.seal_starts += 1;
             return Ok(true);
         }
@@ -511,6 +510,18 @@ impl<S: ObjectStore> SegmentedServing<S> {
     /// At the hard log-tail bound, finish any staged maintenance and a seal
     /// synchronously before publishing; that time is command maintenance.
     fn make_room(&mut self) -> Result<()> {
+        // Rejected puts do not grow the tail, so the hard tail bound cannot
+        // rescue a saturated queue. Advance one bounded pressure unit before
+        // each write group until its seal publishes and credits packing.
+        if self.index_pressure && !self.db.poisoned {
+            if !self.db.tail.is_empty() || self.db.seal.is_some() {
+                self.maintenance_step()?;
+            }
+            if self.db.seal.is_none() && (self.db.tail.is_empty() || self.last_unit == "seal_step")
+            {
+                self.index_pressure = false;
+            }
+        }
         if self.db.tail_objects < super::MAX_TAIL_OBJECTS || self.db.poisoned {
             return Ok(());
         }
