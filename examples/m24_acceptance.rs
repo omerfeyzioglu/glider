@@ -1313,19 +1313,27 @@ mod tests {
             vector: vec![1.; DIMENSIONS],
             metadata: BTreeMap::new(),
         };
+        let boundary = engine.sequence();
+        let logs_before = view
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|key| key.starts_with("sglog-"))
+            .count();
         let results = engine.apply_requests(vec![
-            request(0, [1; 16], vec![put(1)]),
-            request(0, [2; 16], vec![put(2)]),
+            request(boundary, [1; 16], vec![put(1)]),
+            request(boundary, [2; 16], vec![put(2)]),
         ]);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].as_ref().unwrap().sequence, 1);
-        assert_eq!(results[1].as_ref().unwrap().sequence, 2);
+        assert_eq!(results[0].as_ref().unwrap().sequence, boundary + 1);
+        assert_eq!(results[1].as_ref().unwrap().sequence, boundary + 2);
         assert_eq!(
             view.list()
                 .unwrap()
                 .iter()
                 .filter(|key| key.starts_with("sglog-"))
-                .count(),
+                .count()
+                - logs_before,
             1
         );
         assert_eq!(engine.profile.lock().unwrap()["write"].0, 2);
