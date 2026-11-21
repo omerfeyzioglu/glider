@@ -32,7 +32,7 @@ getrandom = "0.2"
 zstd = { version = "0.13", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "original-uri"], optional = true }
 
-fastembed = { version = "=5.13.3", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
+fastembed = { version = "=5.17.4", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"], optional = true }
 
 [dev-dependencies]
